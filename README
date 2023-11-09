@@ -1,0 +1,9 @@
+#The code has been tested in serial and with GPU execution
+#with and without MPI.
+#I haven't check for OpenMP
+# Serial 
+cmake -B build
+# GPU:
+cmake -B build -D Kokkos_ENABLE_CUDA=ON
+# GPU: A100
+cmake -B build -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_AMPERE80=ON
