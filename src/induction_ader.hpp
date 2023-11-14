@@ -67,14 +67,16 @@ struct Induction_ader{
         double* x,
         double* w,
         double* x_sp,
-        double* x_fp
+        double* x_fp,
+        double _nu
     ){
-        //B,VxB
-        nvar = 2*(DIM);
+        //E3,B1,B2,v1,v2,VxB3,B1,B2
+        nvar = 1 + 2 + 2 + 1 + 2;
         n_output = 0;
         n_ader = p+1;
         t=0;
         p=p;
+        nu = _nu;
         Kokkos::resize(xt,p+1);
         Kokkos::resize(wt,p+1);
         gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
@@ -159,7 +161,6 @@ struct Induction_ader{
         BC_Ex_ep_z.init(Z_dim,_BCz_,n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_fp,X_dim.n_sp);
         BC_Ey_ep_z.init(Z_dim,_BCz_,n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
 
-        nu = 0.002;
         dt = Induction_compute_dt(
             B2_cv,
             X_dim.h,
@@ -169,11 +170,12 @@ struct Induction_ader{
             Y_dim.sd_centers,
             Z_dim.sd_centers
             );
-        Dt = 0.5*CFL*(X_dim.h*X_dim.h/nu)/(DIM)/(DIM)/(p+1)/(p+1);
-        
+        if(nu>0.0)
+            Dt = 0.5*CFL*(X_dim.h*X_dim.h/nu)/(DIM)/(DIM)/(p+1)/(p+1);
+        else Dt=1E6;
         if(Master)
             cout<<"dx = "<<X_dim.h<<" dt_nu = "<<Dt<<" dt_v = "<<dt<<endl;
-        Dt = min(dt,Dt)/4;
+        Dt = min(dt,Dt);
         cout<<Dt<<endl;
         Write_outputs();
     }
@@ -207,7 +209,7 @@ struct Induction_ader{
                 Ohmic_Diffusion(X_dim.h,Y_dim.h,Z_dim.h);
                 Boundaries(comm);
                 //Solve the Riemann problem for (VxB)^f
-                Riemann_Solver();
+                Ohmic_Riemann_Solver();
 
             if(ader<n_ader-1)
                 Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
@@ -292,6 +294,19 @@ struct Induction_ader{
         ////// Z-direction
         E_riemann_solver(Ex_ader_ep_yz,_z_,4);//Ex = vyBz - vzBy: vz=v2
         E_riemann_solver(Ey_ader_ep_zx,_z_,3);//Ey = vzBx - vxBz: vz=v1
+    }
+
+        void Ohmic_Riemann_Solver(){
+        //E3,B1,B2,v1,v2: E3 = v1B2 - v2B1
+        // X-direction
+        E_Ohmic_riemann_solver(Ey_ader_ep_zx,_x_,4);//Ey = vzBx - vxBz: vx=v2
+        E_Ohmic_riemann_solver(Ez_ader_ep_xy,_x_,3);//Ez = vxBy - vyBx: vx=v1
+        //// Y-direction
+        E_Ohmic_riemann_solver(Ez_ader_ep_xy,_y_,4);//Ez = vxBy - vyBx: vy=v2
+        E_Ohmic_riemann_solver(Ex_ader_ep_yz,_y_,3);//Ex = vyBz - vzBy: vy=v1
+        ////// Z-direction
+        E_Ohmic_riemann_solver(Ex_ader_ep_yz,_z_,4);//Ex = vyBz - vzBy: vz=v2
+        E_Ohmic_riemann_solver(Ey_ader_ep_zx,_z_,3);//Ey = vzBx - vxBz: vz=v1
     }
 
     void Ohmic_Diffusion(double dx, double dy, double dz){

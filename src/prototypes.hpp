@@ -55,6 +55,7 @@ extern double Induction_compute_dt(SD_Solution, double, double, double, Matrix, 
 //Riemann Solvers
 extern void sd_riemann_solver(SD_Solution, SD_Solution, int, int, int, int);
 extern void E_riemann_solver(SD_Solution, int, int);
+extern void E_Ohmic_riemann_solver(SD_Solution, int, int);
 
 //Boundary Conditions
 extern void boundaries(CommHelper, Boundaries, SD_Solution);

@@ -17,8 +17,8 @@ int main(int argc, char** argv){
         cpu_rank = comm.me;
         Master = cpu_rank==0;
 
-        size_t p  = 1;     //Order of space approximation
-        size_t N  = 32;
+        size_t p  = 1;   //Order of space approximation
+        size_t N  = 64;
         size_t NX = N;   //Number of elements in X-direction
         size_t NY = N;   //Number of elements in Y-direction
         size_t NZ = N;   //Number of elements in Z-direction
@@ -40,16 +40,16 @@ int main(int argc, char** argv){
         flux_points(x_fp,x,p);
         solution_points(x_sp,p);
 
-        double L=1.0;//2*PI/0.39;
-        //cout<<_x_<<_y_<<_z_<<endl;
+        double L=LENGHT;
+        cout<<_x_<<_y_<<_z_<<" "<<L<<endl;
         dimension X_dim(_x_,NX,Nx,X*p,comm.x*Nx,L,x_fp,X);
         dimension Y_dim(_y_,NY,Ny,Y*p,comm.y*Ny,L,x_fp,Y);
         dimension Z_dim(_z_,NZ,Nz,Z*p,comm.z*Nz,L,x_fp,Z);
         Kokkos::Timer timer;
         
         #ifdef INDUCTION
-        Induction_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);
-        system.time_evolution(comm,1,.1,X_dim,Y_dim,Z_dim);
+        Induction_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,0.0025);
+        system.time_evolution(comm,20*PI,2*PI,X_dim,Y_dim,Z_dim);
         #endif
         #ifdef HYDRO
         Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);

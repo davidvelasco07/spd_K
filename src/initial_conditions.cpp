@@ -26,6 +26,10 @@ double sine_wave(int var, double x, double y){
         return 1;
 }
 
+////////////////
+// INDUCTION
+////////////////
+
 KOKKOS_INLINE_FUNCTION
 double magnetic_loop(int var, double x, double y, double z){
     x = x-0.5;
@@ -33,6 +37,23 @@ double magnetic_loop(int var, double x, double y, double z){
     double r = sqrt(x*x + y*y);
     double A0 = 0.001;
     double R = 0.3;
+    if(var==2){
+       if(r<=R)
+            return A0*(R-r);
+        else
+            return 0;
+    }
+    else
+        return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double rotating_loop(int var, double x, double y, double z){
+    x = x-0.75;
+    y = y-0.5;
+    double r = sqrt(x*x + y*y);
+    double A0 = 0.001;
+    double R = 0.1;
     if(var==2){
        if(r<=R)
             return A0*(R-r);
@@ -97,23 +118,29 @@ double gaussian(int var, double x, double y, double z){
 
 KOKKOS_INLINE_FUNCTION
 double ponomarenko(int var, double x, double y, double z){
-    //double r2=0.1;
-    //x = x-0.5;
-    //y = y-0.5;
-    //double r = sqrt(x*x+y*y);
-    //double theta = atan2(x,y);
-    //double P = (r-r2)*(r-r2);
-    //double Pp = 2*(r-r2);
-    //if(var==2)
-    //    return  P*cos(theta);
-    //else if(var==1)
-    //    return  -(P+r*Pp)*sin(theta);
-    //else if(var==0)
-    //    return  P*cos(theta);
-    //else
-    //    return 0;
-    if(var==0)
-        return  y*1E-3;
+    double L = LENGHT;
+    double k = 2*PI/L;
+    double r2=10.;
+    x = x-0.5*L;
+    y = y-0.5*L;
+    double r = sqrt(x*x+y*y);
+    double theta = atan2(y,x);
+    double P = r*(2-r);
+    //Bx = dyAz - dzAy = P*cos(theta)
+    //By = dzAx - dxAz =-(P+r*Pp)*sin(theta)
+    //Bz = dxAy - dyAx = P*cos(theta)
+    //return 1e-3;
+    double m=1;
+    double Ar = max(P,0.0)*cos(m*theta)*sin(z*k);
+    if(var==2){//Az
+        return 0;
+    }
+    else if(var==1){//Ay
+        return Ar*sin(theta);
+    }
+    else if(var==0){//Ax
+        return Ar*cos(theta);
+    }
     else
         return 0;
 }
@@ -138,7 +165,7 @@ void Initialize_ep(
         z = Zs(k,kk);
         y = Ys(j,jj);
         x = Xs(i,ii);
-        A.Vector(0,0,k,j,i,kk,jj,ii) = gaussian(dim,x,y,z);
+        A.Vector(0,0,k,j,i,kk,jj,ii) = ponomarenko(dim,x,y,z);
     );
 }
 

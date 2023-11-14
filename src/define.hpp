@@ -9,6 +9,7 @@
 #define CFL 0.8
 #define min_c2 1E-14
 #define gmma 1.4
+#define LENGHT 2*PI/0.39
 
 //#define SD
 #define NGH 1
@@ -32,8 +33,8 @@
 
 enum {_periodic_, _gradfree_};
 
-#define _BCx_ _periodic_
-#define _BCy_ _periodic_
+#define _BCx_ _gradfree_
+#define _BCy_ _gradfree_
 #define _BCz_ _periodic_
 
 #if DIM>=2
@@ -62,7 +63,7 @@ enum {_periodic_, _gradfree_};
 
 #ifdef KOKKOS_ENABLE_CUDA
 #define MemSpace Kokkos::CudaUVMSpace
-#define Layout Kokkos::LayoutRight
+#define Layout Kokkos::LayoutLeft
 #else
 #define MemSpace Kokkos::HostSpace
 #define Layout Kokkos::LayoutRight
