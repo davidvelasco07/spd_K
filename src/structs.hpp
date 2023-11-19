@@ -22,11 +22,14 @@ class dimension{
         int N=1;  //number of active elements
         int p=0;  //degree of spatial approximation
         int N_total=1; //total number of elements
-        int n_cells=1; //number of cells
-        int n_faces=1; //number of faces
+        int n_cells=1; //total number of cells
+        int n_faces=1; //total number of faces
         int n_sp=1; //number of solution points
         int n_fp=1; //number of flux points
         int dim; //dimension index (x=0, y=1 or z=2)
+        int fv_cells=1;
+        int idL;
+        int idR;
         double L=1.0; //Box lenght
         double h=1.0; //element size
         Matrix sd_faces;
@@ -41,26 +44,30 @@ class dimension{
             h = L/N_global;
             N = N_elements;
             if(active){
-                N_total = (N+2*NGH);
-                n_cells = N_total*(p+1);
-                n_faces = n_cells+1;
                 n_sp = p+1;
                 n_fp = p+2;
+                N_total = (N+2*NGH);
+                n_cells = N_total*n_sp;
+                n_faces = n_cells+1;
+                fv_cells = N*n_sp+2*nGH;
+                idL = n_sp-nGH;
+                idR = fv_cells+idL;
             }
             Kokkos::resize(sd_faces, N_total,n_fp);
             Kokkos::resize(sd_centers, N_total,n_sp);
-            Kokkos::resize(fv_faces, n_faces);
-            Kokkos::resize(fv_centers, n_cells);
+            Kokkos::resize(fv_faces, fv_cells+1);
+            Kokkos::resize(fv_centers, fv_cells);
 
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){
                     sd_faces(j,i)= (start+j-NGH + x_fp[i])*h;
-                    if(i<n_sp)
-                        fv_faces(i+j*n_sp) = sd_faces(j,i);
+                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
+                        fv_faces(i-idL+j*n_sp) = sd_faces(j,i);
                 }
                 for(int i=0;i<n_sp;i++){
                     sd_centers(j,i)= 0.5*(sd_faces(j,i+1)+sd_faces(j,i));
-                    fv_centers(i+j*n_sp) = sd_centers(j,i);
+                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
+                        fv_centers(i-idL+j*n_sp) = sd_centers(j,i);
                 }
             }
         }	

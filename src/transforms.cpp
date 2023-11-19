@@ -1,6 +1,27 @@
 #include "spd_k.hpp"
 
-#define eta 0.0001
+KOKKOS_INLINE_FUNCTION
+void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim){
+    //Returns the indeces according to the dimension
+    N_id[_x_] = dim == _x_ ? l  : i;
+    n_id[_x_] = dim == _x_ ? ll : ii;
+    N_id[_y_] = dim == _y_ ? l  : j;
+    n_id[_y_] = dim == _y_ ? ll : jj;
+    N_id[_z_] = dim == _z_ ? l  : k;
+    n_id[_z_] = dim == _z_ ? ll : kk;
+}
+
+KOKKOS_INLINE_FUNCTION
+int indices_n(int* n_id, int k, int j, int i, int l, int dim){
+    //Returns the indeces according to the dimension
+    n_id[_x_] = dim == _x_ ? l  : i;
+    n_id[_y_] = dim == _y_ ? l  : j;
+    n_id[_z_] = dim == _z_ ? l  : k;
+    return (dim==_x_ ? i : (dim==_y_ ? j : k));
+}
+
+#define INDICES t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
+#define INDICES_n nid[_z_],nid[_y_],nid[_x_]
 
 void transform_a_to_b(
     SD_Solution U_a,
@@ -59,20 +80,18 @@ void transform_a_to_b_1d(
     int px = U_b.nx;
     int py = U_b.ny;
     int pz = U_b.nz;
-    int q = dim==0 ? px : (dim==1 ? py : pz);
+    int q = dim==_x_ ? U_a.nx : (dim==_y_ ? U_a.ny : U_a.nz);
     int nader = U_a.n_ader;
     int nvar = U_a.n_var;
     SD_for_all(
-        double result=0;
+        int nid[3];
+        double u=0;
+        int id = dim==_x_ ? ii : (dim==_y_ ?  jj : kk);
         for(int ll=0; ll<q; ll++){
-            if(dim==2)
-                result += U_a.Vector(t_id,var,k,j,i,ll,jj,ii)*a_to_b(kk,ll);
-            else if(dim==1)
-                result += U_a.Vector(t_id,var,k,j,i,kk,ll,ii)*a_to_b(jj,ll);
-            else if(dim==0)
-                result += U_a.Vector(t_id,var,k,j,i,kk,jj,ll)*a_to_b(ii,ll);
+            indices_n(nid,kk,jj,ii,ll,dim);
+            u += U_a.Vector(t_id,var,k,j,i,INDICES_n)*a_to_b(id,ll);
         }
-        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = result;
+        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
     );
 }
 
@@ -102,7 +121,7 @@ void update_prediction(
     int px = U.nx;
     int py = U.ny;
     int pz = U.nz;
-    int qx = F_x.nx;
+    int q  = F_x.nx;
     int nader = F_x.n_ader;
     int nvar = U.n_var;
     SD_for_variables(
@@ -114,7 +133,7 @@ void update_prediction(
         u_old =  U.Vector(0,var,k,j,i,kk,jj,ii);
         for(t_id =0; t_id<nader; t_id++){
             dudt[t_id] = 0;
-            for(ll=0; ll<qx; ll++){
+            for(ll=0; ll<q; ll++){
                 #if X
                 dudt[t_id] += F_x.Vector(t_id,var,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/dx;
                 #endif
@@ -160,7 +179,7 @@ void update_solution(
     int px = U.nx;
     int py = U.ny;
     int pz = U.nz;
-    int qx = F_x.nx;
+    int q  = F_x.nx;
     int nader = F_x.n_ader;
     int nvar = U.n_var;
     SD_for_variables(
@@ -169,7 +188,7 @@ void update_solution(
         du=0;
         for(int t_id =0; t_id<nader; t_id++){
             dudt = 0;
-            for(int ll=0; ll<qx; ll++){
+            for(int ll=0; ll<q; ll++){
                 #if X
                 dudt += F_x.Vector(t_id,var,k,j,i,kk,jj,ll)*da_to_b(ii,ll)/dx;
                 #endif
@@ -191,60 +210,111 @@ void face_integral(
     FV_Solution F,
     Matrix sp_to_cv,
     int dim){
-
-    int Nx = F_fp.Nx;
-    int Ny = F_fp.Ny;
-    int Nz = F_fp.Nz;
-    int px = F_fp.nx-(dim==0);
-    int py = F_fp.ny-(dim==1);
-    int pz = F_fp.nz-(dim==2);
-    int q1 = dim==0 ? py : (dim==1 ? px : px);
-    int q2 = dim==0 ? pz : (dim==1 ? pz : py);
+    int Nx = F_fp.Nx+(dim==0 ? 1:0);
+    int Ny = F_fp.Ny+(dim==1 ? 1:0);
+    int Nz = F_fp.Nz+(dim==2 ? 1:0);
+    int px = F_fp.nx-(dim==0 ? 1:0);
+    int py = F_fp.ny-(dim==1 ? 1:0);
+    int pz = F_fp.nz-(dim==2 ? 1:0);
+    int q1   = dim==_x_ ?  py : (dim==_y_ ?  pz : px );
+    int q2   = dim==_x_ ?  pz : (dim==_y_ ?  px : py );
+    int dim1 = dim==_x_ ? _y_ : (dim==_y_ ? _z_ : _x_);
+    int dim2 = dim==_x_ ? _z_ : (dim==_y_ ? _x_ : _y_);
     int nader = F_fp.n_ader;
-    int nvar = F_fp.n_var;
-    SD_for_all(
+    int nvar  = F_fp.n_var;
+    int Ni = F.Nx;
+    int Nj = F.Ny;
+    int Nk = F.Nz;
+    //cout<<dim<<dim1<<dim2<<" "<<px<<" "<<py<<" "<<pz<<": "<<q1<<" "<<q2<<endl;
+    SD_for_active_cells_all(
         double s=0;
         double f=0;
+        int nid[3];
+        int id1 = dim==_x_ ? jj : (dim==_y_ ?  kk : ii);
+        int id2 = dim==_x_ ? kk : (dim==_y_ ?  ii : jj);
         for(int nn=0; nn<q2; nn++){
+            indices_n(nid,kk,jj,ii,nn,dim2);
             for(int ll=0; ll<q1; ll++){
-                #if Z
-                if(dim==2){
-                    s = F_fp.Vector(t_id,var,k,j,i,kk,nn,ll);
-                    #if X
-                    s *= sp_to_cv(ii,ll);
-                    #endif
-                    #if Y
-                    s *= sp_to_cv(jj,nn);
-                    #endif
-                    f+=s;
-                }
+                indices_n(nid,INDICES_n,ll,dim1);
+                s = F_fp.Vector(t_id,var,k,j,i,INDICES_n);
+                #ifdef _2D_
+                s *= sp_to_cv(id1,ll);
                 #endif
-                #if Y
-                else if(dim==1){
-                    s = F_fp.Vector(t_id,var,k,j,i,nn,jj,ll);
-                    #if X
-                    s *= sp_to_cv(ii,ll);
-                    #endif
-                    #if Z
-                    s *= sp_to_cv(kk,nn);
-                    #endif
-                    f+=s;
-                }
+                #ifdef _3D_
+                s *= sp_to_cv(id2,nn);
                 #endif
-                #if X
-                else if(dim==0){
-                    s = F_fp.Vector(t_id,var,k,j,i,nn,ll,ii);
-                    #if Y
-                    s *= sp_to_cv(jj,ll);
-                    #endif
-                    #if Z
-                    s *= sp_to_cv(kk,nn);
-                    #endif
-                    f+=s;
-                }
-                #endif
+                f += s;
             }
         }
-        F.Vector(t_id,var,(k+1)*kk,(j+1)*jj,(i+1)*ii) = f;
+        if(K < Nk && J < Nj && I < Ni)
+            F.Vector(t_id,var,K,J,I) = f;
+    );
+}
+
+void fv_update_solution(
+    FV_Solution U_new,
+    FV_Solution U_old,
+    SD_Solution U_cv,
+    #if X
+    FV_Solution F_x,
+    Vector faces_x,
+    #endif
+    #if Y
+    FV_Solution F_y,
+    Vector faces_y,
+    #endif
+    #if Z
+    FV_Solution F_z,
+    Vector faces_z,
+    #endif
+    Vector w,
+    int t_id,
+    double dt,
+    bool update
+){
+    int Nx = U_cv.Nx;
+    int Ny = U_cv.Ny;
+    int Nz = U_cv.Nz;
+    int px = U_cv.nx;
+    int py = U_cv.ny;
+    int pz = U_cv.nz;
+    int nvar = U_cv.n_var;
+    SD_for_active_cells(
+        double h;
+        double F;
+        double u_new;
+        F=0;
+        U_old.Vector(0,var,K,J,I) = U_cv.Vector(0,var,k,j,i,kk,jj,ii);
+        #if X
+        h = faces_x(I+1)-faces_x(I);
+        F += (F_x.Vector(t_id,var,K,J,I+1)-F_x.Vector(t_id,var,K,J,I))/h;
+        #endif
+        #if Y
+        h = faces_y(J+1)-faces_y(J);
+        F += (F_y.Vector(t_id,var,K,J+1,I)-F_y.Vector(t_id,var,K,J,I))/h;
+        #endif
+        #if Z
+        h = faces_z(K+1)-faces_z(K);
+        F += (F_z.Vector(t_id,var,K+1,J,I)-F_z.Vector(t_id,var,K,J,I))/h;
+        #endif
+        u_new = U_old.Vector(0,var,K,J,I) - w(t_id)*dt*F;
+        U_new.Vector(0,var,K,J,I) = u_new;
+        if(update)
+            U_cv.Vector(0,var,k,j,i,kk,jj,ii) = u_new;
+    );
+}
+
+void FV_to_SD(
+    FV_Solution U_fv,
+    SD_Solution U_sd){
+    int Nx = U_sd.Nx;
+    int Ny = U_sd.Ny;
+    int Nz = U_sd.Nz;
+    int px = U_sd.nx;
+    int py = U_sd.ny;
+    int pz = U_sd.nz;
+    int nvar = U_sd.n_var;
+    SD_for_active_cells(
+        U_sd.Vector(0,var,k,j,i,kk,jj,ii) = U_fv.Vector(0,var,K,J,I);
     );
 }

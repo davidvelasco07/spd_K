@@ -44,6 +44,28 @@ extern void compute_conservatives(SD_Solution, SD_Solution);
 extern void compute_primitives(SD_Solution, SD_Solution);
 extern void compute_fluxes(SD_Solution, SD_Solution, int, int, int);
 extern double compute_dt(SD_Solution, double, double, double);
+extern void compute_gradient(SD_Solution, SD_Solution, double, Matrix, int);
+extern void compute_viscous_flux(
+    SD_Solution,
+    SD_Solution,
+    int,
+    #ifdef _2D_
+    SD_Solution,
+    int,
+    #endif
+    #ifdef _3D_
+    SD_Solution,
+    int,
+    #endif
+    Matrix,
+    double,
+    double,
+    int);
+
+
+extern void compute_conservatives(FV_Solution, FV_Solution);
+extern void compute_primitives(FV_Solution, FV_Solution);
+
 
 //Induction
 extern void rotational_a_to_b(SD_Solution, SD_Solution, SD_Solution, Matrix, double, double, int);
@@ -54,16 +76,73 @@ extern double Induction_compute_dt(SD_Solution, double, double, double, Matrix, 
 
 //Riemann Solvers
 extern void sd_riemann_solver(SD_Solution, SD_Solution, int, int, int, int);
+extern void sd_rusanov_solver(SD_Solution, SD_Solution, int dim);
 extern void E_riemann_solver(SD_Solution, int, int);
 extern void E_Ohmic_riemann_solver(SD_Solution, int, int);
 
 //Boundary Conditions
 extern void boundaries(CommHelper, Boundaries, SD_Solution);
-extern void boundaries_x(CommHelper, Boundaries, SD_Solution);
-extern void boundaries_y(CommHelper, Boundaries, SD_Solution);
-extern void boundaries_z(CommHelper, Boundaries, SD_Solution);
+extern void boundaries(CommHelper, FV_Boundaries, FV_Solution);
 
 //Finite Volume
 extern void face_integral(SD_Solution, FV_Solution, Matrix, int);
+extern void fv_update_solution(
+    FV_Solution,
+    FV_Solution,
+    SD_Solution,
+    FV_Solution,
+    Vector,
+    #ifdef _2D_ 
+    FV_Solution,
+    Vector,
+    #endif
+    #ifdef _3D_
+    FV_Solution,
+    Vector, 
+    #endif
+    Vector, 
+    int, 
+    double,
+    bool);
+
+//Trouble detection
+extern void detect_troubles(
+    FV_Solution,
+    FV_Solution,
+    FV_Solution,
+    FV_Solution,
+    #ifdef _2D_
+    FV_Solution,
+    #endif
+    #ifdef _3D_
+    FV_Solution,
+    #endif
+    dimension,
+    dimension,
+    dimension
+    );
+
+void fallback_fluxes(
+    FV_Solution,
+    FV_Solution,
+    Vector,
+    Vector,
+    FV_Solution,
+    #ifdef _2D_
+    Vector,
+    Vector,
+    FV_Solution,
+    #endif
+    #ifdef _3D_
+    Vector,
+    Vector,
+    FV_Solution,
+    #endif
+    int,
+    Vector,
+    double
+    );
 //Output
 extern void Write(SD_Solution, int);
+extern void Write(FV_Solution, int);
+extern void Write_dimensions(dimension, dimension, dimension);

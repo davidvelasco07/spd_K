@@ -40,6 +40,8 @@ add_executable(${PROJECT_NAME}
     src/boundary.cpp
     src/hydro.cpp
     src/induction.cpp
+    src/trouble_detection.cpp
+    src/muscl.cpp
 )
 
 

@@ -296,7 +296,7 @@ struct Induction_ader{
         E_riemann_solver(Ey_ader_ep_zx,_z_,3);//Ey = vzBx - vxBz: vz=v1
     }
 
-        void Ohmic_Riemann_Solver(){
+    void Ohmic_Riemann_Solver(){
         //E3,B1,B2,v1,v2: E3 = v1B2 - v2B1
         // X-direction
         E_Ohmic_riemann_solver(Ey_ader_ep_zx,_x_,4);//Ey = vzBx - vxBz: vx=v2

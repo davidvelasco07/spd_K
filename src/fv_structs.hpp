@@ -47,10 +47,18 @@ class FV_Solution{
     int Nx;
     int Ny;
     int Nz;
+    int n_ader;
     int n_var;
+    int iL;
+    int iR;
+    int jL;
+    int jR;
+    int kL;
+    int kR;
     string label;
     FV_Solution() = default;
     FV_Solution(string name,
+        int nader,
         int nvar,
         dimension Zdim,
         dimension Ydim,
@@ -58,8 +66,9 @@ class FV_Solution{
         bool z,
         bool y,
         bool x
-        ){init(name,nvar,Zdim,Ydim,Xdim,z,y,x);}
+        ){init(name,nader,nvar,Zdim,Ydim,Xdim,z,y,x);}
     void init(string name,
+        int nader,
         int nvar,
         dimension Zdim,
         dimension Ydim,
@@ -68,14 +77,21 @@ class FV_Solution{
         bool y,
         bool x
         ){
+        n_ader=nader;
         n_var=nvar;
-        Nx=Xdim.N_total+x;
-        Ny=Ydim.N_total+y;
-        Nz=Zdim.N_total+z;
+        Nx=Xdim.fv_cells+x;
+        Ny=Ydim.fv_cells+y;
+        Nz=Zdim.fv_cells+z;
+        iL = Xdim.idL;
+        iR = Xdim.idR;
+        jL = Ydim.idL;
+        jR = Ydim.idR;
+        kL = Zdim.idL;
+        kR = Zdim.idR;
 
-        Kokkos::resize(Vector,nvar,Nz,Ny,Nx);
+        Kokkos::resize(Vector,nader,nvar,Nz,Ny,Nx);
         #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(Vector_h,nvar,Nz,Ny,Nx);
+        Kokkos::resize(Vector_h,nader,nvar,Nz,Ny,Nx);
         #endif
         label=name;
     }
@@ -88,6 +104,13 @@ class FV_Solution{
 };
 
 struct FV_Boundaries {
+    int Nx;
+    int Ny;
+    int Nz;
+    int nvar;
+    int type;
+    int N;
+    int dim;
     FV_Vector BoundaryL;
     FV_Vector BoundaryR;
     #ifdef MPI
@@ -101,20 +124,27 @@ struct FV_Boundaries {
     #endif
     #endif
     FV_Boundaries() = default;
-    FV_Boundaries(int nvar, int Nz, int Ny, int Nx) {
-        init(nvar, Nz, Ny, Nx);
+    FV_Boundaries(dimension Dim, int _type, int _nvar, int _Nz, int _Ny, int _Nx) {
+        init(Dim, _type, _nvar, _Nz, _Ny, _Nx);
     }
-    void init(int nvar, int Nz, int Ny, int Nx) {
-        Kokkos::resize(BoundaryL,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryR,nvar,Nz,Ny,Nx);
+    void init(dimension Dim, int _type, int _nvar, int _Nz, int _Ny, int _Nx) {
+        type  = _type;
+        nvar  = _nvar;
+        Nz    = _Nz;
+        Ny    = _Ny;
+        Nx    = _Nx;
+        N     = Dim.fv_cells;
+        dim   = Dim.dim;
+        Kokkos::resize(BoundaryL,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryR,1,nvar,Nz,Ny,Nx);
         #ifdef MPI
-        Kokkos::resize(BufferL,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BufferR,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferL,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferR,1,nvar,Nz,Ny,Nx);
         #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(BufferL_h,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BufferR_h,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryL_h,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryR_h,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferL_h,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferR_h,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryL_h,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryR_h,1,nvar,Nz,Ny,Nx);
         #endif
         #endif
     }

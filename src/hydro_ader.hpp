@@ -9,6 +9,8 @@ struct Hydro_ader{
     double t;
     double dt;
     double Dt;
+    double nu;
+    double beta;
 
     Vector xt;
     Vector wt;
@@ -24,36 +26,49 @@ struct Hydro_ader{
 
     SD_Solution W_sp;
     SD_Solution U_sp;
-    SD_Solution U_cv;
     SD_Solution W_cv;
+    SD_Solution U_cv;
 
     SD_Solution U_ader_sp;
     #if X
     SD_Solution U_ader_fp_x;
     SD_Solution F_ader_fp_x;
+    SD_Solution dUx_sp;
     Boundaries BC_fp_x;
     #endif
     #if Y
     SD_Solution U_ader_fp_y;
     SD_Solution F_ader_fp_y;
+    SD_Solution dUy_sp;
     Boundaries BC_fp_y;
     #endif
     #if Z
     SD_Solution U_ader_fp_z;
     SD_Solution F_ader_fp_z;
+    SD_Solution dUz_sp;
     Boundaries BC_fp_z;
     #endif    
 
     #ifdef FV
-    SD_Solution U_new;
+    FV_Solution U_new;
+    FV_Solution W_new;
+    FV_Solution U_old;
+    FV_Solution W_old;
+    FV_Solution troubles;
     #if X
     FV_Solution F_x;
+    FV_Solution alpha_x;
+    FV_Boundaries BC_x;
     #endif
     #if Y
     FV_Solution F_y;
+    FV_Solution alpha_y;
+    FV_Boundaries BC_y;
     #endif
     #if Z
     FV_Solution F_z;
+    FV_Solution alpha_z;
+    FV_Boundaries BC_z;
     #endif    
     #endif
 
@@ -66,14 +81,17 @@ struct Hydro_ader{
         double* x,
         double* w,
         double* x_sp,
-        double* x_fp
+        double* x_fp,
+        double _nu,
+        double _beta
     ){
-        //Number of variables, tipically (rho,vx,vy,vz,e,Vrho)
-        nvar = 3 + DIM;
+        //Number of variables, tipically (rho,vx,vy,vz,e)
+        nvar = NVAR;
         n_output = 0;
         n_ader = p+1;
         t=0;
-        p=p;
+        nu = _nu;
+        beta = _beta;
         Kokkos::resize(xt,p+1);
         Kokkos::resize(wt,p+1);
         gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
@@ -102,23 +120,48 @@ struct Hydro_ader{
         W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         U_sp.init("U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         W_cv.init("W_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        U_cv.init("U_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
         U_ader_sp.init("U_ader_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
    
         #if X
         U_ader_fp_x.init("U_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,1);
         F_ader_fp_x.init("F_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,1);
+        dUx_sp.init("dUx_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_x.init(X_dim,_BCx_,n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
         #endif
         #if Y
         U_ader_fp_y.init("U_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,1,0);
-        F_ader_fp_y.init("U_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        F_ader_fp_y.init("F_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        dUy_sp.init("dUy_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_y.init(Y_dim,_BCy_,n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
         #endif
         #if Z
         U_ader_fp_z.init("U_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,1,0,0);
-        F_ader_fp_z.init("U_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        F_ader_fp_z.init("F_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        dUz_sp.init("dUz_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_z.init(Z_dim,_BCz_,n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
+        #endif
+
+        #ifdef FV
+        U_new.init("U_new",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        W_new.init("W_new",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        U_old.init("U_old",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        W_old.init("W_old",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        troubles.init("troubles",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        #if X
+        F_x.init("F_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,1);
+        alpha_x.init("alpha_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_x.init(X_dim,_BCx_,nvar,Z_dim.fv_cells,Y_dim.fv_cells,nGHx);
+        #endif
+        #if Y
+        F_y.init("F_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        alpha_y.init("alpha_y",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_y.init(Y_dim,_BCy_,nvar,Z_dim.fv_cells,nGHy,X_dim.fv_cells);
+        #endif
+        F_z.init("F_z",n_ader,nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        alpha_z.init("alpha_z",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_z.init(Z_dim,_BCz_,nvar,nGHz,Y_dim.fv_cells,X_dim.fv_cells);
         #endif
 
         ////////////////////////
@@ -151,43 +194,42 @@ struct Hydro_ader{
             
             //Picard iteration
             for(int ader=0;ader<n_ader;ader++){ 
+                Interpolate_to_fp();
                 Compute_Fluxes();
-                
                 Boundaries(comm);
-
                 Riemann_Solver();
 
-            if(ader<n_ader-1){
-                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
+                #ifdef VISCOSITY
+                Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
+                Boundaries(comm);
+                Rusanov_Solver();
+                #endif
+
+                if(ader<n_ader-1)
+                    Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
+            }
+            #ifdef FV
+            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+            #else
+            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+            #endif
+            compute_primitives(U_sp,W_sp);
+            transform_sp_to_cv(W_sp,W_cv);
+            t+=dt;
+            n_step++;
+            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
+        
+            //Outputs
+            if(Master) cout<<".";
+            if(t>=t_output){
+                t_output=t+dt_output;
+                Write_outputs();
+            }
+            if(t+dt>t_output){
+                dt=t_output-t;
             }
         }
-        #ifdef FV
-        Integrate_fluxes();
-        transform_sp_to_cv(U_sp,U_cv);
-        for(int ader=0;ader<n_ader;ader++)
-            fv_update_solution(X_dim.sd_faces,Y_dim.sd_faces,Z_dim.sd_faces,ader);
-        transform_cv_to_sp(U_cv,U_sp);
-        #else
-        Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-        #endif
-        compute_primitives(U_sp,W_sp);
-        transform_sp_to_cv(W_sp,W_cv);
-        t+=dt;
-        n_step++;
-        dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
-        //Outputs
-        if(Master){
-            cout<<".";
-        }
-        if(t>=t_output){
-            t_output=t+dt_output;
-            Write_outputs();
-        }
-        if(t+dt>t_output){
-            dt=t_output-t;
-        }
-    }
-    cout<<endl;
+        cout<<endl;
     }
 
     void transform_cv_to_sp(SD_Solution U_cv, SD_Solution U_sp){
@@ -236,13 +278,43 @@ struct Hydro_ader{
     void Compute_Fluxes(){
         //Compute fluxes
         #if X
-        compute_fluxes(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_);
+        compute_fluxes(
+            U_ader_fp_x,
+            F_ader_fp_x,
+            _vx_
+            #if Y
+            ,_vy_
+            #endif
+            #if Z
+            ,_vz_
+            #endif
+            );
         #endif
         #if Y
-        compute_fluxes(U_ader_fp_y,F_ader_fp_y,_vy_,_vx_,_vz_);
+        compute_fluxes(
+            U_ader_fp_y,
+            F_ader_fp_y,
+            _vy_
+            #if Z
+            ,_vz_
+            #endif
+            #if X
+            ,_vx_
+            #endif
+            );
         #endif
         #if Z
-        compute_fluxes(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_);
+        compute_fluxes(
+            U_ader_fp_z,
+            F_ader_fp_z,
+            _vz_
+            #if X
+            ,_vx_
+            #endif
+            #if Y
+            ,_vy_
+            #endif
+            );
         #endif
     }
     
@@ -262,13 +334,121 @@ struct Hydro_ader{
 
     void Riemann_Solver(){
         #if X
-        sd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_,0);
+        sd_riemann_solver(
+            U_ader_fp_x,
+            F_ader_fp_x,
+            _vx_
+            #if Y
+            ,_vy_
+            #endif
+            #if Z
+            ,_vz_
+            #endif
+            ,_x_);
         #endif
         #if Y
-        sd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_vy_,_vx_,_vz_,1);
+        sd_riemann_solver(
+            U_ader_fp_y,
+            F_ader_fp_y,
+            _vy_
+            #if Z
+            ,_vz_
+            #endif
+            #if X
+            ,_vx_
+            #endif
+            ,_y_);
         #endif
         #if Z
-        sd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_,2);
+        sd_riemann_solver(
+            U_ader_fp_z,
+            F_ader_fp_z,
+            _vz_
+            #if X
+            ,_vx_
+            #endif
+            #if Y
+            ,_vy_
+            #endif
+            ,_z_);
+        #endif
+    }
+
+    void Viscosity(double dx, double dy, double dz){
+        #if X
+        compute_gradient(U_ader_fp_x, dUx_sp, dx, dfp_to_sp, _x_);
+        #endif
+        #if Y
+        compute_gradient(U_ader_fp_y, dUy_sp, dy, dfp_to_sp, _y_);
+        #endif
+        #if Z
+        compute_gradient(U_ader_fp_z, dUz_sp, dz, dfp_to_sp, _z_);
+        #endif
+        #if X
+        compute_viscous_flux(
+            U_ader_fp_x,
+            dUx_sp,
+            _vx_,
+            #if Y
+            dUy_sp,
+            _vy_,
+            #endif
+            #if Z
+            dUz_sp,
+            _vz_,
+            #endif
+            sp_to_fp,
+            nu,
+            beta,
+            _x_);
+        #endif
+        #if Y
+        compute_viscous_flux(
+            U_ader_fp_y,
+            dUy_sp,
+            _vy_,
+            #if Z
+            dUz_sp,
+            _vz_,
+            #endif
+            #if X
+            dUx_sp,
+            _vx_,
+            #endif
+            sp_to_fp,
+            nu,
+            beta,
+            _y_);
+        #endif
+        #if Z
+        compute_viscous_flux(
+            U_ader_fp_z,
+            dUz_sp,
+            _vz_,
+            #if X
+            dUx_sp,
+            _vx_,
+            #endif
+            #if Y
+            dUy_sp,
+            _vy_,
+            #endif
+            sp_to_fp,
+            nu,
+            beta,
+            _y_);
+        #endif
+    }
+
+    void Rusanov_Solver(){
+        #if X
+        sd_rusanov_solver(U_ader_fp_x,F_ader_fp_x,_x_);
+        #endif
+        #if Y
+        sd_rusanov_solver(U_ader_fp_y,F_ader_fp_y,_y_);
+        #endif
+        #if Z
+        sd_rusanov_solver(U_ader_fp_z,F_ader_fp_z,_z_);
         #endif
     }
 
@@ -319,6 +499,10 @@ struct Hydro_ader{
     void Write_outputs(){
         if(Master)
             cout<<endl<<"OUTPUT "<<n_output<<endl;
+        #ifdef FV
+        Write(troubles,n_output);
+        #endif
+        Write(F_ader_fp_x,n_output);
         Write(W_cv,n_output++);
     }
 
@@ -340,44 +524,117 @@ struct Hydro_ader{
     #ifdef FV
     void Integrate_fluxes(){
         #if X
-        face_integral(F_ader_fp_x, F_x, sp_to_cv, 0);
+        face_integral(F_ader_fp_x, F_x, sp_to_cv, _x_);
         #endif
         #if Y
-        face_integral(F_ader_fp_y, F_y, sp_to_cv, 1);
+        face_integral(F_ader_fp_y, F_y, sp_to_cv, _y_);
         #endif
         #if Z
-        face_integral(F_ader_fp_z, F_z, sp_to_cv, 2);
+        face_integral(F_ader_fp_z, F_z, sp_to_cv, _z_);
         #endif
     }
 
-    void fv_update_solution(
+    void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
+        Integrate_fluxes();
+        transform_sp_to_cv(U_sp,U_cv);
+        for(int ader=0;ader<n_ader;ader++){
+            fv_update_solution(
+                U_new,
+                U_old,
+                U_cv,
+                #if X
+                F_x,
+                X_dim.fv_faces,
+                #endif
+                #if Y
+                F_y,
+                Y_dim.fv_faces,
+                #endif
+                #if Z
+                F_z,
+                Z_dim.fv_faces,
+                #endif
+                wt,
+                ader,
+                dt,
+                0);
+            FV_Boundaries(comm,U_old);
+            FV_Boundaries(comm,U_new);
+            compute_primitives(U_new,W_new);
+            compute_primitives(U_old,W_old);
+            detect_troubles(
+                W_new,
+                W_old,
+                troubles,
+                #if X
+                alpha_x,
+                #endif
+                #if Y
+                alpha_y,
+                #endif
+                #if Z
+                alpha_z,
+                #endif
+                X_dim,
+                Y_dim,
+                Z_dim
+                );
+            fallback_fluxes(
+                W_old,
+                troubles,
+                X_dim.fv_centers,
+                X_dim.fv_faces,
+                F_x,
+                #if Y
+                Y_dim.fv_centers,
+                Y_dim.fv_faces,
+                F_y,
+                #endif
+                #if Z
+                Z_dim.fv_centers,
+                Z_dim.fv_faces,
+                F_z,
+                #endif
+                ader,
+                wt,
+                dt);
+            fv_update_solution(
+                U_new,
+                U_old,
+                U_cv,
+                #if X
+                F_x,
+                X_dim.fv_faces,
+                #endif
+                #if Y
+                F_y,
+                Y_dim.fv_faces,
+                #endif
+                #if Z
+                F_z,
+                Z_dim.fv_faces,
+                #endif
+                wt,
+                ader,
+                dt,
+                1);
+        }
+        transform_cv_to_sp(U_cv,U_sp);
+    }
+
+    void FV_Boundaries(CommHelper comm, FV_Solution U){
+        //Communications are done sequentially in different directions
+        //to ensure that corners zare properly communicated
         #if X
-        Matrix faces_x,
+        boundaries(comm,BC_x,U);
         #endif
         #if Y
-        Matrix faces_y,
+        boundaries(comm,BC_y,U);
         #endif
         #if Z
-        Matrix faces_z,
+        boundaries(comm,BC_z,U);
         #endif
-        int t_id
-    ){
-        //FV_for_active_cells(
-        //    double h;
-        //    #ifdef X
-        //    h  = faces_x(i+1)-faces_x(i);
-        //    F += (F_x.Vector(t_id,var,k,j,i+1)-F_x.Vector(t_id,var,k,j,i))/h;
-        //    #endif
-        //    #ifdef Y
-        //    h  = faces_y(j+1)-faces_y(j);
-        //    F += (F_y.Vector(t_id,var,k,j+1,i)-F_y.Vector(t_id,var,k,j,i))/h;
-        //    #endif
-        //    #ifdef Z
-        //    h  = faces_z(k+1)-faces_z(k);
-        //    F += (F_z.Vector(t_id,var,k+1,j,i)-F_z.Vector(t_id,var,k,j,i))/h;
-        //    #endif
-        //    U_new.Vector(var,k,j,i) = U_cv.Vector(var,k,j,i) - wt(t_id)*dt*F;
-        //);
     }
+
     #endif
 };

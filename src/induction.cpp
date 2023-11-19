@@ -529,7 +529,6 @@ void E_Ohmic_riemann_solver(
     int pz = dim==2 ? 1:E.nz; 
     int n = dim==0 ? E.nx:(dim==1 ? E.ny:E.nz);
     int nader = E.n_ader;
-    int nvar = E.n_var;
     SD_for_cells(
         double e_L;
         double e_R;
