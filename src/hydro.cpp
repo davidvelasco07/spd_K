@@ -1,10 +1,5 @@
 #include "spd_k.hpp"
 
-#define NODE nid[_z_],nid[_y_],nid[_x_]
-#define INDICES   t_id,var,Nid[_z_],Nid[_y_] ,Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
-#define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
-#define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
-
 KOKKOS_INLINE_FUNCTION
 int choose(int dim, int i, int j, int k){
     return (dim==_x_ ? i : (dim==_y_ ?  j : k));
@@ -409,7 +404,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
         int nidL[3];
         int NidR[3];
         int nidR[3];
-        choose(dim,i,j,k);
+        int l = choose(dim,i,j,k);
         indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
         indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
         for(int t_id=0; t_id<nader; t_id++){

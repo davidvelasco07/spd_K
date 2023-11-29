@@ -1,8 +1,5 @@
 #include "spd_k.hpp"
 
-#define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
-#define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
-
 KOKKOS_INLINE_FUNCTION
 int choose(int dim, int i, int j, int k){
     return (dim==_x_ ? i : (dim==_y_ ?  j : k));
@@ -17,6 +14,15 @@ void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, 
     n_id[_y_] = (dim == _y_ ? ll : jj);
     N_id[_z_] = (dim == _z_ ? l  : k );
     n_id[_z_] = (dim == _z_ ? ll : kk);
+}
+
+KOKKOS_INLINE_FUNCTION
+int indices_n(int* n_id, int k, int j, int i, int l, int dim){
+    //Returns the indeces according to the dimension
+    n_id[_x_] = dim == _x_ ? l  : i;
+    n_id[_y_] = dim == _y_ ? l  : j;
+    n_id[_z_] = dim == _z_ ? l  : k;
+    return choose(dim,i,j,k);
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -546,6 +552,59 @@ void E_Ohmic_riemann_solver(
 //////////////
 /// FV
 //////////////
+
+void edge_integral(
+    SD_Solution E_ep,
+    FV_Solution E,
+    Matrix sp_to_cv,
+    int t_id,
+    int dim){
+    //Electric field is located at faces
+    // in their respective perpendicular
+    // dimension. We need then to include 
+    // the right ghost element in order
+    // to include the last active faces in
+    // those dimensions.
+    int Nx = E_ep.Nx+(dim==_x_ ? 0:1);
+    int Ny = E_ep.Ny+(dim==_y_ ? 0:1);
+    int Nz = E_ep.Nz+(dim==_z_ ? 0:1);
+    // For those perpendicular dimensions
+    // we skip the last faces of each element,
+    // which are identical at this point to
+    // the first faces of the adjacent element
+    int px = E_ep.nx-(dim==_x_ ? 0:1);
+    int py = E_ep.ny-(dim==_y_ ? 0:1);
+    int pz = E_ep.nz-(dim==_z_ ? 0:1);
+    //Needed to compute K,J,I
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int q  = choose(dim, px, py, pz);
+    int Ni = E.Nx;
+    int Nj = E.Ny;
+    int Nk = E.Nz;
+    //cout<<dim<<" "<<Nx<<" "<<Ny<<" "<<Nz<<" "<<px<<py<<pz<<endl;
+    SD_for_active_cells(
+        double s;
+        double e=0;
+        int nid[3];
+        int id = choose(dim, ii, jj, kk);
+        //Loop over solution points along the edge   
+        for(int ll=0; ll<q; ll++){
+            indices_n(nid,kk,jj,ii,ll,dim);
+            s = E_ep.Vector(t_id,0,k,j,i,NODE);
+            #ifdef _2D_
+            s *= sp_to_cv(id,ll);
+            #endif
+            e += s;
+        }
+        //We iterate over N+1 elements
+        //E is smaller than E_ep for p>1
+        //This ensures no overflow when computing the last element
+        if(K < Nk && J < Nj && I < Ni)
+            E.Vector(0,K,J,I) = e;
+    );
+}
 
 void fv_update_B_solution(
     FV_Solution B_new,

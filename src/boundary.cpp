@@ -44,8 +44,6 @@ void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, 
     n_id[_z_] = dim == _z_ ? ll : kk;
 }
 
-#define INDICES t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
-
 void boundaries(
     CommHelper comm,
     Boundaries BC,
@@ -103,8 +101,6 @@ void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     N_id[_y_] = dim == _y_ ? l  : j;
     N_id[_z_] = dim == _z_ ? l  : k;
 }
-
-#define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
 
 void boundaries(
     CommHelper comm,

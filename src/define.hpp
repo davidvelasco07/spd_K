@@ -80,6 +80,14 @@ enum {_periodic_, _gradfree_};
 #define J (jj+nGHy+(j-NGHy)*qy)
 #define K (kk+nGHz+(k-NGHz)*qz)
 
+#define INDICES t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
+#define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
+#define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
+
+#define NODE nid[_z_],nid[_y_],nid[_x_]
+
+#define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
+
 #ifdef KOKKOS_ENABLE_CUDA
 #define MemSpace Kokkos::CudaUVMSpace
 #define Layout Kokkos::LayoutLeft
