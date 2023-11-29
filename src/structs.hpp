@@ -27,7 +27,8 @@ class dimension{
         int n_sp=1; //number of solution points
         int n_fp=1; //number of flux points
         int dim; //dimension index (x=0, y=1 or z=2)
-        int fv_cells=1;
+        int fv_ncells=1;
+        int fv_nfaces=1;
         int idL;
         int idR;
         double L=1.0; //Box lenght
@@ -49,14 +50,15 @@ class dimension{
                 N_total = (N+2*NGH);
                 n_cells = N_total*n_sp;
                 n_faces = n_cells+1;
-                fv_cells = N*n_sp+2*nGH;
+                fv_ncells = N*n_sp+2*nGH;
+                fv_nfaces = fv_ncells+1;
                 idL = n_sp-nGH;
-                idR = fv_cells+idL;
+                idR = fv_ncells+idL;
             }
             Kokkos::resize(sd_faces, N_total,n_fp);
             Kokkos::resize(sd_centers, N_total,n_sp);
-            Kokkos::resize(fv_faces, fv_cells+1);
-            Kokkos::resize(fv_centers, fv_cells);
+            Kokkos::resize(fv_faces  , fv_nfaces);
+            Kokkos::resize(fv_centers, fv_ncells);
 
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){

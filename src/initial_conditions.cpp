@@ -12,18 +12,113 @@ double square_signal(int var, double x, double y, double z){
         else
             return 1;
     }
-    else if(var==1)
-        return 1;
+    else if(var==_vz_)
+        return 0;
     else
         return 1;
 }
 
 KOKKOS_INLINE_FUNCTION
-double sine_wave(int var, double x, double y){
+double sine_wave(int var, double x, double y, double z){
     if(var==0)
        return 1.0+0.125*(sin(2*PI*(x+y)));
+    else if(var==_vz_)
+        return 0;
     else
         return 1;
+}
+
+KOKKOS_INLINE_FUNCTION
+double sedov_blast(int var, double x, double y, double z){
+    //Note: set gmma=5./3.
+    double r,R=0.1;
+    #ifndef _3D_
+    r=sqrt(pow(x-0.5,2) + pow(y-0.5,2));
+    #else
+    r=sqrt(pow(x-0.5,2.0) + pow(y-0.5,2.0) + pow(z-0.5,2.0));
+    #endif
+    if(var==0) return 1.0;
+    else if(var==_p_){
+        if(r<R)
+            return 1E-6+(gmma-1);
+        else
+            return 1E-6;
+    }
+    else
+        return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double spherical_blast(int var, double x, double y, double z){
+    //Note: set gmma=5./3.
+    double r,R=0.1;
+    double xc=0.5*LENGHT;
+    double yc=0.5*LENGHT;
+    double zc=0.5*LENGHT;
+    #ifndef _3D_
+    r=sqrt(pow(x-xc,2) + pow(y-yc,2));
+    #else
+    r=sqrt(pow(x-xc,2) + pow(y-yc,2) + pow(z-zc,2));
+    #endif
+    if(var==0){
+        return 1;
+    }
+    else if(var==_p_){
+        if(r<R)
+            return 10;
+        else
+            return 0.1;
+    }
+    else
+        return 0;
+}
+
+void Initialize(
+    SD_Solution U,
+    Matrix faces_x,
+    Matrix faces_y,
+    Matrix faces_z,
+    Vector x_sp,
+    Vector w_sp){
+
+    int Nx = U.Nx;
+    int Ny = U.Ny;
+    int Nz = U.Nz;
+    int px = U.nx;
+    int py = U.ny;
+    int pz = U.nz;
+    int nader = U.n_ader;
+    int nvar = U.n_var;
+    SD_for_all(
+        double value=0;
+        double s;
+        double x;
+        double y=0;
+        double z=0;
+        for(int nn=0; nn<pz; nn++){
+            #if Z
+            z = faces_z(k,kk) + x_sp(nn)*(faces_z(k,kk+1)-faces_z(k,kk));
+            #endif
+            for(int mm=0; mm<py; mm++){
+                y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
+                for(int ll=0; ll<px; ll++){
+                    x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
+                    s = sine_wave(var,x,y,z);
+                    #if X
+                    s*=w_sp(ll);
+                    #endif
+                    #if Y
+                    s*=w_sp(mm);
+                    #endif
+                    #if Z
+                    s*=w_sp(nn);
+                    #endif
+                    value+=s;
+                }
+            }
+        }
+        U.Vector(t_id,var,k,j,i,kk,jj,ii) = value;
+    );
 }
 
 ////////////////
@@ -120,7 +215,6 @@ KOKKOS_INLINE_FUNCTION
 double ponomarenko(int var, double x, double y, double z){
     double L = LENGHT;
     double k = 2*PI/L;
-    double r2=10.;
     x = x-0.5*L;
     y = y-0.5*L;
     double r = sqrt(x*x+y*y);
@@ -165,54 +259,8 @@ void Initialize_ep(
         z = Zs(k,kk);
         y = Ys(j,jj);
         x = Xs(i,ii);
-        A.Vector(0,0,k,j,i,kk,jj,ii) = ponomarenko(dim,x,y,z);
+        A.Vector(0,0,k,j,i,kk,jj,ii) = magnetic_loop(dim,x,y,z);
     );
 }
 
-void Initialize(
-    SD_Solution U,
-    Matrix faces_x,
-    Matrix faces_y,
-    Matrix faces_z,
-    Vector x_sp,
-    Vector w_sp){
 
-    int Nx = U.Nx;
-    int Ny = U.Ny;
-    int Nz = U.Nz;
-    int px = U.nx;
-    int py = U.ny;
-    int pz = U.nz;
-    int nader = U.n_ader;
-    int nvar = U.n_var;
-    SD_for_all(
-        double value=0;
-        double s;
-        double x;
-        double y=0;
-        double z=0;
-        for(int nn=0; nn<pz; nn++){
-            #if Z
-            z = faces_z(k,kk) + x_sp(nn)*(faces_z(k,kk+1)-faces_z(k,kk));
-            #endif
-            for(int mm=0; mm<py; mm++){
-                y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
-                for(int ll=0; ll<px; ll++){
-                    x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
-                    s = square_signal(var,x,y,z);
-                    #if X
-                    s*=w_sp(ll);
-                    #endif
-                    #if Y
-                    s*=w_sp(mm);
-                    #endif
-                    #if Z
-                    s*=w_sp(nn);
-                    #endif
-                    value+=s;
-                }
-            }
-        }
-        U.Vector(t_id,var,k,j,i,kk,jj,ii) = value;
-    );
-}

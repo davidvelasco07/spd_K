@@ -6,6 +6,11 @@
 #define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
 
 KOKKOS_INLINE_FUNCTION
+int choose(int dim, int i, int j, int k){
+    return (dim==_x_ ? i : (dim==_y_ ?  j : k));
+}
+
+KOKKOS_INLINE_FUNCTION
 void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim){
     //Returns the indeces according to the dimension
     N_id[_x_] = (dim == _x_ ? l  : i );
@@ -87,10 +92,10 @@ void compute_conservatives(
         double w[NVAR];
         int var;
         for(var=0; var<nvar; var++)
-            w[var] = W.Vector(0,var,k,j,i);
+            w[var] = W.Vector(var,k,j,i);
         conservatives(w,u);
         for(var=0; var<nvar; var++)
-            U.Vector(0,var,k,j,i) = u[var];
+            U.Vector(var,k,j,i) = u[var];
     );
 }
 
@@ -150,10 +155,10 @@ void compute_primitives(
         double w[10];
         int var;
         for(var=0; var<nvar; var++)
-            u[var] = U.Vector(0,var,k,j,i);
+            u[var] = U.Vector(var,k,j,i);
         primitives(u,w);
         for(var=0; var<nvar; var++)
-            W.Vector(0,var,k,j,i) = w[var];
+            W.Vector(var,k,j,i) = w[var];
     );
 }
 
@@ -348,7 +353,7 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
     int px = dim==_x_ ? 1 : U.nx; 
     int py = dim==_y_ ? 1 : U.ny;
     int pz = dim==_z_ ? 1 : U.nz;
-    int n = dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz);
+    int n = choose(dim, U.nx, U.ny, U.nz);
     int nader = U.n_ader;
     int nvar = U.n_var;
     //cout<<dim<<": "<<Nx<<","<<Ny<<","<<Nz<<","<<px<<","<<py<<","<<pz<<" "<<n<<" "<<v1<<v2<<v3<<endl;
@@ -361,8 +366,9 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
         int nidL[3];
         int NidR[3];
         int nidR[3];
-        indices(NidL,nidL,k,j,i,kk,jj,ii,(dim==_x_ ? i : (dim==_y_ ? j : k))  ,n-1,dim);
-        indices(NidR,nidR,k,j,i,kk,jj,ii,(dim==_x_ ? i : (dim==_y_ ? j : k))+1,  0,dim);
+        int l = choose(dim,i,j,k);
+        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
+        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
         for(int t_id=0; t_id<nader; t_id++){
             for(var=0;var<nvar;var++){
                 u_L[var] = U.Vector(INDICES_L);
@@ -391,7 +397,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
     int px = dim==_x_ ? 1 : U.nx; 
     int py = dim==_y_ ? 1 : U.ny;
     int pz = dim==_z_ ? 1 : U.nz;
-    int n = dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz);
+    int n = choose(dim,U.nx,U.ny,U.nz);
     int nader = U.n_ader;
     int nvar = U.n_var;
     SD_for_cells(
@@ -403,8 +409,9 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
         int nidL[3];
         int NidR[3];
         int nidR[3];
-        indices(NidL,nidL,k,j,i,kk,jj,ii,(dim==_x_ ? i : (dim==_y_ ? j : k))  ,n-1,dim);
-        indices(NidR,nidR,k,j,i,kk,jj,ii,(dim==_x_ ? i : (dim==_y_ ? j : k))+1,  0,dim);
+        choose(dim,i,j,k);
+        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
+        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
         for(int t_id=0; t_id<nader; t_id++){
             for(var=0;var<nvar;var++){
                 u_L[var] = U.Vector(INDICES_R);
@@ -432,7 +439,7 @@ void compute_gradient(
     int py = dU.ny;
     int pz = dU.nz;
     //(solution points)
-    int q = dim==_x_ ? px:(dim==_y_ ? py : pz); 
+    int q = choose(dim,px,py,pz);; 
     int nader = dU.n_ader;
     int nvar = dU.n_var;
     //Compute dU:
@@ -506,7 +513,7 @@ void compute_viscous_flux(
     int py = U.ny;
     int pz = U.nz;
     //flux points
-    int q = dim==_x_ ? px : (dim==_y_ ? py : pz);
+    int q = choose(dim,px,py,pz);
     int nader = U.n_ader;
     int nvar  = U.n_var;
     //Se interpolate dU back to flux points
@@ -519,7 +526,7 @@ void compute_viscous_flux(
         double du3[NVAR];
         int nid[3];
         int id;
-        id = (dim==_x_ ? ii : (dim==_y_ ? jj : kk));
+        id = choose(dim,ii,jj,kk);
         for(int var=0; var<nvar; var++){
             du1[var] = 0;
             du2[var] = 0;
@@ -637,20 +644,20 @@ void slopes(
     double dwz[NVAR];
     double dwt[NVAR];
     for(int var=0; var<NVAR; var++){
-        w[var] = W(0,var,k,j,i);
-        wL=W(0,var,k,j,i-1);
-        wR=W(0,var,k,j,i+1);
+        w[var] = W(var,k,j,i);
+        wL=W(var,k,j,i-1);
+        wR=W(var,k,j,i+1);
         h = x_c(i+1)-x_c(i);
         dwx[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,x_f(i),x_f(i+1));
         #if Y
-        wL=W(0,var,k,j-1,i);
-        wR=W(0,var,k,j+1,i);
+        wL=W(var,k,j-1,i);
+        wR=W(var,k,j+1,i);
         h = y_c(j+1)-y_c(j);
         dwy[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,y_f(j),y_f(j+1));
         #endif
         #if Z
-        wL=W(0,var,k-1,j,i);
-        wR=W(0,var,k+1,j,i);
+        wL=W(var,k-1,j,i);
+        wR=W(var,k+1,j,i);
         h = z_c(k+1)-z_c(k);
         dwz[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,z_f(k),z_f(k+1));
         #endif
@@ -706,9 +713,9 @@ void compute_fluxes(
     double tr;
     double trL;
     double trR;
-    int v1 = dim==_x_ ? _vx_ : (dim==_y_ ? _vy_ : _vz_);
-    int v2 = dim==_x_ ? _vy_ : (dim==_y_ ? _vz_ : _vx_);
-    int v3 = dim==_x_ ? _vz_ : (dim==_y_ ? _vx_ : _vy_);
+    int v1 = choose(dim,_vx_,_vy_,_vz_);
+    int v2 = choose(dim,_vy_,_vz_,_vx_);
+    int v3 = choose(dim,_vz_,_vx_,_vy_);
     for(int l=-NGH; l<NGH; l++)
         slopes(
             W,
@@ -733,13 +740,13 @@ void compute_fluxes(
     //Right Boundary
     //riemann_llf(fR,uL[1][dim],uR[2][dim],v1,v2,v3);
     for(int var=0; var<NVAR; var++){
-        f  = F(ader,var,k,j,i);
-        tr  = troubles(0,nvar,k,j,i);
-        trL = troubles(0,nvar,k-(dim==_z_ ? 1:0),j-(dim==_y_ ? 1:0),i-(dim==_x_ ? 1:0));
-        trR = troubles(0,nvar,k+(dim==_z_ ? 1:0),j+(dim==_y_ ? 1:0),i+(dim==_x_ ? 1:0));
+        f  = F(var,k,j,i);
+        tr  = troubles(nvar,k,j,i);
+        trL = troubles(nvar,k-(dim==_z_ ? 1:0),j-(dim==_y_ ? 1:0),i-(dim==_x_ ? 1:0));
+        trR = troubles(nvar,k+(dim==_z_ ? 1:0),j+(dim==_y_ ? 1:0),i+(dim==_x_ ? 1:0));
         tr = max(tr,max(trL,trR));
         f  = (1-tr)*f + tr*fL[var];
-        F(ader,var,k,j,i) = f;
+        F(var,k,j,i) = f;
     }
 }
 

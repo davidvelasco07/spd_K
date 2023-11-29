@@ -47,7 +47,6 @@ class FV_Solution{
     int Nx;
     int Ny;
     int Nz;
-    int n_ader;
     int n_var;
     int iL;
     int iR;
@@ -58,7 +57,6 @@ class FV_Solution{
     string label;
     FV_Solution() = default;
     FV_Solution(string name,
-        int nader,
         int nvar,
         dimension Zdim,
         dimension Ydim,
@@ -66,9 +64,8 @@ class FV_Solution{
         bool z,
         bool y,
         bool x
-        ){init(name,nader,nvar,Zdim,Ydim,Xdim,z,y,x);}
+        ){init(name,nvar,Zdim,Ydim,Xdim,z,y,x);}
     void init(string name,
-        int nader,
         int nvar,
         dimension Zdim,
         dimension Ydim,
@@ -77,11 +74,10 @@ class FV_Solution{
         bool y,
         bool x
         ){
-        n_ader=nader;
         n_var=nvar;
-        Nx=Xdim.fv_cells+x;
-        Ny=Ydim.fv_cells+y;
-        Nz=Zdim.fv_cells+z;
+        Nx=Xdim.fv_ncells+x;
+        Ny=Ydim.fv_ncells+y;
+        Nz=Zdim.fv_ncells+z;
         iL = Xdim.idL;
         iR = Xdim.idR;
         jL = Ydim.idL;
@@ -89,9 +85,9 @@ class FV_Solution{
         kL = Zdim.idL;
         kR = Zdim.idR;
 
-        Kokkos::resize(Vector,nader,nvar,Nz,Ny,Nx);
+        Kokkos::resize(Vector,nvar,Nz,Ny,Nx);
         #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(Vector_h,nader,nvar,Nz,Ny,Nx);
+        Kokkos::resize(Vector_h,nvar,Nz,Ny,Nx);
         #endif
         label=name;
     }
@@ -133,18 +129,18 @@ struct FV_Boundaries {
         Nz    = _Nz;
         Ny    = _Ny;
         Nx    = _Nx;
-        N     = Dim.fv_cells;
+        N     = Dim.fv_ncells;
         dim   = Dim.dim;
-        Kokkos::resize(BoundaryL,1,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryR,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryL,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryR,nvar,Nz,Ny,Nx);
         #ifdef MPI
-        Kokkos::resize(BufferL,1,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BufferR,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferL,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferR,nvar,Nz,Ny,Nx);
         #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(BufferL_h,1,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BufferR_h,1,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryL_h,1,nvar,Nz,Ny,Nx);
-        Kokkos::resize(BoundaryR_h,1,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferL_h,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BufferR_h,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryL_h,nvar,Nz,Ny,Nx);
+        Kokkos::resize(BoundaryR_h,nvar,Nz,Ny,Nx);
         #endif
         #endif
     }

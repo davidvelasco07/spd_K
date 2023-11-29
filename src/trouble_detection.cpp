@@ -41,33 +41,33 @@ void NAD(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double toleranc
         double u_L;
         double u_R;
         double u_new;
-        u_new = U_new.Vector(0,var,k,j,i);
-        maximum = U.Vector(0,var,k,j,i);
-        minimum = U.Vector(0,var,k,j,i);
+        u_new = U_new.Vector(var,k,j,i);
+        maximum = U.Vector(var,k,j,i);
+        minimum = U.Vector(var,k,j,i);
         #if X
-        u_L = U.Vector(0,var,k,j,i-1);
-        u_R = U.Vector(0,var,k,j,i+1);
+        u_L = U.Vector(var,k,j,i-1);
+        u_R = U.Vector(var,k,j,i+1);
         maximum = max3(u_L,maximum,u_R);
         minimum = min3(u_L,minimum,u_R);
         #endif
         #ifdef Y
-        u_L = U.Vector(0,var,k,j-1,i);
-        u_R = U.Vector(0,var,k,j+1,i);
+        u_L = U.Vector(var,k,j-1,i);
+        u_R = U.Vector(var,k,j+1,i);
         maximum = max3(u_L,maximum,u_R);
         minimum = min3(u_L,minimum,u_R);
         #endif
         #ifdef Z
-        u_L = U.Vector(0,var,k-1,j,i);
-        u_R = U.Vector(0,var,k+1,j,i);
+        u_L = U.Vector(var,k-1,j,i);
+        u_R = U.Vector(var,k+1,j,i);
         maximum = max3(u_L,maximum,u_R);
         minimum = min3(u_L,minimum,u_R);
         #endif
         minimum -= abs(minimum)*tolerance;
         maximum += abs(maximum)*tolerance;
         if( u_new > maximum || u_new < minimum)
-            troubles.Vector(0,var,k,j,i) = 1;
+            troubles.Vector(var,k,j,i) = 1;
         else
-            troubles.Vector(0,var,k,j,i) = 0;
+            troubles.Vector(var,k,j,i) = 0;
         
     );
 }
@@ -80,7 +80,7 @@ void smooth_extrema(FV_Solution U, FV_Solution alpha, Vector centers, Vector fac
     int nvar = U.n_var-1;
     FV_for_cells_all_2NGH(
         //double nid[3];
-        double u = U.Vector(0,var,k,j,i);
+        double u = U.Vector(var,k,j,i);
         double du;
         double dup;
         double dum;  
@@ -92,24 +92,24 @@ void smooth_extrema(FV_Solution U, FV_Solution alpha, Vector centers, Vector fac
         double hm = (centers(l  )-centers(l-2));
         //First derivative 
         if(dim==0){
-            du  = (U.Vector(0,var,k,j,i+1)-U.Vector(0,var,k,j,i-1))/h ;
-            dup = (U.Vector(0,var,k,j,i+2)-u                      )/hp;
-            dum = (u                      -U.Vector(0,var,k,j,i-2))/hm;
+            du  = (U.Vector(var,k,j,i+1)-U.Vector(var,k,j,i-1))/h ;
+            dup = (U.Vector(var,k,j,i+2)-u                    )/hp;
+            dum = (u                    -U.Vector(var,k,j,i-2))/hm;
         }
         else if(dim==1){
-            du  = (U.Vector(0,var,k,j+1,i)-U.Vector(0,var,k,j-1,i))/h ;
-            dup = (U.Vector(0,var,k,j+2,i)-u                      )/hp;
-            dum = (u                      -U.Vector(0,var,k,j-2,i))/hm;
+            du  = (U.Vector(var,k,j+1,i)-U.Vector(var,k,j-1,i))/h ;
+            dup = (U.Vector(var,k,j+2,i)-u                    )/hp;
+            dum = (u                    -U.Vector(var,k,j-2,i))/hm;
         }
         else if(dim==2){
-            du  = (U.Vector(0,var,k+1,j,i)-U.Vector(0,var,k-1,j,i))/h ;
-            dup = (U.Vector(0,var,k+2,j,i)-u                      )/hp;
-            dum = (u                      -U.Vector(0,var,k-2,j,i))/hm;
+            du  = (U.Vector(var,k+1,j,i)-U.Vector(var,k-1,j,i))/h ;
+            dup = (U.Vector(var,k+2,j,i)-u                    )/hp;
+            dum = (u                    -U.Vector(var,k-2,j,i))/hm;
         }
         //Second derivative
         d2u = (dup-dum)/(centers(l+1)-centers(l-1));
         dv  = 0.5*d2u*(faces(l+1)-faces(l));
-        alpha.Vector(0,var,k,j,i) = Alpha(dv,dum,du,dup);
+        alpha.Vector(var,k,j,i) = Alpha(dv,dum,du,dup);
     );
 }
 
@@ -123,22 +123,22 @@ void relax_NAD(FV_Solution troubles, FV_Solution alpha_x, FV_Solution alpha_y, F
         for(int var=0; var<nvar; var++){
         double alpha=1;
         #ifdef X
-        alpha = min3(alpha_x.Vector(0,var,k,j,i-1),alpha_x.Vector(0,var,k,j,i),alpha_x.Vector(0,var,k,j,i+1));
+        alpha = min3(alpha_x.Vector(var,k,j,i-1),alpha_x.Vector(var,k,j,i),alpha_x.Vector(var,k,j,i+1));
         #endif
         #ifdef Y
-        alpha = min(alpha,min3(alpha_y.Vector(0,var,k,j-1,i),alpha_y.Vector(0,var,k,j,i),alpha_y.Vector(0,var,k,j+1,i)));
+        alpha = min(alpha,min3(alpha_y.Vector(var,k,j-1,i),alpha_y.Vector(var,k,j,i),alpha_y.Vector(var,k,j+1,i)));
         #endif
         #ifdef Z
-        alpha = min(alpha,min3(alpha_z.Vector(0,var,k-1,j,i),alpha_z.Vector(0,var,k,j,i),alpha_z.Vector(0,var,k+1,j,i)));
+        alpha = min(alpha,min3(alpha_z.Vector(var,k-1,j,i),alpha_z.Vector(var,k,j,i),alpha_z.Vector(var,k+1,j,i)));
         #endif
         //alpha==1 -> smooth extrema
-        trouble = troubles.Vector(0,var,k,j,i);
-        troubles.Vector(0,var,k,j,i) = alpha<1 ? trouble : 0; 
+        trouble = troubles.Vector(var,k,j,i);
+        troubles.Vector(var,k,j,i) = alpha<1 ? trouble : 0; 
         }
         trouble=0;
         for(int var=0; var<nvar; var++)
-            trouble = max(trouble,troubles.Vector(0,var,k,j,i));
-        troubles.Vector(0,nvar,k,j,i) = trouble;
+            trouble = max(trouble,troubles.Vector(var,k,j,i));
+        troubles.Vector(nvar,k,j,i) = trouble;
     );
 }
 
@@ -149,16 +149,16 @@ void convex_combo(FV_Solution troubles){
     int nvar = troubles.n_var-1;
     FV_for_cells_2NGH(
         double trouble;
-        trouble = troubles.Vector(0,nvar,k,j,i);
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k,j,i+1));
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k,j,i-1));
+        trouble = troubles.Vector(nvar,k,j,i);
+        trouble = max(trouble,.75*troubles.Vector(nvar,k,j,i+1));
+        trouble = max(trouble,.75*troubles.Vector(nvar,k,j,i-1));
         #if Y
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k,j+1,i));
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k,j-1,i));
+        trouble = max(trouble,.75*troubles.Vector(nvar,k,j+1,i));
+        trouble = max(trouble,.75*troubles.Vector(nvar,k,j-1,i));
         #endif
         #if Z
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k+1,j,i));
-        trouble = max(trouble,.75*troubles.Vector(0,nvar,k-1,j,i));
+        trouble = max(trouble,.75*troubles.Vector(nvar,k+1,j,i));
+        trouble = max(trouble,.75*troubles.Vector(nvar,k-1,j,i));
         #endif
     );
 }
@@ -171,12 +171,12 @@ void PAD_criteria(FV_Solution W, FV_Solution troubles){
     FV_for_cells_NGH(
         double density;
         double pressure;
-        density  = W.Vector(0,_d_,k,j,i);
-        pressure = W.Vector(0,_p_,k,j,i);
+        density  = W.Vector(_d_,k,j,i);
+        pressure = W.Vector(_p_,k,j,i);
         if(density<rho_min || density>rho_max)
-            troubles.Vector(0,nvar,k,j,i) = 1;
+            troubles.Vector(nvar,k,j,i) = 1;
         if(pressure<p_min || pressure>p_max)
-            troubles.Vector(0,nvar,k,j,i) = 1;
+            troubles.Vector(nvar,k,j,i) = 1;
     );
 }
 

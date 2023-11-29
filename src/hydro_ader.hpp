@@ -144,24 +144,24 @@ struct Hydro_ader{
         #endif
 
         #ifdef FV
-        U_new.init("U_new",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        W_new.init("W_new",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U_old.init("U_old",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        W_old.init("W_old",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        troubles.init("troubles",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        U_new.init("U_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        W_new.init("W_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        U_old.init("U_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        W_old.init("W_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        troubles.init("troubles",nvar,Z_dim,Y_dim,X_dim,0,0,0);
         #if X
-        F_x.init("F_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,1);
-        alpha_x.init("alpha_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        BC_x.init(X_dim,_BCx_,nvar,Z_dim.fv_cells,Y_dim.fv_cells,nGHx);
+        F_x.init("F_x",nvar,Z_dim,Y_dim,X_dim,0,0,1);
+        alpha_x.init("alpha_x",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_x.init(X_dim,_BCx_,nvar,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
         #endif
         #if Y
-        F_y.init("F_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,1,0);
-        alpha_y.init("alpha_y",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        BC_y.init(Y_dim,_BCy_,nvar,Z_dim.fv_cells,nGHy,X_dim.fv_cells);
+        F_y.init("F_y",nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        alpha_y.init("alpha_y",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_y.init(Y_dim,_BCy_,nvar,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
         #endif
-        F_z.init("F_z",n_ader,nvar,Z_dim,Y_dim,X_dim,1,0,0);
-        alpha_z.init("alpha_z",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        BC_z.init(Z_dim,_BCz_,nvar,nGHz,Y_dim.fv_cells,X_dim.fv_cells);
+        F_z.init("F_z",nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        alpha_z.init("alpha_z",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        BC_z.init(Z_dim,_BCz_,nvar,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
         #endif
 
         ////////////////////////
@@ -522,22 +522,22 @@ struct Hydro_ader{
     }
 
     #ifdef FV
-    void Integrate_fluxes(){
+    void Integrate_fluxes(int ader){
         #if X
-        face_integral(F_ader_fp_x, F_x, sp_to_cv, _x_);
+        face_integral(F_ader_fp_x, F_x, sp_to_cv, ader, _x_);
         #endif
         #if Y
-        face_integral(F_ader_fp_y, F_y, sp_to_cv, _y_);
+        face_integral(F_ader_fp_y, F_y, sp_to_cv, ader, _y_);
         #endif
         #if Z
-        face_integral(F_ader_fp_z, F_z, sp_to_cv, _z_);
+        face_integral(F_ader_fp_z, F_z, sp_to_cv, ader, _z_);
         #endif
     }
 
     void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
-        Integrate_fluxes();
         transform_sp_to_cv(U_sp,U_cv);
         for(int ader=0;ader<n_ader;ader++){
+            Integrate_fluxes(ader);
             fv_update_solution(
                 U_new,
                 U_old,

@@ -1,16 +1,18 @@
 //#define MPI
 
-//#define INDUCTION
-#define HYDRO
+#define INDUCTION
+//#define HYDRO
 
-//#define FV
+#define FV
 //#define SD
+
+//#define OHMIC_DIFFUSION
 
 #define PI 3.141592653589793
 #define CFL 0.8
 #define min_c2 1E-14
 #define gmma 1.4
-#define LENGHT 1.0//2*PI/0.39
+#define LENGHT 1.0//2*PI/0.78
 #define rho_min 1E-10
 #define rho_max 1E10
 #define p_min 1E-10
@@ -37,6 +39,7 @@
 #define _p_  (1+_vz_)
 #define _e_  _p_
 
+enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_};
 
 #define _BCx_ _periodic_
@@ -73,16 +76,13 @@ enum {_periodic_, _gradfree_};
 #define nGHz 0
 #endif
 
-#define I (ii+nGHx+(i-NGHx)*px)
-#define J (jj+nGHy+(j-NGHy)*py)
-#define K (kk+nGHz+(k-NGHz)*pz)
-
-#define choose_index( dim, i, j, k) \
-dim==_x_ ? j : (dim==_y_ ?  k : i);
+#define I (ii+nGHx+(i-NGHx)*qx)
+#define J (jj+nGHy+(j-NGHy)*qy)
+#define K (kk+nGHz+(k-NGHz)*qz)
 
 #ifdef KOKKOS_ENABLE_CUDA
 #define MemSpace Kokkos::CudaUVMSpace
-#define Layout Kokkos::LayoutRight
+#define Layout Kokkos::LayoutLeft
 #else
 #define MemSpace Kokkos::HostSpace
 #define Layout Kokkos::LayoutRight
@@ -93,7 +93,7 @@ using ExecSpace = MemSpace::execution_space;
 typedef Kokkos::View<double*,MemSpace>  Vector;
 typedef Kokkos::View<double**,MemSpace>  Matrix;
 typedef Kokkos::View<double********,Layout,MemSpace>  SD_Vector;
-typedef Kokkos::View<double*****,Layout,MemSpace> FV_Vector;
+typedef Kokkos::View<double****,Layout,MemSpace> FV_Vector;
 
 typedef Matrix::HostMirror Matrix_h;
 typedef Vector::HostMirror Vector_h;
@@ -134,17 +134,18 @@ SD_for_cells( \
     } \
 );
 
+
 #define SD_for_active_cells( call) \
 Kokkos::parallel_for("for_active_cells",Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,pz,py,px}), KOKKOS_LAMBDA (int k, int j, int i, int kk, int jj, int ii) { \
-for(int var=0; var<nvar; var++){ \
-        call; \
-} \
+call; \
 }); Kokkos::fence();
 
 #define SD_for_active_cells_all( call) \
 SD_for_active_cells( \
     for(int t_id=0; t_id<nader; t_id++){ \
+        for(int var=0; var<nvar; var++){ \
         call; \
+        } \
     } \
 );
 

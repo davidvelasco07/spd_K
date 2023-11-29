@@ -104,7 +104,7 @@ void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     N_id[_z_] = dim == _z_ ? l  : k;
 }
 
-#define FV_INDICES 0,var,Nid[_z_],Nid[_y_],Nid[_x_]
+#define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
 
 void boundaries(
     CommHelper comm,
@@ -124,15 +124,15 @@ void boundaries(
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
         if(type == _periodic_){ 
             fv_indices(Nid,k,j,i,N-2*nGH+l,dim);
-            BC.BoundaryL(0,var,k,j,i) = U.Vector(FV_INDICES);
+            BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
             fv_indices(Nid,k,j,i,    nGH+l,dim);
-            BC.BoundaryR(0,var,k,j,i) = U.Vector(FV_INDICES);
+            BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         else if(type == _gradfree_){
             fv_indices(Nid,k,j,i,    nGH+l,dim);
-            BC.BoundaryL(0,var,k,j,i) = U.Vector(FV_INDICES);
+            BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
             fv_indices(Nid,k,j,i,N-2*nGH+l,dim);
-            BC.BoundaryR(0,var,k,j,i) = U.Vector(FV_INDICES);
+            BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         #ifdef MPI
         BC.BufferL(t_id,var,k,j,i) = value(U,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
@@ -147,8 +147,8 @@ void boundaries(
         int l;
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
         fv_indices(Nid,k,j,i,      l,dim);
-        U.Vector(FV_INDICES) = BC.BoundaryL(0,var,k,j,i);
+        U.Vector(FV_INDICES) = BC.BoundaryL(var,k,j,i);
         fv_indices(Nid,k,j,i,N-nGH+l,dim);
-        U.Vector(FV_INDICES) = BC.BoundaryR(0,var,k,j,i);
+        U.Vector(FV_INDICES) = BC.BoundaryR(var,k,j,i);
     );
 }

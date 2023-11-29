@@ -1,7 +1,28 @@
 #include "spd_k.hpp"
 
+#define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
+#define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
+
+KOKKOS_INLINE_FUNCTION
+int choose(int dim, int i, int j, int k){
+    return (dim==_x_ ? i : (dim==_y_ ?  j : k));
+}
+
+KOKKOS_INLINE_FUNCTION
+void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim){
+    //Returns the indeces according to the dimension
+    N_id[_x_] = (dim == _x_ ? l  : i );
+    n_id[_x_] = (dim == _x_ ? ll : ii);
+    N_id[_y_] = (dim == _y_ ? l  : j );
+    n_id[_y_] = (dim == _y_ ? ll : jj);
+    N_id[_z_] = (dim == _z_ ? l  : k );
+    n_id[_z_] = (dim == _z_ ? ll : kk);
+}
+
 KOKKOS_INLINE_FUNCTION
 double velocity(int var, double x, double y, double z){
+    if(var<2)return 1;
+    else return 0;
     double L = LENGHT;
     double r1=1.;
     x = x-0.5*L;
@@ -77,7 +98,7 @@ void rotational_a_to_b(
     int px = B.nx;
     int py = B.ny;
     int pz = B.nz;
-    int q = dim==0 ? px:( dim==1 ? py : pz);
+    int q = choose(dim, px, py, pz);
     int nader = B.n_ader;
     SD_for_ader(
         double d1a2=0;
@@ -123,11 +144,11 @@ void compute_E(
     int px = E.nx;
     int py = E.ny;
     int pz = E.nz;
-    int q = dim==0 ? px:( dim==1 ? py : pz);
+    int q = choose(dim, px, py, pz);
     int nader = E.n_ader;
     SD_for_ader(
-        int dim1 = dim==0 ? _y_ : (dim==1 ? _z_ : _x_);
-        int dim2 = dim==0 ? _z_ : (dim==1 ? _x_ : _y_);
+        int dim1 = choose(dim ,_y_, _z_,_x_);
+        int dim2 = choose(dim1,_y_, _z_,_x_);
         double b1=0;
         double b2=0;
         double v1=0;
@@ -186,14 +207,14 @@ void compute_rotational_B(
     double nu,
     int dim){
     //D3 = d1B2 - d2B1
-    //E.Vector -> (E3,B1,B2,v1,v2)
+    //E.Vector -> (E3,B1,B2,v1,v2,E3d,B1d,B2d)
     int Nx = E.Nx;
     int Ny = E.Ny;
     int Nz = E.Nz;
     int px = D1.nx;
     int py = D1.ny;
     int pz = D1.nz;
-    int q = dim==0 ? px:( dim==1 ? py : pz); //p+1 (solution points)
+    int q = choose(dim, px, py, pz); //p+1 (solution points)
     int nader = E.n_ader;
     //Compute d1B2:
     SD_for_ader(
@@ -202,13 +223,13 @@ void compute_rotational_B(
         for(int ll=0; ll<q+1; ll++){
             if(dim==2)
                 //Dz = dxBy
-                d1b2 += E.Vector(t_id,7,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/d1;
+                d1b2 += E.Vector(t_id,_b2d_,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/d1;
             else if(dim==1)
                 //Dy = dzBx
-                d1b2 += E.Vector(t_id,7,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/d1;
+                d1b2 += E.Vector(t_id,_b2d_,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/d1;
             else if(dim==0)
                 //Dx = dyBz
-                d1b2 += E.Vector(t_id,7,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/d1;
+                d1b2 += E.Vector(t_id,_b2d_,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/d1;
         }
         D1.Vector(t_id,0,k,j,i,kk,jj,ii) = d1b2;
     );
@@ -222,13 +243,13 @@ void compute_rotational_B(
         for(int ll=0; ll<q+1; ll++){
             if(dim==2)
                 //Dz = dyBx
-                d2b1 += E.Vector(t_id,6,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/d2;
+                d2b1 += E.Vector(t_id,_b1d_,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/d2;
             else if(dim==1)
                 //Dy = dxBz
-                d2b1 += E.Vector(t_id,6,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/d2;
+                d2b1 += E.Vector(t_id,_b1d_,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/d2;
             else if(dim==0)
                 //Dx = dzBy
-                d2b1 += E.Vector(t_id,6,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/d2;
+                d2b1 += E.Vector(t_id,_b1d_,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/d2;
         }
         D2.Vector(t_id,0,k,j,i,kk,jj,ii) = d2b1;
     );
@@ -258,7 +279,7 @@ void compute_rotational_B(
                 d1 += D1.Vector(t_id,0,k,j,i,kk,ll,ii)*sp_to_fp(jj,ll);
             }
         }
-        E.Vector(t_id,5,k,j,i,kk,jj,ii) = nu*(d1-d2);
+        E.Vector(t_id,_E_,k,j,i,kk,jj,ii) -= nu*(d1-d2);
     );
 }
 
@@ -281,8 +302,8 @@ void update_B_prediction(
     int py = B.ny;
     int pz = B.nz;
     int nader = B_ader.n_ader;
-    int q = dim==0 ? px:( dim==1 ? py : pz);
-    SD_for_cells(
+    int q = choose(dim, px, py, pz);
+    SD_for_active_cells(
         double dBdt[10];
         int t_id;
         int ll;
@@ -295,23 +316,23 @@ void update_B_prediction(
             for(ll=0; ll<q; ll++){
                 if(dim==0){
                     //dBxdt = dEydz - dEzdy
-                    E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii)-E_1.Vector(t_id,5,k,j,i,ll,jj,ii);
+                    E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii);
                     dBdt[t_id] += E*dfp_to_sp(kk,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii)-E_2.Vector(t_id,5,k,j,i,kk,ll,ii);
+                    E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii);
                     dBdt[t_id] -= E*dfp_to_sp(jj,ll)/d1;
                 }
                 else if(dim==1){
                     //dBydt = dEzdx - dExdz
-                    E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll)-E_1.Vector(t_id,5,k,j,i,kk,jj,ll);
+                    E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll);
                     dBdt[t_id] += E*dfp_to_sp(ii,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii)-E_2.Vector(t_id,5,k,j,i,ll,jj,ii);
+                    E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii);
                     dBdt[t_id] -= E*dfp_to_sp(kk,ll)/d1; 
                 }
                 else{
                     //dBzdt = dExdy - dEydx
-                    E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii)-E_1.Vector(t_id,5,k,j,i,kk,ll,ii);
+                    E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii);
                     dBdt[t_id] += E*dfp_to_sp(jj,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll)-E_2.Vector(t_id,5,k,j,i,kk,jj,ll);
+                    E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll);
                     dBdt[t_id] -= E*dfp_to_sp(ii,ll)/d1;
                 }
             }
@@ -344,9 +365,9 @@ void update_B_solution(
     int py = B.ny;
     int pz = B.nz;
     int nader = E_1.n_ader;
-    int q = dim==0 ? px:( dim==1 ? py : pz);
+    int q = choose(dim, px, py, pz);
     //cout<<dim<<" "<<q<<endl;
-    SD_for_cells(
+    SD_for_active_cells(
         double dBdt;
         double dB=0;
         double E;
@@ -355,23 +376,23 @@ void update_B_solution(
             for(int ll=0; ll<q; ll++){
                 if(dim==0){
                     //dBxdt = dEydz - dEzdy
-                    E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii)-E_1.Vector(t_id,5,k,j,i,ll,jj,ii);
+                    E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii);
                     dBdt += E*dfp_to_sp(kk,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii)-E_2.Vector(t_id,5,k,j,i,kk,ll,ii);
+                    E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii);
                     dBdt -= E*dfp_to_sp(jj,ll)/d1;
                 }
                 else if(dim==1){
                     //dBydt = dEzdx - dExdz
-                    E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll)-E_1.Vector(t_id,5,k,j,i,kk,jj,ll);
+                    E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll);
                     dBdt += E*dfp_to_sp(ii,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii)-E_2.Vector(t_id,5,k,j,i,ll,jj,ii);
+                    E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii);
                     dBdt -= E*dfp_to_sp(kk,ll)/d1; 
                 }
                 else{
                     //dBzdt = dExdy - dEydx
-                    E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii)-E_1.Vector(t_id,5,k,j,i,kk,ll,ii);
+                    E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii);
                     dBdt += E*dfp_to_sp(jj,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll)-E_2.Vector(t_id,5,k,j,i,kk,jj,ll);
+                    E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll);
                     dBdt -= E*dfp_to_sp(ii,ll)/d1;
                 }
             }
@@ -432,6 +453,7 @@ double upwind(double left, double right, double vel){
     return (vel > 0 ? left:right);
 }
 
+#define VEL 0
 void E_riemann_solver(
     SD_Solution E,
     int dim,
@@ -443,9 +465,9 @@ void E_riemann_solver(
     int px = dim==0 ? 1:E.nx; 
     int py = dim==1 ? 1:E.ny; 
     int pz = dim==2 ? 1:E.nz; 
-    int n = dim==0 ? E.nx:(dim==1 ? E.ny:E.nz);
+    int n = choose(dim, E.nx, E.ny, E.nz);
     int nader = E.n_ader;
-    int nvar = E.n_var-3;
+    int nvar = E.n_var;
     SD_for_cells(
         double v;
         double v_L;
@@ -453,64 +475,33 @@ void E_riemann_solver(
         double e_L;
         double e_R;
         double e;
-        double sigma=0.5;
+        int var;
+        int NidL[3];
+        int nidL[3];
+        int NidR[3];
+        int nidR[3];
+        int l = choose(dim,i,j,k);
+        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
+        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
         for(int t_id=0; t_id<nader; t_id++){
-            if(dim==0){
-                v_L = E.Vector(t_id,_v1_,k,j,i  ,kk,jj,n-1);
-                v_R = E.Vector(t_id,_v1_,k,j,i+1,kk,jj,  0);
-                v = max(v_L,v_R);
-                for(int var=0; var<nvar; var++){
-                    e_L = E.Vector(t_id,var,k,j,i  ,kk,jj,n-1);
-                    e_R = E.Vector(t_id,var,k,j,i+1,kk,jj,  0);
-                    e = upwind(e_L,e_R,v);
-                    E.Vector(t_id,var,k,j,i  ,kk,jj,n-1) = e;
-                    E.Vector(t_id,var,k,j,i+1,kk,jj,  0) = e;
-                }
-                for(int var=nvar+1; var<nvar+3; var++){
-                    e_L = E.Vector(t_id,var,k,j,i  ,kk,jj,n-1);
-                    e_R = E.Vector(t_id,var,k,j,i+1,kk,jj,  0);
-                    e = 0.5*(e_L+e_R) - sigma*(e_L-e_R);
-                    E.Vector(t_id,var,k,j,i  ,kk,jj,n-1) = e;
-                    E.Vector(t_id,var,k,j,i+1,kk,jj,  0) = e;
-                }
+            var=_v1_;
+            v_L = E.Vector(INDICES_L);
+            v_R = E.Vector(INDICES_R);
+            v = max(v_L,v_R);
+            for(var=0; var<nvar-3; var++){
+                e_L = E.Vector(INDICES_L);
+                e_R = E.Vector(INDICES_R);
+                e = upwind(e_L,e_R,v);
+                E.Vector(INDICES_L) = e;
+                E.Vector(INDICES_R) = e;
             }
-            else if(dim==1){
-                v_L = E.Vector(t_id,_v1_,k,j  ,i,kk,n-1,ii);
-                v_R = E.Vector(t_id,_v1_,k,j+1,i,kk,  0,ii);
-                v = max(v_L,v_R);
-                for(int var=0; var<nvar; var++){
-                    e_L = E.Vector(t_id,var,k,j  ,i,kk,n-1,ii);
-                    e_R = E.Vector(t_id,var,k,j+1,i,kk,  0,ii);
-                    e = upwind(e_L,e_R,v);
-                    E.Vector(t_id,var,k,j  ,i,kk,n-1,ii) = e;
-                    E.Vector(t_id,var,k,j+1,i,kk,  0,ii) = e;
-                }
-                for(int var=nvar+1; var<nvar+3; var++){
-                    e_L = E.Vector(t_id,var,k,j  ,i,kk,n-1,ii);
-                    e_R = E.Vector(t_id,var,k,j+1,i,kk,  0,ii);
-                    e = 0.5*(e_L+e_R) - sigma*(e_L-e_R);
-                    E.Vector(t_id,var,k,j  ,i,kk,n-1,ii) = e;
-                    E.Vector(t_id,var,k,j+1,i,kk,  0,ii) = e;
-                }
-            }
-            else if(dim==2){
-                v_L = E.Vector(t_id,_v1_,k  ,j,i,n-1,jj,ii);
-                v_R = E.Vector(t_id,_v1_,k+1,j,i,  0,jj,ii);
-                v = max(v_L,v_R);
-                for(int var=0; var<nvar; var++){
-                    e_L = E.Vector(t_id,var,k  ,j,i,n-1,jj,ii);
-                    e_R = E.Vector(t_id,var,k+1,j,i,  0,jj,ii);
-                    e = upwind(e_L,e_R,v);
-                    E.Vector(t_id,var,k  ,j,i,n-1,jj,ii) = e;
-                    E.Vector(t_id,var,k+1,j,i,  0,jj,ii) = e;
-                }
-                for(int var=nvar+1; var<nvar+3; var++){
-                    e_L = E.Vector(t_id,var,k  ,j,i,n-1,jj,ii);
-                    e_R = E.Vector(t_id,var,k+1,j,i,  0,jj,ii);
-                    e = 0.5*(e_L+e_R) - sigma*(e_L-e_R);
-                    E.Vector(t_id,var,k  ,j,i,n-1,jj,ii) = e;
-                    E.Vector(t_id,var,k+1,j,i,  0,jj,ii) = e;
-                }
+            //Rusanov solver for diffusive terms
+            for(var=nvar-2; var<nvar; var++){
+                e_L = E.Vector(INDICES_L);
+                e_R = E.Vector(INDICES_R);
+                e = upwind(e_L,e_R,VEL);
+                E.Vector(INDICES_L) = e;
+                E.Vector(INDICES_R) = e;
             }
         }
     );
@@ -527,35 +518,96 @@ void E_Ohmic_riemann_solver(
     int px = dim==0 ? 1:E.nx; 
     int py = dim==1 ? 1:E.ny; 
     int pz = dim==2 ? 1:E.nz; 
-    int n = dim==0 ? E.nx:(dim==1 ? E.ny:E.nz);
+    int n = choose(dim, E.nx, E.ny, E.nz);
     int nader = E.n_ader;
     SD_for_cells(
         double e_L;
         double e_R;
         double e;
-        double sigma=0.5;
+        int var=0;
+        int NidL[3];
+        int nidL[3];
+        int NidR[3];
+        int nidR[3];
+        int l = choose(dim,i,j,k);
+        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
+        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
+        //Rusanov solver for diffusive terms
         for(int t_id=0; t_id<nader; t_id++){
-            if(dim==0){
-                e_L = E.Vector(t_id,5,k,j,i  ,kk,jj,n-1);
-                e_R = E.Vector(t_id,5,k,j,i+1,kk,jj,  0);
-                e = 0.5*(e_L+e_R) + sigma*(e_L-e_R);
-                E.Vector(t_id,5,k,j,i  ,kk,jj,n-1) = e;
-                E.Vector(t_id,5,k,j,i+1,kk,jj,  0) = e;
-            }
-            else if(dim==1){
-                e_L = E.Vector(t_id,5,k,j  ,i,kk,n-1,ii);
-                e_R = E.Vector(t_id,5,k,j+1,i,kk,  0,ii);
-                e = 0.5*(e_L+e_R) + sigma*(e_L-e_R);
-                E.Vector(t_id,5,k,j  ,i,kk,n-1,ii) = e;
-                E.Vector(t_id,5,k,j+1,i,kk,  0,ii) = e;
-            }
-            else if(dim==2){
-                e_L = E.Vector(t_id,5,k  ,j,i,n-1,jj,ii);
-                e_R = E.Vector(t_id,5,k+1,j,i,  0,jj,ii);
-                e = 0.5*(e_L+e_R) + sigma*(e_L-e_R);
-                E.Vector(t_id,5,k  ,j,i,n-1,jj,ii) = e;
-                E.Vector(t_id,5,k+1,j,i,  0,jj,ii) = e;
-            }
+            e_L = E.Vector(INDICES_L);
+            e_R = E.Vector(INDICES_R);
+            e = upwind(e_L,e_R,-VEL);
+            E.Vector(INDICES_L) = e;
+            E.Vector(INDICES_R) = e;
+        }
+    );
+}
+
+//////////////
+/// FV
+//////////////
+
+void fv_update_B_solution(
+    FV_Solution B_new,
+    FV_Solution B_old,
+    SD_Solution B,
+    FV_Solution E_1,
+    FV_Solution E_2,
+    Vector faces_1,
+    Vector faces_2,
+    Vector w,
+    double dt,
+    int t_id,
+    int dim,
+    bool update){
+
+    int Nx = B.Nx;
+    int Ny = B.Ny;
+    int Nz = B.Nz;
+    int px = B.nx;
+    int py = B.ny;
+    int pz = B.nz;
+    //Needed to compute K,J,I
+    int qx = px-(dim==_x_);
+    int qy = py-(dim==_y_);
+    int qz = pz-(dim==_z_);
+    int Ni = B_new.Nx;
+    int Nj = B_new.Ny;
+    int Nk = B_new.Nz;
+    int dim1 = choose(dim ,_y_,_z_,_x_);
+    int dim2 = choose(dim1,_y_,_z_,_x_);
+    //cout<<dim<<" "<<q<<endl;
+    SD_for_active_cells(
+        double dBdt;
+        double b_new;
+        double b_old;
+        double ep;
+        double h;
+        int id;
+        dBdt = 0;
+        b_old = B.Vector(0,0,k,j,i,kk,jj,ii);
+        if(K < Nk && J < Nj && I < Ni){
+            //This is going to be used to limit the solution
+            B_old.Vector(0,K,J,I) = b_old;
+            //dBxdt = dEydz - dEzdy
+            //dBydt = dEzdx - dExdz
+            //dBzdt = dExdy - dEydx
+            ep = E_1.Vector(0,K+(dim2==_z_),J+(dim2==_y_),I+(dim2==_x_));
+            id = choose(dim2, I, J, K);
+            h = (faces_2(id+1)-faces_2(id));
+            dBdt = (ep-E_1.Vector(0,K,J,I))/h;
+
+            ep = E_2.Vector(0,K+(dim1==_z_),J+(dim1==_y_),I+(dim1==_x_));
+            id = choose(dim1, I, J, K);
+            h = (faces_1(id+1)-faces_1(id));
+            dBdt-= (ep-E_2.Vector(0,K,J,I))/h;
+
+            b_new = b_old - dBdt*w(t_id)*dt;
+            //Need if condition to only allow left threads to write at 
+            //element interfaces
+            B_new.Vector(0,K,J,I) = b_new;
+            if(update)
+                B.Vector(0,0,k,j,i,kk,jj,ii) = b_new;
         }
     );
 }

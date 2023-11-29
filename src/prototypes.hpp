@@ -19,6 +19,7 @@ extern void transform_a_to_b(SD_Solution, SD_Solution, Matrix, Matrix);
 extern void transform_a_to_b(SD_Solution, SD_Solution, Matrix);
 #endif
 extern void transform_a_to_b_1d(SD_Solution, SD_Solution, Matrix, int);
+extern void transform_a_to_b_2d(SD_Solution, SD_Solution, Matrix, int);
 
 #ifdef _3D_
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
@@ -85,7 +86,8 @@ extern void boundaries(CommHelper, Boundaries, SD_Solution);
 extern void boundaries(CommHelper, FV_Boundaries, FV_Solution);
 
 //Finite Volume
-extern void face_integral(SD_Solution, FV_Solution, Matrix, int);
+extern void face_integral(SD_Solution, FV_Solution, Matrix, int, int);
+extern void edge_integral(SD_Solution, FV_Solution, Matrix, int, int);
 extern void fv_update_solution(
     FV_Solution,
     FV_Solution,
@@ -142,6 +144,21 @@ void fallback_fluxes(
     Vector,
     double
     );
+
+void fv_update_B_solution(
+    FV_Solution,
+    FV_Solution,
+    SD_Solution,
+    FV_Solution,
+    FV_Solution,
+    Vector,
+    Vector,
+    Vector,
+    double,
+    int,
+    int,
+    bool);
+
 //Output
 extern void Write(SD_Solution, int);
 extern void Write(FV_Solution, int);
