@@ -453,6 +453,40 @@ void compute_B2_cv(
     );
 }
 
+void compute_B_cv_from_cf(
+    FV_Solution B,
+    SD_Solution B_x,
+    SD_Solution B_y,
+    SD_Solution B_z,
+    Matrix fp_to_cv
+    ){
+    int Nx = B_x.Nx;
+    int Ny = B_x.Ny;
+    int Nz = B_x.Nz;
+    int px = B_x.nx-1;
+    int py = B_x.ny;
+    int pz = B_x.nz;
+    int q = px+1;
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    SD_for_active_cells(
+        int ll;
+        double bx=0;
+        double by=0;
+        double bz=0;
+        for(ll=0; ll<q; ll++){
+            bx += B_x.Vector(0,0,k,j,i,kk,jj,ll)*fp_to_cv(ii,ll);
+            by += B_y.Vector(0,0,k,j,i,kk,ll,ii)*fp_to_cv(jj,ll); 
+            bz += B_z.Vector(0,0,k,j,i,ll,jj,ii)*fp_to_cv(kk,ll);  
+        }        
+        B.Vector(0,K,J,I) = bx;
+        B.Vector(1,K,J,I) = by;
+        B.Vector(2,K,J,I) = bz;
+        B.Vector(3,K,J,I) = bx*bx + by*by + bz*bz;
+    );
+}
+
 KOKKOS_INLINE_FUNCTION
 double upwind(double left, double right, double vel){
     if(vel==0) return 0.5*(left+right);

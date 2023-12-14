@@ -65,15 +65,21 @@ struct Induction_ader{
     FV_Solution Bx_old;
     FV_Solution By_old;
     FV_Solution Bz_old;
+    FV_Solution B_old;
     FV_Solution Bx_new;
     FV_Solution By_new;
     FV_Solution Bz_new;
+    FV_Solution B_new;
     FV_Solution Ex;
     FV_Solution Ey;
     FV_Solution Ez;
     FV_Boundaries BC_x;
     FV_Boundaries BC_y;
     FV_Boundaries BC_z;
+    FV_Solution troubles;
+    FV_Solution alpha_x;
+    FV_Solution alpha_y;
+    FV_Solution alpha_z;
     #endif
 
     Induction_ader(
@@ -188,15 +194,21 @@ struct Induction_ader{
         Bx_old.init("Bx_old",1,Z_dim,Y_dim,X_dim,0,0,1);
         By_old.init("By_old",1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz_old.init("Bz_old",1,Z_dim,Y_dim,X_dim,1,0,0);
+        B_old.init("B_old",4,Z_dim,Y_dim,X_dim,0,0,0);
         Bx_new.init("Bx_new",1,Z_dim,Y_dim,X_dim,0,0,1);
         By_new.init("By_new",1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz_new.init("Bz_new",1,Z_dim,Y_dim,X_dim,1,0,0);
+        B_new.init("B_new",4,Z_dim,Y_dim,X_dim,0,0,0);
+        troubles.init("troubles",4,Z_dim,Y_dim,X_dim,0,0,0);
+        alpha_x.init("alpha_x",4,Z_dim,Y_dim,X_dim,0,0,0);
+        alpha_y.init("alpha_y",4,Z_dim,Y_dim,X_dim,0,0,0);
+        alpha_z.init("alpha_z",4,Z_dim,Y_dim,X_dim,0,0,0);
         Ex.init("Ex",1,Z_dim,Y_dim,X_dim,1,1,0);
         Ey.init("Ey",1,Z_dim,Y_dim,X_dim,1,0,1);
         Ez.init("Ez",1,Z_dim,Y_dim,X_dim,0,1,1);
-        BC_x.init(X_dim,_BCx_,1,Z_dim.fv_nfaces,Y_dim.fv_nfaces,nGHx);
-        BC_y.init(Y_dim,_BCy_,1,Z_dim.fv_nfaces,nGHy,X_dim.fv_nfaces);
-        BC_z.init(Z_dim,_BCz_,1,nGHz,Y_dim.fv_nfaces,X_dim.fv_nfaces);
+        BC_x.init(X_dim,_BCx_,4,Z_dim.fv_nfaces,Y_dim.fv_nfaces,nGHx);
+        BC_y.init(Y_dim,_BCy_,4,Z_dim.fv_nfaces,nGHy,X_dim.fv_nfaces);
+        BC_z.init(Z_dim,_BCz_,4,nGHz,Y_dim.fv_nfaces,X_dim.fv_nfaces);
         #endif
 
         dt = Induction_compute_dt(
@@ -379,6 +391,7 @@ struct Induction_ader{
         if(Master)
             cout<<endl<<"OUTPUT "<<n_output<<endl;
         compute_B2_cv(B2_cv,Bx_fp_x,By_fp_y,Bz_fp_z,fp_to_cv,sp_to_cv);
+        Write(troubles,n_output);
         Write(B2_cv,n_output++);   
     }
 
@@ -416,22 +429,42 @@ struct Induction_ader{
 
     #ifdef FV
     void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
+        //B(sp)->B(cv)
         Transform_to_cv();
         for(int ader=0;ader<n_ader;ader++){
             Integrate_edges(ader);
-            FV_update_solution(ader, X_dim.fv_faces, Y_dim.fv_faces, Z_dim.fv_faces);
-        //    //FV_Boundaries(comm);
-        //    //detect_troubles();
+            FV_update_solution(ader, X_dim.fv_faces, Y_dim.fv_faces, Z_dim.fv_faces, 1);
+            FV_Boundaries(comm);
+            detect_troubles(
+                B_new,
+                B_old,
+                troubles,
+                #if X
+                alpha_x,
+                #endif
+                #if Y
+                alpha_y,
+                #endif
+                #if Z
+                alpha_z,
+                #endif
+                X_dim,
+                Y_dim,
+                Z_dim,
+                0
+                ); 
         //    //fallback_fluxes();
         //    //FV_Update_solution();
         }
+        //B(cv)->B(sp)
         Transform_to_sp();
     }
 
-    void FV_update_solution(int ader, Vector xs, Vector ys, Vector zs){
-        fv_update_B_solution(Bx_new, Bx_old, Bx, Ey, Ez, ys, zs, wt, dt, ader, _x_, 1);
-        fv_update_B_solution(By_new, By_old, By, Ez, Ex, zs, xs, wt, dt, ader, _y_, 1);
-        fv_update_B_solution(Bz_new, Bz_old, Bz, Ex, Ey, xs, ys, wt, dt, ader, _z_, 1);
+    void FV_update_solution(int ader, Vector xs, Vector ys, Vector zs, bool update){
+        fv_update_B_solution(Bx_new, Bx_old, Bx, Ey, Ez, ys, zs, wt, dt, ader, _x_, update);
+        fv_update_B_solution(By_new, By_old, By, Ez, Ex, zs, xs, wt, dt, ader, _y_, update);
+        fv_update_B_solution(Bz_new, Bz_old, Bz, Ex, Ey, xs, ys, wt, dt, ader, _z_, update);
+        compute_B_cv_from_cf(B_new, Bx, By, Bz, fp_to_cv);
     }
 
     void Transform_to_cv(){
@@ -440,6 +473,8 @@ struct Induction_ader{
         transform_a_to_b_2d(Bx_fp_x,Bx,sp_to_cv,_x_);
         transform_a_to_b_2d(By_fp_y,By,sp_to_cv,_y_);
         transform_a_to_b_2d(Bz_fp_z,Bz,sp_to_cv,_z_);
+        //We also need contro-volume averages for trouble dection
+        compute_B_cv_from_cf(B_old,Bx,By,Bz,fp_to_cv);
     }
 
     void Transform_to_sp(){
@@ -465,14 +500,28 @@ struct Induction_ader{
     void FV_Boundaries(CommHelper comm){
         //Communications are done sequentially in different directions
         //to ensure that corners zare properly communicated
+        //B_old contains the control volume averages for Bx,By,Bz
+        //needed to compute the trouble detection.
+        //B_new doesn't need to be communicated as each domain only
+        //needs to detect troubles in their active region
+        //detected troubles are then shared. 
         #if X
-        boundaries(comm,BC_x,Bx_old);
+        boundaries(comm,BC_x,B_old,_center_,0);
+        boundaries(comm,BC_x,Bx_old,_face_,_x_);
+        boundaries(comm,BC_x,By_old,_face_,_y_);
+        boundaries(comm,BC_x,Bz_old,_face_,_z_);
         #endif
         #if Y
-        boundaries(comm,BC_y,By_old);
+        boundaries(comm,BC_y,B_old,_center_,0);
+        boundaries(comm,BC_y,Bx_old,_face_,_x_);
+        boundaries(comm,BC_y,By_old,_face_,_y_);
+        boundaries(comm,BC_y,Bz_old,_face_,_z_);
         #endif
         #if Z
-        boundaries(comm,BC_z,Bz_old);
+        boundaries(comm,BC_z,B_old,_center_,0);
+        boundaries(comm,BC_z,Bx_old,_face_,_x_);
+        boundaries(comm,BC_z,By_old,_face_,_y_);
+        boundaries(comm,BC_z,Bz_old,_face_,_z_);
         #endif
     }
     #endif

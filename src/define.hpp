@@ -41,6 +41,7 @@
 
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_};
+enum {_center_,_face_};
 
 #define _BCx_ _periodic_
 #define _BCy_ _periodic_

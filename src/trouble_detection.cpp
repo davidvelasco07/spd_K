@@ -195,7 +195,8 @@ void detect_troubles(
     #endif
     dimension X_dim,
     dimension Y_dim,
-    dimension Z_dim
+    dimension Z_dim,
+    bool PAD
     ){
     double tolerance = 1E-6;
     NAD(W_new, W_old, troubles, tolerance);
@@ -203,5 +204,6 @@ void detect_troubles(
     smooth_extrema(W_new, alpha_y, Y_dim.fv_centers, Y_dim.fv_faces, _y_);
     smooth_extrema(W_new, alpha_z, Z_dim.fv_centers, Z_dim.fv_faces, _z_);
     relax_NAD(troubles, alpha_x, alpha_y, alpha_z);
-    PAD_criteria(W_new, troubles);
+    if(PAD)
+        PAD_criteria(W_new, troubles);
 }

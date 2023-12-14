@@ -577,7 +577,8 @@ struct Hydro_ader{
                 #endif
                 X_dim,
                 Y_dim,
-                Z_dim
+                Z_dim,
+                1
                 );
             fallback_fluxes(
                 W_old,
@@ -626,13 +627,13 @@ struct Hydro_ader{
         //Communications are done sequentially in different directions
         //to ensure that corners zare properly communicated
         #if X
-        boundaries(comm,BC_x,U);
+        boundaries(comm,BC_x,U,_center_,0);
         #endif
         #if Y
-        boundaries(comm,BC_y,U);
+        boundaries(comm,BC_y,U,_center_,0);
         #endif
         #if Z
-        boundaries(comm,BC_z,U);
+        boundaries(comm,BC_z,U,_center_,0);
         #endif
     }
 

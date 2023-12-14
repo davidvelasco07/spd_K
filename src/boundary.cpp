@@ -105,29 +105,36 @@ void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
 void boundaries(
     CommHelper comm,
     FV_Boundaries BC,
-    FV_Solution U
+    FV_Solution U,
+    int alignment,
+    int a_dim
     ){
-    int Nx = BC.Nx;
-    int Ny = BC.Ny;
-    int Nz = BC.Nz;
-    int nvar  = BC.nvar;
+    //Alignment allows to reuse this function for staggered fields,
+    //and to also reuse the same buffer, in a given direction, for
+    //fields with different staggering (like Bx, By and Bz)  
+    int dim = BC.dim;
+    int shift = alignment*(a_dim==dim);
+    int Nx = BC.Nx-(a_dim==_x_)*(alignment-shift);
+    int Ny = BC.Ny-(a_dim==_y_)*(alignment-shift);
+    int Nz = BC.Nz-(a_dim==_z_)*(alignment-shift);
     int type = BC.type;
     int N = BC.N;
-    int dim = BC.dim;
+    
+    int nvar  = U.n_var;
     FV_for_cells_all(
         int Nid[3];
         int l;
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
         if(type == _periodic_){ 
-            fv_indices(Nid,k,j,i,N-2*nGH+l,dim);
+            fv_indices(Nid,k,j,i,N-2*nGH+l-shift,dim);
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
-            fv_indices(Nid,k,j,i,    nGH+l,dim);
+            fv_indices(Nid,k,j,i,    nGH+l+shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         else if(type == _gradfree_){
-            fv_indices(Nid,k,j,i,    nGH+l,dim);
+            fv_indices(Nid,k,j,i,    nGH+l+shift,dim);
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
-            fv_indices(Nid,k,j,i,N-2*nGH+l,dim);
+            fv_indices(Nid,k,j,i,N-2*nGH+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         #ifdef MPI

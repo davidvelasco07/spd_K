@@ -72,6 +72,7 @@ extern void compute_primitives(FV_Solution, FV_Solution);
 extern void rotational_a_to_b(SD_Solution, SD_Solution, SD_Solution, Matrix, double, double, int);
 extern void compute_E(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Matrix, Matrix, int);
 extern void compute_B2_cv(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix);
+extern void compute_B_cv_from_cf(FV_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix);
 extern void compute_rotational_B(SD_Solution, SD_Solution, SD_Solution, double, double, Matrix, Matrix, double, int);
 extern double Induction_compute_dt(SD_Solution, double, double, double, Matrix, Matrix, Matrix);
 
@@ -83,7 +84,7 @@ extern void E_Ohmic_riemann_solver(SD_Solution, int, int);
 
 //Boundary Conditions
 extern void boundaries(CommHelper, Boundaries, SD_Solution);
-extern void boundaries(CommHelper, FV_Boundaries, FV_Solution);
+extern void boundaries(CommHelper, FV_Boundaries, FV_Solution, int, int);
 
 //Finite Volume
 extern void face_integral(SD_Solution, FV_Solution, Matrix, int, int);
@@ -121,7 +122,8 @@ extern void detect_troubles(
     #endif
     dimension,
     dimension,
-    dimension
+    dimension,
+    bool
     );
 
 void fallback_fluxes(
