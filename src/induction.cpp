@@ -704,3 +704,72 @@ void fv_update_B_solution(
         }
     );
 }
+
+//////////////////
+/// MUSCL-HANCOCK
+//////////////////
+
+KOKKOS_INLINE_FUNCTION
+void slopes(
+    FV_Vector W,
+    Vector x_c,
+    Vector x_f,
+    #if Y
+    Vector y_c,
+    Vector y_f,
+    #endif
+    #if Z
+    Vector z_c,
+    Vector z_f,
+    #endif
+    int k,
+    int j,
+    int i,
+    double WL[3][NVAR],
+    double WR[3][NVAR],
+    double dt){
+    
+    double wL;
+    double wR;
+    double h;
+    double w[NVAR];
+    double dwx[NVAR];
+    double dwy[NVAR];
+    double dwz[NVAR];
+    double dwt[NVAR];
+    for(int var=0; var<NVAR; var++){
+        w[var] = W(var,k,j,i);
+        wL=W(var,k,j,i-1);
+        wR=W(var,k,j,i+1);
+        h = x_c(i+1)-x_c(i);
+        dwx[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,x_f(i),x_f(i+1));
+        #if Y
+        wL=W(var,k,j-1,i);
+        wR=W(var,k,j+1,i);
+        h = y_c(j+1)-y_c(j);
+        dwy[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,y_f(j),y_f(j+1));
+        #endif
+        #if Z
+        wL=W(var,k-1,j,i);
+        wR=W(var,k+1,j,i);
+        h = z_c(k+1)-z_c(k);
+        dwz[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,z_f(k),z_f(k+1));
+        #endif
+    }
+    //corrector(w,dwt,dwz,dwy,dwx);
+    for(int var=0; var<NVAR; var++){
+        h = x_f(i+1)-x_f(i);
+        WR[_x_][var] = w[var] - dwx[var] + dwt[var]*dt/h;
+        WL[_x_][var] = w[var] + dwx[var] + dwt[var]*dt/h;
+        #if Y
+        h = y_f(j+1)-y_f(j);
+        WR[_y_][var] = w[var] - dwy[var] + dwt[var]*dt/h;
+        WL[_y_][var] = w[var] + dwy[var] + dwt[var]*dt/h;
+        #endif
+        #if Z
+        h = z_f(k+1)-z_f(k);
+        WR[_z_][var] = w[var] - dwz[var] + dwt[var]*dt/h;
+        WL[_z_][var] = w[var] + dwz[var] + dwt[var]*dt/h;
+        #endif
+    } 
+}

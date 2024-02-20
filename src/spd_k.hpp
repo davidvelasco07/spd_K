@@ -11,6 +11,7 @@
 #include "structs.hpp"
 #include "fv_structs.hpp"
 #include "global.hpp"
+#include "muscl.hpp"
 #include "prototypes.hpp"
 #include "induction_ader.hpp"
 #include "hydro_ader.hpp"

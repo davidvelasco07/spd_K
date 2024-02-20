@@ -563,18 +563,18 @@ void compute_viscous_flux(
 /// MUSCL-HANCOCK
 //////////////////
 
-KOKKOS_INLINE_FUNCTION
-double minmod(double S_L, double S_R, double x_L, double x_R){
-    double ratio,slope;
-    //Compute ratio between slopes SlopeR/SlopeL
-    ratio = S_R/S_L;
-    //limit the ratio to in (0,1)
-    ratio = max(0.0,min(ratio,1.0));
-    //mult_p_ly by SlopeL to get the limited slope at the cell center
-    slope = ratio*S_L;
-    //Compute SlopeC*dx/2                             
-    return 0.5*slope*(x_R-x_L);
-}
+//KOKKOS_INLINE_FUNCTION
+//double minmod(double S_L, double S_R, double x_L, double x_R){
+//    double ratio,slope;
+//    //Compute ratio between slopes SlopeR/SlopeL
+//    ratio = S_R/S_L;
+//    //limit the ratio to in (0,1)
+//    ratio = max(0.0,min(ratio,1.0));
+//    //mult_p_ly by SlopeL to get the limited slope at the cell center
+//    slope = ratio*S_L;
+//    //Compute SlopeC*dx/2                             
+//    return 0.5*slope*(x_R-x_L);
+//}
 
 KOKKOS_INLINE_FUNCTION
 void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz){
@@ -587,11 +587,11 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz){
     #if Y
     dWt[_vx_] -= W[_vy_]*dWy[_vx_];
     #endif
-    #ifdef Z
+    #if Z
     dWt[_vx_] -= W[_vz_]*dWz[_vx_];
     #endif
 
-    #ifdef Y
+    #if Y
     dWt[_d_] -= W[_vy_]*dWx[_d_] + W[_d_]*dWy[_vy_];
     dWt[_vy_] = -W[_vy_]*dWy[_vy_] - dWy[_p_]/W[_d_];
     dWt[_p_] -= W[_vy_]*dWy[_p_] + dWy[_vy_]*gmma*W[_p_];
@@ -601,7 +601,7 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz){
     #endif
     #endif
                          
-    #ifdef Z
+    #if Z
     dWt[_d_] -= W[_vz_]*dWz[_d_] + W[_d_]*dWz[_vz_];
     dWt[_vz_] = -W[_vz_]*dWz[_vz_] - dWz[_p_]/W[_d_];
     dWt[_p_] -= W[_vz_]*dWz[_p_] + dWz[_vz_]*gmma*W[_p_];
