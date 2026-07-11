@@ -12,6 +12,7 @@ nx3  = 8
 <time>
 tlim = 0.1
 cfl  = 0.8
+# integrator = ader        # ader | rk1 | rk2 | rk3 (SSP)
 
 <output>
 dt   = 0.1

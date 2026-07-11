@@ -30,7 +30,14 @@ struct RunConfig {
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
     int bc[3] = {0, 0, 0};               //boundary type per direction
+    int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
+    int rk_order = 3;                    //SSP-RK order (1, 2 or 3)
 };
 extern RunConfig cfg;
 
 void set_runtime_dimensionality(bool ax, bool ay, bool az);
+
+//SSP (Shu-Osher) Runge-Kutta: every stage is a forward-Euler step with the
+//full dt followed by the convex combination U <- a*U0 + (1-a)*U with the
+//step-start state U0. Fills a[] and returns the number of stages.
+int ssp_rk_coefficients(int order, double* a);

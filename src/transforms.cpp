@@ -314,6 +314,18 @@ void transform_a_to_b_2d(
     }
 }
 
+//SSP-RK convex combination of time slice 0: U <- a*U0 + (1-a)*U
+void combine_solution(SD_Solution U, SD_Solution U0, double a){
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    int nvar=U.n_var;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int var=0; var<nvar; var++)
+            U.Vector(0,var,k,j,i,kk,jj,ii) =
+                a*U0.Vector(0,var,k,j,i,kk,jj,ii)
+                + (1.0-a)*U.Vector(0,var,k,j,i,kk,jj,ii);
+    });
+}
+
 void update_prediction(
     SD_Solution U,
     SD_Solution U_ader,

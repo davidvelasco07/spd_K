@@ -48,6 +48,7 @@
 
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_};
+enum {_integrator_ader_, _integrator_rk_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_};
 enum {_center_,_face_};
 

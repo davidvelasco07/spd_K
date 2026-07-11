@@ -26,6 +26,16 @@ int NGH_rt[3] = {NGH, NGH, NGH};
 int nGH_rt[3] = {nGH, nGH, nGH};
 RunConfig cfg;
 
+int ssp_rk_coefficients(int order, double* a){
+    a[0]=0; a[1]=0; a[2]=0;
+    switch(order){
+        case 1:                                  return 1; //forward Euler
+        case 2: a[1]=0.5;                        return 2; //SSPRK(2,2) (Heun)
+        case 3: a[1]=0.75; a[2]=1.0/3.0;         return 3; //SSPRK(3,3)
+        default: return 0;
+    }
+}
+
 void set_runtime_dimensionality(bool ax, bool ay, bool az){
     cfg.active[_x_] = ax;
     cfg.active[_y_] = ay;

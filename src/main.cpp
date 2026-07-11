@@ -17,6 +17,25 @@ int problem_id(const string &name){
     exit(1);
 }
 
+//"ader" or "rkN" (N = 1, 2, 3); sets cfg.integrator and cfg.rk_order
+void select_integrator(const string &name){
+    if(name == "ader"){
+        cfg.integrator = _integrator_ader_;
+        return;
+    }
+    if(name.rfind("rk",0) == 0 && name.size() == 3){
+        int order = name[2]-'0';
+        double a[3];
+        if(ssp_rk_coefficients(order,a) > 0){
+            cfg.integrator = _integrator_rk_;
+            cfg.rk_order = order;
+            return;
+        }
+    }
+    if(Master) cout<<"ERROR: unknown integrator '"<<name<<"' (ader, rk1, rk2, rk3)"<<endl;
+    exit(1);
+}
+
 int main(int argc, char** argv){
     #ifdef MPI
     MPI_Init(&argc,&argv);
@@ -91,6 +110,7 @@ int main(int argc, char** argv){
 
         double tlim      = pin.GetOrAddReal("time","tlim",0.1);
         double dt_output = pin.GetOrAddReal("output","dt",tlim);
+        select_integrator(pin.GetOrAddString("time","integrator","ader"));
         string system_name = pin.GetOrAddString("job","system","hydro");
 
         //Number of elements on this rank
@@ -100,7 +120,10 @@ int main(int argc, char** argv){
 
         if(Master){
             cout<<"system = "<<system_name<<", ndim = "<<cfg.ndim
-                <<", p = "<<p<<", N = ("<<Nx<<","<<Ny<<","<<Nz<<")"<<endl;
+                <<", p = "<<p<<", N = ("<<Nx<<","<<Ny<<","<<Nz<<")"
+                <<", integrator = "
+                <<(cfg.integrator==_integrator_ader_ ? "ader" : "rk"+to_string(cfg.rk_order))
+                <<endl;
             //Echo the effective parameters for provenance
             std::ofstream dump(output_folder()+"parameters.txt");
             pin.Dump(dump);

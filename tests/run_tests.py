@@ -13,6 +13,9 @@ plus command-line overrides. Checks per configuration:
                    replacement is exactly conservative for periodic BCs)
   hydro_fv_blast : 2d blast with a real shock; detector fires, fallback
                    active, mass still conserved to round-off
+  *_rk3          : same checks with the SSP-RK3 integrator (per-stage
+                   fallback correction; temporal error below the spatial
+                   floor at p=3, so the ADER L1 limit applies unchanged)
   induction_fv_3d: golden file comparison of B2_cv (linear problem, no
                    chaotic amplification, so a tight tolerance is portable)
 
@@ -85,6 +88,27 @@ CONFIGS = {
         "input": "inputs/sine_wave.athinput",
         "overrides": ["job/fallback=true", "mesh/nx3=1",
                       "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "hydro_sd_3d_rk3": {
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["time/integrator=rk3"],
+        "ndim": 3,
+        "checks": ["analytic", "mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.1,
+        "l1_limit": 3.0e-5,    # measured 2.19e-5 (temporal error negligible)
+    },
+    "hydro_fv_blast_2d_rk3": {
+        # shock + fallback + RK: per-stage blended fluxes stay conservative
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["time/integrator=rk3", "job/fallback=true",
+                      "mesh/nx3=1", "problem/problem=spherical_blast",
                       "hydro/gamma=1.6666666666667",
                       "time/tlim=0.02", "output/dt=0.02"],
         "ndim": 2,

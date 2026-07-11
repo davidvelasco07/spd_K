@@ -5,6 +5,8 @@ struct Hydro_ader{
     int n_step;
     int n_ader;
     int nvar;
+    int n_stages;     //RK stages (1 for ADER)
+    double rk_a[3];   //per-stage convex weights of the SSP combination
 
     double t;
     double dt;
@@ -12,8 +14,10 @@ struct Hydro_ader{
     double nu;
     double beta;
 
-    Vector xt;
+    Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
+    Vector xx;   //spatial GL quadrature (control-volume averages of the ICs)
+    Vector wx;
 
     Matrix sp_to_fp;
     Matrix fp_to_sp;
@@ -29,6 +33,7 @@ struct Hydro_ader{
     SD_Solution W_cv;
     SD_Solution U_cv;
     SD_Solution T_sweep; //scratch for directional-sweep transforms
+    SD_Solution U0_sp;   //step-start state for the SSP-RK convex combination
 
     SD_Solution U_ader_sp;
     //Per-direction arrays are always declared; inactive directions hold
@@ -84,13 +89,30 @@ struct Hydro_ader{
         nvar = NVAR;
         n_output = 0;
         n_step = 0;
-        n_ader = p+1;
         t=0;
         nu = _nu;
         beta = _beta;
-        Kokkos::resize(xt,p+1);
-        Kokkos::resize(wt,p+1);
-        gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
+        Kokkos::resize(xx,p+1);
+        Kokkos::resize(wx,p+1);
+        gauss_legendre(0.0, 1.0, p+1, xx.data(), wx.data());
+
+        //ADER carries p+1 temporal quadrature slices at the same GL nodes as
+        //the spatial quadrature; an SSP-RK stage is a single slice advanced
+        //by a full forward-Euler step (weight 1) and combined convexly with U0
+        if(cfg.integrator==_integrator_rk_){
+            n_ader = 1;
+            n_stages = ssp_rk_coefficients(cfg.rk_order,rk_a);
+            Kokkos::resize(xt,1);
+            Kokkos::resize(wt,1);
+            Kokkos::deep_copy(xt,0.0);
+            Kokkos::deep_copy(wt,1.0);
+        }
+        else{
+            n_ader = p+1;
+            n_stages = 1;
+            xt = xx;
+            wt = wx;
+        }
 
         //////////////
         //Matrices to perform tensorial transformations
@@ -101,8 +123,6 @@ struct Hydro_ader{
         Kokkos::resize(sp_to_cv,p+1,p+1);
         Kokkos::resize(cv_to_sp,p+1,p+1);
         Kokkos::resize(fp_to_cv,p+1,p+2);
-        Kokkos::resize(ader,p+1,p+1);
-        Kokkos::resize(invader,p+1,p+1);
 
         lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
         lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
@@ -110,8 +130,13 @@ struct Hydro_ader{
         integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
         integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
         inverse(sp_to_cv, cv_to_sp, p+1);
-        ader_matrix(ader, xt, wt, p+1);
-        inverse(ader, invader, p+1);
+        //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
+        if(cfg.integrator==_integrator_ader_){
+            Kokkos::resize(ader,p+1,p+1);
+            Kokkos::resize(invader,p+1,p+1);
+            ader_matrix(ader, xt, wt, p+1);
+            inverse(ader, invader, p+1);
+        }
 
         W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         U_sp.init("U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -120,6 +145,8 @@ struct Hydro_ader{
         T_sweep.init("T_sweep",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
         U_ader_sp.init("U_ader_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        if(cfg.integrator==_integrator_rk_)
+            U0_sp.init("U0_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
         U_ader_fp_x.init("U_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
         F_ader_fp_x.init("F_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
@@ -159,7 +186,7 @@ struct Hydro_ader{
         ////////////////////////
         //Initial Conditions:
         ////////////////////////
-        Initialize(W_cv,X_dim.sd_faces,Y_dim.sd_faces,Z_dim.sd_faces,xt,wt);
+        Initialize(W_cv,X_dim.sd_faces,Y_dim.sd_faces,Z_dim.sd_faces,xx,wx);
         #ifdef PERTURB_IC
         //Diagnostic: 1-ulp perturbation to measure the solver's intrinsic
         //round-off amplification, independent of any code change
@@ -194,29 +221,10 @@ struct Hydro_ader{
         double t_output=dt_output;
 
         while(t<t_end){
-            ////Initialize ADER time slices
-            copy_ader(U_sp,U_ader_sp);
-
-            //Picard iteration
-            for(int ader=0;ader<n_ader;ader++){
-                Interpolate_to_fp();
-                Compute_Fluxes();
-                Boundaries(comm);
-                Riemann_Solver();
-
-                #ifdef VISCOSITY
-                Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
-                Boundaries(comm);
-                Rusanov_Solver();
-                #endif
-
-                if(ader<n_ader-1)
-                    Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
-            }
-            if(cfg.fallback)
-                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+            if(cfg.integrator==_integrator_rk_)
+                RK_step(comm,X_dim,Y_dim,Z_dim);
             else
-                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+                ADER_step(comm,X_dim,Y_dim,Z_dim);
             compute_primitives(U_sp,W_sp);
             transform_sp_to_cv(W_sp,W_cv);
             t+=dt;
@@ -234,6 +242,58 @@ struct Hydro_ader{
             }
         }
         cout<<endl;
+    }
+
+    //One evaluation of the spatial operator on the n_ader slices of the
+    //U_ader_* arrays: interpolation to flux points, physical fluxes, halo
+    //exchange and Riemann solve (plus viscous terms when enabled)
+    void Solve_fluxes(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        Interpolate_to_fp();
+        Compute_Fluxes();
+        Boundaries(comm);
+        Riemann_Solver();
+
+        #ifdef VISCOSITY
+        Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
+        Boundaries(comm);
+        Rusanov_Solver();
+        #endif
+    }
+
+    void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        ////Initialize ADER time slices
+        copy_ader(U_sp,U_ader_sp);
+
+        //Picard iteration
+        for(int ader=0;ader<n_ader;ader++){
+            Solve_fluxes(comm,X_dim,Y_dim,Z_dim);
+            if(ader<n_ader-1)
+                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
+        }
+        if(cfg.fallback)
+            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+        else
+            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+    }
+
+    //SSP-RK step (Shu-Osher form): each stage is a full forward-Euler step
+    //(reusing the ADER machinery with a single time slice, so the per-stage
+    //fallback detection/blending applies unchanged) followed by the convex
+    //combination U <- a*U0 + (1-a)*U. Convexity preserves the admissibility
+    //enforced per stage, and every contribution stays in flux form, so the
+    //blended update remains exactly conservative.
+    void RK_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        Kokkos::deep_copy(U0_sp.Vector,U_sp.Vector);
+        for(int s=0;s<n_stages;s++){
+            copy_ader(U_sp,U_ader_sp);
+            Solve_fluxes(comm,X_dim,Y_dim,Z_dim);
+            if(cfg.fallback)
+                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+            else
+                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+            if(rk_a[s]>0)
+                combine_solution(U_sp,U0_sp,rk_a[s]);
+        }
     }
 
     void transform_cv_to_sp(SD_Solution U_cv, SD_Solution U_sp){

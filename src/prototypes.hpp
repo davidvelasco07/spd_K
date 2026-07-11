@@ -18,6 +18,7 @@ extern void transform_a_to_b_1d(SD_Solution, SD_Solution, Matrix, int);
 extern void transform_a_to_b_1d_slice(SD_Solution, SD_Solution, Matrix, int, int);
 extern void transform_a_to_b_2d_ref(SD_Solution, SD_Solution, Matrix, int);
 extern void transform_a_to_b_2d(SD_Solution, SD_Solution, SD_Solution, Matrix, int);
+extern void combine_solution(SD_Solution, SD_Solution, double);
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
