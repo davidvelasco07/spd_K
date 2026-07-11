@@ -118,6 +118,30 @@ int main(int argc, char** argv){
         int Ny = ay ? NY/comm.ny : 1;
         int Nz = az ? NZ/comm.nz : 1;
 
+        //Meshblock decomposition (elements per block; default = one block
+        //covering the whole rank domain, i.e. the single-block solver)
+        int NBx = pin.GetOrAddInteger("meshblock","nx1",Nx);
+        int NBy = pin.GetOrAddInteger("meshblock","nx2",Ny);
+        int NBz = pin.GetOrAddInteger("meshblock","nx3",Nz);
+        if(!ay) NBy = 1;
+        if(!az) NBz = 1;
+        bool multiblock = (NBx!=Nx)||(NBy!=Ny)||(NBz!=Nz);
+        if(multiblock){
+            if(NBx<1 || Nx%NBx || NBy<1 || Ny%NBy || NBz<1 || Nz%NBz){
+                if(Master) cout<<"ERROR: meshblock size ("<<NBx<<","<<NBy<<","<<NBz
+                               <<") must divide the rank domain ("<<Nx<<","<<Ny<<","<<Nz<<")"<<endl;
+                exit(1);
+            }
+            if(comm.nx*comm.ny*comm.nz>1){
+                if(Master) cout<<"ERROR: meshblocks are not yet supported with MPI"<<endl;
+                exit(1);
+            }
+            if(system_name!="hydro"){
+                if(Master) cout<<"ERROR: meshblocks are only supported for the hydro system"<<endl;
+                exit(1);
+            }
+        }
+
         if(Master){
             cout<<"system = "<<system_name<<", ndim = "<<cfg.ndim
                 <<", p = "<<p<<", N = ("<<Nx<<","<<Ny<<","<<Nz<<")"
@@ -153,8 +177,14 @@ int main(int argc, char** argv){
         else if(system_name == "hydro"){
             double nu   = pin.GetOrAddReal("hydro","nu",0.00001);
             double beta = pin.GetOrAddReal("hydro","beta",-2./3*pin.GetReal("hydro","nu"));
-            Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
-            system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+            if(multiblock){
+                Hydro_mesh mesh(comm,p,X_dim,Y_dim,Z_dim,NBx,NBy,NBz,x,w,x_sp,x_fp,nu,beta);
+                mesh.time_evolution(comm,tlim,dt_output);
+            }
+            else{
+                Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
+                system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+            }
         }
         else{
             if(Master) cout<<"ERROR: unknown system '"<<system_name<<"'"<<endl;

@@ -9,6 +9,11 @@ nx1  = 8
 nx2  = 8
 nx3  = 8
 
+<meshblock>
+# nx1 = 4                    # elements per block; must divide mesh/nx1
+# nx2 = 4                    # default: one block covering the whole domain
+# nx3 = 4
+
 <time>
 tlim = 0.1
 cfl  = 0.8

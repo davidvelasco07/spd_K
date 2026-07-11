@@ -101,12 +101,110 @@ void boundaries(
     });
 }
 
+//Fill the direction-dim interface ghost planes of U from the neighbor
+//blocks UL (left) and UR (right), with the same semantics as the periodic
+//exchange above: the ghost element's interface flux point receives the
+//neighbor's last active interface value. A side of type _gradfree_ ignores
+//the neighbor and copies the block's own first/last active value (domain
+//edge); with periodic BCs the wrap is resolved by the caller's neighbor
+//lookup, so both sides are plain neighbor copies.
+void block_boundary_sd(
+    SD_Solution U,
+    SD_Solution UL,
+    SD_Solution UR,
+    int typeL,
+    int typeR,
+    int dim){
+    int Nx = dim==_x_ ? 1 : U.Nx;
+    int Ny = dim==_y_ ? 1 : U.Ny;
+    int Nz = dim==_z_ ? 1 : U.Nz;
+    int px = dim==_x_ ? 1 : U.nx;
+    int py = dim==_y_ ? 1 : U.ny;
+    int pz = dim==_z_ ? 1 : U.nz;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader = U.n_ader;
+    int nvar  = U.n_var;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int Nid[3];
+        int nid[3];
+        double v;
+        //left ghost (element 0, interface point n-1)
+        if(typeL == _gradfree_)
+            v = value(U ,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
+        else
+            v = value(UL,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
+        indices(Nid,nid,k,j,i,kk,jj,ii,  0,n-1,dim);
+        U.Vector(INDICES) = v;
+        //right ghost (element N-1, interface point 0)
+        if(typeR == _gradfree_)
+            v = value(U ,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
+        else
+            v = value(UR,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
+        indices(Nid,nid,k,j,i,kk,jj,ii,N-1,  0,dim);
+        U.Vector(INDICES) = v;
+        }}
+    });
+}
+
 KOKKOS_INLINE_FUNCTION
 void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     //Returns the indeces according to the dimension
     N_id[_x_] = dim == _x_ ? l  : i;
     N_id[_y_] = dim == _y_ ? l  : j;
     N_id[_z_] = dim == _z_ ? l  : k;
+}
+
+//Fill the direction-dim nGH ghost-cell layers of U from the neighbor blocks
+//UL/UR (cell-centered alignment). Same layer semantics as the single-block
+//exchange below: ghost layer l gets the neighbor's active layer nGH+l (from
+//the facing side), or the block's own facing active layers for _gradfree_.
+//Directions must be exchanged sequentially over all blocks (x, then y, then
+//z) so corner ghosts propagate, exactly like the single-block path.
+void block_boundary_fv(
+    FV_Solution U,
+    FV_Solution UL,
+    FV_Solution UR,
+    int typeL,
+    int typeR,
+    int dim){
+    int Nx = dim==_x_ ? nGHx : U.Nx;
+    int Ny = dim==_y_ ? nGHy : U.Ny;
+    int Nz = dim==_z_ ? nGHz : U.Nz;
+    int N  = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int ngh = nGH_rt[dim];
+    int nvar = U.n_var;
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        for(int var=0; var<nvar; var++){
+        int Nid[3];
+        double v;
+        int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        //left ghost layer l
+        if(typeL == _gradfree_){
+            fv_indices(Nid,k,j,i,ngh+l,dim);
+            v = U.Vector(FV_INDICES);
+        }
+        else{
+            fv_indices(Nid,k,j,i,N-2*ngh+l,dim);
+            v = UL.Vector(FV_INDICES);
+        }
+        fv_indices(Nid,k,j,i,l,dim);
+        U.Vector(FV_INDICES) = v;
+        //right ghost layer l
+        if(typeR == _gradfree_){
+            fv_indices(Nid,k,j,i,N-2*ngh+l,dim);
+            v = U.Vector(FV_INDICES);
+        }
+        else{
+            fv_indices(Nid,k,j,i,ngh+l,dim);
+            v = UR.Vector(FV_INDICES);
+        }
+        fv_indices(Nid,k,j,i,N-ngh+l,dim);
+        U.Vector(FV_INDICES) = v;
+        }
+    });
 }
 
 void boundaries(

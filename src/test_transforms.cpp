@@ -129,6 +129,63 @@ int main(int argc, char** argv){
             failures += check("transform_a_to_b_2d dim="+to_string(dim), max_diff(S_ref,S_new), 1e-13);
         }
 
+        //AMR transfer operators: prolongation is exact for (elementwise)
+        //degree-p polynomial data, and restriction inverts it
+        {
+            Matrix P("P",2*(p+1),p+1);
+            Matrix R("R",p+1,2*(p+1));
+            transfer_matrices(P,R,x_sp,p);
+
+            SD_Solution C ("C" ,1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            SD_Solution C2("C2",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            SD_Solution F ("F" ,1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+
+            //Nodal values of a global degree-p polynomial on the block
+            //domain [0,1]^3 (h = 1/N per dim)
+            auto poly = [](int var, double x, double y, double z){
+                return (1.0+var) + x*x*x - 2.0*y*y + 0.5*z + x*y - z*z*x;
+            };
+            double h = 1.0/N;
+            for(int var=0; var<nvar; var++)
+            for(int k=0; k<C.Nz; k++)
+            for(int j=0; j<C.Ny; j++)
+            for(int i=0; i<C.Nx; i++)
+            for(int kk=0; kk<C.nz; kk++)
+            for(int jj=0; jj<C.ny; jj++)
+            for(int ii=0; ii<C.nx; ii++)
+                C.Vector(0,var,k,j,i,kk,jj,ii) =
+                    poly(var,(i-NGHx+x_sp[ii])*h,(j-NGHy+x_sp[jj])*h,(k-NGHz+x_sp[kk])*h);
+            //ghosts are untouched by the child loop below; copy them so the
+            //identity check can compare full arrays
+            Kokkos::deep_copy(C2.Vector,C.Vector);
+
+            double dmax=0;
+            for(int c=0; c<8; c++){
+                int cx=c&1, cy=(c>>1)&1, cz=(c>>2)&1;
+                prolongate_block(C,F,P,cx,cy,cz);
+                Kokkos::fence();
+                //child (cx,cy,cz) covers fine elements [c*N, c*N+N) of the
+                //2N-element fine grid with spacing h/2
+                for(int var=0; var<nvar; var++)
+                for(int k=NGHz; k<F.Nz-NGHz; k++)
+                for(int j=NGHy; j<F.Ny-NGHy; j++)
+                for(int i=NGHx; i<F.Nx-NGHx; i++)
+                for(int kk=0; kk<F.nz; kk++)
+                for(int jj=0; jj<F.ny; jj++)
+                for(int ii=0; ii<F.nx; ii++){
+                    double x = (cx*N+i-NGHx+x_sp[ii])*0.5*h;
+                    double y = (cy*N+j-NGHy+x_sp[jj])*0.5*h;
+                    double z = (cz*N+k-NGHz+x_sp[kk])*0.5*h;
+                    dmax = max(dmax, abs(F.Vector(0,var,k,j,i,kk,jj,ii)-poly(var,x,y,z)));
+                }
+                restrict_block(F,C2,R,cx,cy,cz);
+                Kokkos::fence();
+            }
+            failures += check("prolongate_block exact (degree-p data)", dmax, 1e-12);
+            //the degree-(2p+1) restriction basis amplifies round-off by ~1e2
+            failures += check("restrict(prolongate) identity", max_diff(C,C2), 1e-11);
+        }
+
         //Face integral of an ADER flux slice, one per direction
         int nader = 3;
         for(int dim=0; dim<3; dim++){

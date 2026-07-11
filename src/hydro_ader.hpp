@@ -83,7 +83,8 @@ struct Hydro_ader{
         double* x_sp,
         double* x_fp,
         double _nu,
-        double _beta
+        double _beta,
+        bool standalone=true //false when driven as one block of a mesh
     ){
         //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
         nvar = NVAR;
@@ -204,9 +205,11 @@ struct Hydro_ader{
         compute_conservatives(W_sp,U_sp);
 
         Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
-        if(Master)
-            cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
-        Write_outputs();
+        if(standalone){
+            if(Master)
+                cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
+            Write_outputs();
+        }
     }
 
     void time_evolution(
@@ -245,11 +248,16 @@ struct Hydro_ader{
     }
 
     //One evaluation of the spatial operator on the n_ader slices of the
-    //U_ader_* arrays: interpolation to flux points, physical fluxes, halo
-    //exchange and Riemann solve (plus viscous terms when enabled)
-    void Solve_fluxes(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+    //U_ader_* arrays, split into phases around the ghost exchange so a
+    //multi-block driver can substitute block-to-block exchanges for the
+    //single-block halo exchange.
+    void Fluxes_pre(){
         Interpolate_to_fp();
         Compute_Fluxes();
+    }
+
+    void Solve_fluxes(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        Fluxes_pre();
         Boundaries(comm);
         Riemann_Solver();
 
@@ -475,44 +483,87 @@ struct Hydro_ader{
     }
     #endif
 
-    void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
+    //FV update phases: the per-node body is split at every ghost exchange
+    //(U_old/U_new, troubles, theta) so a multi-block driver can run each
+    //phase over all blocks and substitute block-to-block exchanges. The
+    //single-block wrapper below preserves the exact original sequence.
+
+    void FV_begin(){
         transform_sp_to_cv(U_sp,U_cv);
+    }
+
+    //Tentative high-order update: SD face fluxes -> FV faces -> candidate
+    void FV_flux_update(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        Integrate_fluxes(ader);
+        fv_update_solution(U_new,U_old,U_cv,
+            F_x,X_dim.fv_faces,
+            F_y,Y_dim.fv_faces,
+            F_z,Z_dim.fv_faces,
+            wt,ader,dt,0);
+    }
+
+    //Requires ghosted U_old/U_new
+    void FV_detect(dimension X_dim, dimension Y_dim, dimension Z_dim){
+        compute_primitives(U_new,W_new);
+        compute_primitives(U_old,W_old);
+        //Following the reference implementation, only density and
+        //pressure enter the NAD/SED checks (uniform or zero fields,
+        //like transverse velocities, have no meaningful relative band)
+        detect_troubles(W_new,W_old,troubles,
+            alpha_x,alpha_y,alpha_z,
+            X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
+    }
+
+    //Fractional blend factor: spread the trouble flags to the neighborhood
+    //(0.75/0.5/0.375 weights + 0.25 ring), or use the raw flags when
+    //blending is disabled. Requires ghosted trouble flags.
+    void FV_theta(){
+        if(cfg.blending){
+            apply_blending(troubles,theta_tmp);
+            blending_ring(theta_tmp,theta);
+        }
+        else
+            theta_from_troubles(troubles,theta);
+    }
+
+    //Blend MUSCL fluxes into the troubled faces and redo the update.
+    //Requires ghosted theta (identical blended fluxes on both sides of
+    //every face, so the correction stays exactly conservative).
+    void FV_apply(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        fallback_fluxes(W_old,theta,
+            X_dim.fv_centers,X_dim.fv_faces,F_x,
+            Y_dim.fv_centers,Y_dim.fv_faces,F_y,
+            Z_dim.fv_centers,Z_dim.fv_faces,F_z,
+            ader,wt,dt);
+        fv_update_solution(U_new,U_old,U_cv,
+            F_x,X_dim.fv_faces,
+            F_y,Y_dim.fv_faces,
+            F_z,Z_dim.fv_faces,
+            wt,ader,dt,1);
+    }
+
+    void FV_end(){
+        transform_cv_to_sp(U_cv,U_sp);
+    }
+
+    void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
+        FV_begin();
         #ifdef DEBUG_MASS
         printf("step %d mass in : %.15e\n", n_step, fv_mass(U_cv,X_dim,Y_dim,Z_dim));
         #endif
         for(int ader=0;ader<n_ader;ader++){
-            Integrate_fluxes(ader);
-            fv_update_solution(U_new,U_old,U_cv,
-                F_x,X_dim.fv_faces,
-                F_y,Y_dim.fv_faces,
-                F_z,Z_dim.fv_faces,
-                wt,ader,dt,0);
+            FV_flux_update(ader,X_dim,Y_dim,Z_dim);
             #ifdef DEBUG_MASS
             printf("  ader %d U_new after SD-flux update : %.15e\n", ader, fv_mass_cells(U_new,X_dim,Y_dim,Z_dim));
             #endif
             FV_Boundaries(comm,U_old);
             FV_Boundaries(comm,U_new);
-            compute_primitives(U_new,W_new);
-            compute_primitives(U_old,W_old);
-            //Following the reference implementation, only density and
-            //pressure enter the NAD/SED checks (uniform or zero fields,
-            //like transverse velocities, have no meaningful relative band)
-            detect_troubles(W_new,W_old,troubles,
-                alpha_x,alpha_y,alpha_z,
-                X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
+            FV_detect(X_dim,Y_dim,Z_dim);
             //Ghost flags must be periodic images so that the blending
             //stencils near the domain boundary see the same data as their
             //periodic partners
             FV_Boundaries(comm,troubles);
-            //Fractional blend factor: spread the trouble flags to the
-            //neighborhood (0.75/0.5/0.375 weights + 0.25 ring), or use the
-            //raw flags when blending is disabled
-            if(cfg.blending){
-                apply_blending(troubles,theta_tmp);
-                blending_ring(theta_tmp,theta);
-            }
-            else
-                theta_from_troubles(troubles,theta);
+            FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical
             //blended fluxes (exact conservation)
@@ -520,16 +571,7 @@ struct Hydro_ader{
             #ifdef DEBUG_MASS
             if(t==0 && ader==0) Write(F_x,899);
             #endif
-            fallback_fluxes(W_old,theta,
-                X_dim.fv_centers,X_dim.fv_faces,F_x,
-                Y_dim.fv_centers,Y_dim.fv_faces,F_y,
-                Z_dim.fv_centers,Z_dim.fv_faces,F_z,
-                ader,wt,dt);
-            fv_update_solution(U_new,U_old,U_cv,
-                F_x,X_dim.fv_faces,
-                F_y,Y_dim.fv_faces,
-                F_z,Z_dim.fv_faces,
-                wt,ader,dt,1);
+            FV_apply(ader,X_dim,Y_dim,Z_dim);
             #ifdef DEBUG_MASS
             printf("  ader %d U_new after fallback update: %.15e\n", ader, fv_mass_cells(U_new,X_dim,Y_dim,Z_dim));
             if(t==0 && ader==0){
@@ -540,12 +582,10 @@ struct Hydro_ader{
                 Write(U_old,904);
                 Write(U_new,905);
             }
-            #endif
-            #ifdef DEBUG_MASS
             printf("step %d ader %d mass: %.15e\n", n_step, ader, fv_mass(U_cv,X_dim,Y_dim,Z_dim));
             #endif
         }
-        transform_cv_to_sp(U_cv,U_sp);
+        FV_end();
         #ifdef DEBUG_MASS
         transform_sp_to_cv(U_sp,U_cv);
         printf("step %d roundtrip : %.15e\n", n_step, fv_mass(U_cv,X_dim,Y_dim,Z_dim));

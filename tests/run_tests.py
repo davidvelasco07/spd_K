@@ -16,6 +16,10 @@ plus command-line overrides. Checks per configuration:
   *_rk3          : same checks with the SSP-RK3 integrator (per-stage
                    fallback correction; temporal error below the spatial
                    floor at p=3, so the ADER L1 limit applies unchanged)
+  *_mb           : multi-block (meshblock) runs; the per-cell arithmetic is
+                   identical to single-block, so the stitched active region
+                   must match the single-block golden (ghosts excluded: the
+                   stitched output array has no evolved ghost data)
   induction_fv_3d: golden file comparison of B2_cv (linear problem, no
                    chaotic amplification, so a tight tolerance is portable)
 
@@ -111,6 +115,48 @@ CONFIGS = {
                       "mesh/nx3=1", "problem/problem=spherical_blast",
                       "hydro/gamma=1.6666666666667",
                       "time/tlim=0.02", "output/dt=0.02"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "hydro_sd_3d_mb": {
+        # 2x2x2 blocks of 4^3 elements: must reproduce the single-block
+        # solution (block exchanges feed the same operands to the same
+        # kernels, so the active region matches to the golden tolerance)
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=4"],
+        "ndim": 3,
+        "checks": ["analytic", "mass_strict", "golden_active"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.1,
+        "l1_limit": 3.0e-5,
+        "golden_name": "hydro_sd",
+        "golden_rtol": 1e-6,
+    },
+    "hydro_fv_blast_2d_mb": {
+        # shock + fallback across block boundaries (4x2 blocks): the blended
+        # fluxes on both sides of every block face are identical, so mass is
+        # still conserved to round-off
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx3=1",
+                      "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02",
+                      "meshblock/nx1=2", "meshblock/nx2=4"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "hydro_fv_blast_2d_rk3_mb": {
+        # RK stages + per-stage fallback + block exchanges combined
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["time/integrator=rk3", "job/fallback=true",
+                      "mesh/nx3=1", "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02",
+                      "meshblock/nx1=4", "meshblock/nx2=2"],
         "ndim": 2,
         "checks": ["mass_strict"],
         "field": "W_cv_N8p3_1_0.dat",
@@ -218,17 +264,24 @@ def check_mass(outdir, cfg, limit):
     return drift < limit, f"mass drift = {drift:.3e} (limit {limit:.1e})"
 
 
-def check_golden(outdir, cfg, regen):
+def check_golden(outdir, cfg, regen, active_only=False):
     gdir = os.path.join(GOLDEN_DIR, cfg["golden_name"])
     gfile = os.path.join(gdir, cfg["field"])
     new = os.path.join(outdir, cfg["field"])
     if regen or not os.path.isfile(gfile):
+        if active_only:
+            return False, "golden missing (active-only checks never regenerate)"
         os.makedirs(gdir, exist_ok=True)
         shutil.copy(new, gfile)
         return True, f"golden (re)generated: {gfile}"
     a, b = np.fromfile(gfile), np.fromfile(new)
     if a.shape != b.shape:
         return False, f"golden size mismatch {a.size} vs {b.size}"
+    if active_only:
+        shp = shape(cfg["ndim"])
+        sl = tuple(slice(NGH, -NGH) if s > 1 else slice(None) for s in shp[2:5])
+        s = (slice(None),) * 2 + sl
+        a, b = a.reshape(shp)[s], b.reshape(shp)[s]
     diff = np.abs(a - b).max() / max(np.abs(a).max(), 1e-300)
     rtol = cfg["golden_rtol"]
     return diff < rtol, f"golden max rel diff = {diff:.3e} (rtol {rtol:.1e})"
@@ -267,6 +320,8 @@ def main():
                 ok, msg = check_mass(outdir, cfg, 1e-12)
             elif chk == "golden":
                 ok, msg = check_golden(outdir, cfg, args.regen_goldens)
+            elif chk == "golden_active":
+                ok, msg = check_golden(outdir, cfg, False, active_only=True)
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1
 

@@ -18,5 +18,6 @@ using namespace H5;
 #include "prototypes.hpp"
 #include "induction_ader.hpp"
 #include "hydro_ader.hpp"
+#include "hydro_mesh.hpp"
 
 using namespace std;

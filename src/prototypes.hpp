@@ -20,6 +20,12 @@ extern void transform_a_to_b_2d_ref(SD_Solution, SD_Solution, Matrix, int);
 extern void transform_a_to_b_2d(SD_Solution, SD_Solution, SD_Solution, Matrix, int);
 extern void combine_solution(SD_Solution, SD_Solution, double);
 
+//AMR transfer operators (prolongation/restriction between levels)
+extern void transfer_matrices(Matrix, Matrix, double*, int);
+extern void prolongate_block(SD_Solution, SD_Solution, Matrix, int, int, int);
+extern void restrict_block(SD_Solution, SD_Solution, Matrix, int, int, int);
+extern void gather_block(SD_Solution, SD_Solution, int, int, int);
+
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
 extern void update_B_prediction(SD_Solution,SD_Solution,SD_Solution,SD_Solution,Matrix,Matrix,Vector,double,double,double,int);
@@ -60,6 +66,9 @@ extern void E_Ohmic_riemann_solver(SD_Solution, int, int);
 //Boundary Conditions
 extern void boundaries(CommHelper, Boundaries, SD_Solution);
 extern void boundaries(CommHelper, FV_Boundaries, FV_Solution, int, int);
+//Block-to-block ghost exchange (multi-block, single rank)
+extern void block_boundary_sd(SD_Solution, SD_Solution, SD_Solution, int, int, int);
+extern void block_boundary_fv(FV_Solution, FV_Solution, FV_Solution, int, int, int);
 
 //Finite Volume
 extern void face_integral_ref(SD_Solution, FV_Solution, Matrix, int, int);

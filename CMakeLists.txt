@@ -48,6 +48,7 @@ add_executable(${PROJECT_NAME}
     src/induction.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
+    src/amr.cpp
 )
 if(SPD_DEFINES)
   target_compile_definitions(${PROJECT_NAME} PRIVATE ${SPD_DEFINES})
@@ -72,6 +73,7 @@ add_executable(spd_K_test
     src/induction.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
+    src/amr.cpp
 )
 if(SPD_DEFINES)
   target_compile_definitions(spd_K_test PRIVATE ${SPD_DEFINES})
