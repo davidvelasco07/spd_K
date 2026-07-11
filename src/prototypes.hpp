@@ -11,33 +11,22 @@ extern void integral_matrix(Matrix, double*, double*, int, int);
 extern void inverse(Matrix, Matrix, int);
 
 //Transforms
-#if DIM==3
-extern void transform_a_to_b(SD_Solution, SD_Solution, Matrix, Matrix, Matrix);
-#elif DIM==2
-extern void transform_a_to_b(SD_Solution, SD_Solution, Matrix, Matrix);
-#else
-extern void transform_a_to_b(SD_Solution, SD_Solution, Matrix);
-#endif
+extern void transform_a_to_b_ref(SD_Solution, SD_Solution, Matrix, Matrix, Matrix);
+extern void transform_a_to_b(SD_Solution, SD_Solution, SD_Solution, Matrix);
+extern void transform_a_to_b_team(SD_Solution, SD_Solution, Matrix);
 extern void transform_a_to_b_1d(SD_Solution, SD_Solution, Matrix, int);
-extern void transform_a_to_b_2d(SD_Solution, SD_Solution, Matrix, int);
+extern void transform_a_to_b_1d_slice(SD_Solution, SD_Solution, Matrix, int, int);
+extern void transform_a_to_b_2d_ref(SD_Solution, SD_Solution, Matrix, int);
+extern void transform_a_to_b_2d(SD_Solution, SD_Solution, SD_Solution, Matrix, int);
 
-#ifdef _3D_
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
-#else
-extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
-extern void update_solution(SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
-#endif
 extern void update_B_prediction(SD_Solution,SD_Solution,SD_Solution,SD_Solution,Matrix,Matrix,Vector,double,double,double,int);
 extern void update_B_solution(SD_Solution,SD_Solution,SD_Solution,Matrix,Vector,double,double,double,int);
 
 
 //Initial Conditions
-#ifdef _3D_
 extern void Initialize(SD_Solution,Matrix,Matrix,Matrix,Vector,Vector);
-#else
-extern void Initialize(SD_Solution,Matrix,Matrix,Vector,Vector);
-#endif
 extern void Initialize_ep(SD_Solution,Matrix,Matrix,Matrix,int);
 
 //Hydro
@@ -46,22 +35,7 @@ extern void compute_primitives(SD_Solution, SD_Solution);
 extern void compute_fluxes(SD_Solution, SD_Solution, int, int, int);
 extern double compute_dt(SD_Solution, double, double, double);
 extern void compute_gradient(SD_Solution, SD_Solution, double, Matrix, int);
-extern void compute_viscous_flux(
-    SD_Solution,
-    SD_Solution,
-    int,
-    #ifdef _2D_
-    SD_Solution,
-    int,
-    #endif
-    #ifdef _3D_
-    SD_Solution,
-    int,
-    #endif
-    Matrix,
-    double,
-    double,
-    int);
+extern void compute_viscous_flux(SD_Solution, SD_Solution, int, SD_Solution, int, SD_Solution, int, Matrix, double, double, int);
 
 
 extern void compute_conservatives(FV_Solution, FV_Solution);
@@ -87,65 +61,29 @@ extern void boundaries(CommHelper, Boundaries, SD_Solution);
 extern void boundaries(CommHelper, FV_Boundaries, FV_Solution, int, int);
 
 //Finite Volume
-extern void face_integral(SD_Solution, FV_Solution, Matrix, int, int);
+extern void face_integral_ref(SD_Solution, FV_Solution, Matrix, int, int);
+extern void face_integral(SD_Solution, FV_Solution, SD_Solution, Matrix, int, int);
 extern void edge_integral(SD_Solution, FV_Solution, Matrix, int, int);
 extern void fv_update_solution(
-    FV_Solution,
-    FV_Solution,
-    SD_Solution,
-    FV_Solution,
-    Vector,
-    #ifdef _2D_ 
-    FV_Solution,
-    Vector,
-    #endif
-    #ifdef _3D_
-    FV_Solution,
-    Vector, 
-    #endif
-    Vector, 
-    int, 
-    double,
-    bool);
+    FV_Solution, FV_Solution, SD_Solution,
+    FV_Solution, Vector, FV_Solution, Vector, FV_Solution, Vector,
+    Vector, int, double, bool);
 
 //Trouble detection
 extern void detect_troubles(
-    FV_Solution,
-    FV_Solution,
-    FV_Solution,
-    FV_Solution,
-    #ifdef _2D_
-    FV_Solution,
-    #endif
-    #ifdef _3D_
-    FV_Solution,
-    #endif
-    dimension,
-    dimension,
-    dimension,
-    bool
-    );
+    FV_Solution, FV_Solution, FV_Solution,
+    FV_Solution, FV_Solution, FV_Solution,
+    dimension, dimension, dimension, bool, int);
+extern void apply_blending(FV_Solution, FV_Solution);
+extern void blending_ring(FV_Solution, FV_Solution);
+extern void theta_from_troubles(FV_Solution, FV_Solution);
 
 void fallback_fluxes(
-    FV_Solution,
-    FV_Solution,
-    Vector,
-    Vector,
-    FV_Solution,
-    #ifdef _2D_
-    Vector,
-    Vector,
-    FV_Solution,
-    #endif
-    #ifdef _3D_
-    Vector,
-    Vector,
-    FV_Solution,
-    #endif
-    int,
-    Vector,
-    double
-    );
+    FV_Solution, FV_Solution,
+    Vector, Vector, FV_Solution,
+    Vector, Vector, FV_Solution,
+    Vector, Vector, FV_Solution,
+    int, Vector, double);
 
 void fv_update_B_solution(
     FV_Solution,
@@ -162,6 +100,7 @@ void fv_update_B_solution(
     bool);
 
 //Output
+extern string output_folder();
 extern void Write(SD_Solution, int);
 extern void Write(FV_Solution, int);
 extern void Write_dimensions(dimension, dimension, dimension);

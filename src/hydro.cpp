@@ -25,29 +25,23 @@ void indices_n(int* n_id, int k, int j, int i, int l, int dim){
 }
 
 KOKKOS_INLINE_FUNCTION
-double sound_speed(double rho, double p){
-    double c2 = gmma*p/rho;
+double sound_speed(double rho, double p, double gm){
+    double c2 = gm*p/rho;
     c2 = max(c2,min_c2);
     return sqrt(c2);
 }
 
 KOKKOS_INLINE_FUNCTION
-void conservatives(double* w, double* u){
+void conservatives(double* w, double* u, double gm){
     double E_kin=0;
     u[0] = w[0];
-    #if X
     u[_vx_] = w[0]*w[_vx_];
     E_kin += w[_vx_]*u[_vx_];
-    #endif
-    #if Y
     u[_vy_] = w[0]*w[_vy_];
     E_kin += w[_vy_]*u[_vy_];
-    #endif
-    #if Z
     u[_vz_] = w[0]*w[_vz_];
     E_kin += w[_vz_]*u[_vz_];
-    #endif
-    u[_e_] = w[_p_]/(gmma-1.)+0.5*E_kin;
+    u[_e_] = w[_p_]/(gm-1.)+0.5*E_kin;
 }
 
 void compute_conservatives(
@@ -62,16 +56,19 @@ void compute_conservatives(
     int pz = W.nz;
     int nader = W.n_ader;
     int nvar = W.n_var;
-    SD_for_ader(
-        double u[NVAR];
+    double gm = cfg.gamma;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        double u[NVAR]={0};
         double w[NVAR];
         int var;
         for(var=0; var<nvar; var++)
             w[var] = W.Vector(t_id,var,k,j,i,kk,jj,ii);
-        conservatives(w,u);
+        conservatives(w,u,gm);
         for(var=0; var<nvar; var++)
             U.Vector(t_id,var,k,j,i,kk,jj,ii) = u[var];
-    );
+        }
+    });
 }
 
 void compute_conservatives(
@@ -82,35 +79,30 @@ void compute_conservatives(
     int Ny = W.Ny;
     int Nz = W.Nz;
     int nvar = W.n_var;
-    FV_for_cells(
-        double u[NVAR];
+    double gm = cfg.gamma;
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        double u[NVAR]={0};
         double w[NVAR];
         int var;
         for(var=0; var<nvar; var++)
             w[var] = W.Vector(var,k,j,i);
-        conservatives(w,u);
+        conservatives(w,u,gm);
         for(var=0; var<nvar; var++)
             U.Vector(var,k,j,i) = u[var];
-    );
+    });
 }
 
 KOKKOS_INLINE_FUNCTION
-void primitives(double* u, double* w){
+void primitives(double* u, double* w, double gm){
     double E_kin=0;
     w[0] = u[0];
-    #if X
     w[_vx_] = u[_vx_]/u[0];
     E_kin += w[_vx_]*u[_vx_];
-    #endif
-    #if Y
     w[_vy_] = u[_vy_]/u[0];
     E_kin += w[_vy_]*u[_vy_];
-    #endif
-    #if Z
     w[_vz_] = u[_vz_]/u[0];
     E_kin += w[_vz_]*u[_vz_];
-    #endif
-    w[_p_] = (u[_e_]-0.5*E_kin)*(gmma-1.);
+    w[_p_] = (u[_e_]-0.5*E_kin)*(gm-1.);
 }
 
 void compute_primitives(
@@ -125,16 +117,19 @@ void compute_primitives(
     int pz = W.nz;
     int nader = W.n_ader;
     int nvar = W.n_var;
-    SD_for_ader(
+    double gm = cfg.gamma;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         int var;
         double u[NVAR];
-        double w[NVAR];
+        double w[NVAR]={0};
         for(var=0; var<nvar; var++)
             u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
-        primitives(u,w);
+        primitives(u,w,gm);
         for(var=0; var<nvar; var++)
             W.Vector(t_id,var,k,j,i,kk,jj,ii) = w[var];
-    );
+        }
+    });
 }
 
 void compute_primitives(
@@ -145,28 +140,25 @@ void compute_primitives(
     int Ny = U.Ny;
     int Nz = U.Nz;
     int nvar = U.n_var;
-    FV_for_cells(
-        double u[10];
-        double w[10];
+    double gm = cfg.gamma;
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        double u[10]={0};
+        double w[10]={0};
         int var;
         for(var=0; var<nvar; var++)
             u[var] = U.Vector(var,k,j,i);
-        primitives(u,w);
+        primitives(u,w,gm);
         for(var=0; var<nvar; var++)
             W.Vector(var,k,j,i) = w[var];
-    );
+    });
 }
 
 KOKKOS_INLINE_FUNCTION
 void fluxes(double* u, double* w, double* f, int _v1_, int _v2_, int _v3_){
     f[   0] = u[   0]*w[_v1_];
     f[_v1_] = u[_v1_]*w[_v1_] + w[_p_];
-    #ifdef _2D_
     f[_v2_] = u[_v2_]*w[_v1_];
-    #endif
-    #ifdef _3D_
     f[_v3_] = u[_v3_]*w[_v1_];
-    #endif
     f[_e_] = (u[_e_]+w[_p_])*w[_v1_];
 }
 
@@ -184,18 +176,21 @@ void compute_fluxes(
     int pz = U.nz;
     int nader = U.n_ader;
     int nvar = U.n_var;
-    SD_for_ader(
+    double gm = cfg.gamma;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         int var;
         double u[NVAR];
-        double w[NVAR];
-        double f[NVAR];
+        double w[NVAR]={0};
+        double f[NVAR]={0};
         for(var=0; var<nvar; var++)
             u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
-        primitives(u,w);
+        primitives(u,w,gm);
         fluxes(u,w,f,_v1_,_v2_,_v3_);
         for(var=0; var<nvar; var++)
             F.Vector(t_id,var,k,j,i,kk,jj,ii) = f[var];
-    );
+        }
+    });
 }
 
 double compute_dt(
@@ -210,27 +205,32 @@ double compute_dt(
     int px = W.nx;
     int py = W.ny;
     int pz = W.nz;
-    SD_min_cells(
+    double gm = cfg.gamma;
+    double cfl = cfg.cfl;
+    bool ax = cfg.active[_x_];
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    double min_value = sd_min_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii, double& reduce){
         double c_s;
         double c_max=0;
         double dx_min=1;
         double dt_min=1;
-        c_s = sound_speed(W.Vector(0,0,k,j,i,kk,jj,ii),W.Vector(0,_p_,k,j,i,kk,jj,ii));
-        #if X
-        c_max += (abs(W.Vector(0,_vx_,k,j,i,kk,jj,ii)) + c_s);
-        dx_min = min(dx_min,dx);
-        #endif
-        #if Y
-        c_max += (abs(W.Vector(0,_vy_,k,j,i,kk,jj,ii)) + c_s);
-        dx_min = min(dx_min,dy);
-        #endif
-        #if Z
-        c_max += (abs(W.Vector(0,_vz_,k,j,i,kk,jj,ii)) + c_s);
-        dx_min = min(dx_min,dz);
-        #endif
-        dt_min = CFL*dx_min/c_max/px;
-        reduce = reduce < dt_min ? reduce : dt_min; 
-    );
+        c_s = sound_speed(W.Vector(0,0,k,j,i,kk,jj,ii),W.Vector(0,_p_,k,j,i,kk,jj,ii),gm);
+        if(ax){
+            c_max += (abs(W.Vector(0,_vx_,k,j,i,kk,jj,ii)) + c_s);
+            dx_min = min(dx_min,dx);
+        }
+        if(ay){
+            c_max += (abs(W.Vector(0,_vy_,k,j,i,kk,jj,ii)) + c_s);
+            dx_min = min(dx_min,dy);
+        }
+        if(az){
+            c_max += (abs(W.Vector(0,_vz_,k,j,i,kk,jj,ii)) + c_s);
+            dx_min = min(dx_min,dz);
+        }
+        dt_min = cfl*dx_min/c_max/px;
+        reduce = reduce < dt_min ? reduce : dt_min;
+    });
     #ifdef MPI
     return MPI_Allreduce(&min_value, &dt, 1, MPI_DOUBLE, MPI_MIN, Comm);
     #else
@@ -245,25 +245,28 @@ void riemann_wind(double *F, double *U_L, double *U_R, double wind){
 }
 
 KOKKOS_INLINE_FUNCTION
-void riemann_llf(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_){
+void riemann_llf(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_, double gm){
     double c_L,c_R,c_max;
-    double W_L[NVAR];
-    double W_R[NVAR];
-    double F_L[NVAR];
-    double F_R[NVAR];
-    primitives(U_L, W_L);
-    primitives(U_R, W_R);  
+    //Zero-initialized: the flux functions only fill the physical variables,
+    //any extra bookkeeping slot (NVAR includes the FV trouble flag) would
+    //otherwise carry uninitialized stack values into the flux arrays
+    double W_L[NVAR]={0};
+    double W_R[NVAR]={0};
+    double F_L[NVAR]={0};
+    double F_R[NVAR]={0};
+    primitives(U_L, W_L, gm);
+    primitives(U_R, W_R, gm);  
     fluxes(U_L,W_L,F_L,_v1_,_v2_,_v3_);
     fluxes(U_R,W_R,F_R,_v1_,_v2_,_v3_);
-    c_L = sound_speed(W_L[0],W_L[_p_])+abs(W_L[_v1_]);
-    c_R = sound_speed(W_R[0],W_R[_p_])+abs(W_R[_v1_]);
+    c_L = sound_speed(W_L[0],W_L[_p_],gm)+abs(W_L[_v1_]);
+    c_R = sound_speed(W_R[0],W_R[_p_],gm)+abs(W_R[_v1_]);
     c_max = max(c_L,c_R);
     for(int var=0; var<NVAR; var++)
         F[var] = 0.5*(F_R[var]+F_L[var])-0.5*c_max*(U_R[var]-U_L[var]);
 }
 
 KOKKOS_INLINE_FUNCTION
-void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_){
+void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_, double gm){
     // F, U_L, U_R are arrays of size (nvar,faces)
     // Input: U_L, U_R
     // Output: F
@@ -275,11 +278,11 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
     double v_star,p_star;
     double r_starL,r_starR,e_starL,e_starR;
     double r_gdv,v_gdv,p_gdv,e_gdv;
-    primitives(U_L, W_L);
-    primitives(U_R, W_R);
+    primitives(U_L, W_L, gm);
+    primitives(U_R, W_R, gm);
 
-    c_L = sound_speed(W_L[_d_],W_L[_p_])+abs(W_L[_v1_]);
-    c_R = sound_speed(W_R[_d_],W_R[_p_])+abs(W_R[_v1_]);
+    c_L = sound_speed(W_L[_d_],W_L[_p_],gm)+abs(W_L[_v1_]);
+    c_R = sound_speed(W_R[_d_],W_R[_p_],gm)+abs(W_R[_v1_]);
     c_max = max(c_L,c_R);
 
     v_L = W_L[_v1_];
@@ -305,7 +308,7 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
     //eilf s_R>0 -> U_gdv = U*_R
     //else       -> U_gnv = U_R
     if(s_L>0){
-        r_gdv = W_L[_p_];
+        r_gdv = W_L[_d_];
         v_gdv = W_L[_v1_];
         p_gdv = W_L[_p_];
         e_gdv = U_L[_e_];
@@ -331,12 +334,8 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
 
     F[_d_]  = r_gdv*v_gdv;
     F[_v1_] = r_gdv*v_gdv*v_gdv + p_gdv;
-    #ifdef _2D_
-    F[_v2_] = r_gdv*v_gdv*(v_star>0 ? W_L[_v2_] : W_R[_v2_]); 
-    #endif
-    #ifdef _3D_
+    F[_v2_] = r_gdv*v_gdv*(v_star>0 ? W_L[_v2_] : W_R[_v2_]);
     F[_v3_] = r_gdv*v_gdv*(v_star>0 ? W_L[_v3_] : W_R[_v3_]);
-    #endif
     F[_p_]  = v_gdv*(e_gdv + p_gdv);
 }
 
@@ -351,12 +350,13 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
     int n = choose(dim, U.nx, U.ny, U.nz);
     int nader = U.n_ader;
     int nvar = U.n_var;
+    double gm = cfg.gamma;
     //cout<<dim<<": "<<Nx<<","<<Ny<<","<<Nz<<","<<px<<","<<py<<","<<pz<<" "<<n<<" "<<v1<<v2<<v3<<endl;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int var;
         double u_L[NVAR];
         double u_R[NVAR];
-        double f[NVAR];
+        double f[NVAR]={0};
         int NidL[3];
         int nidL[3];
         int NidR[3];
@@ -369,7 +369,7 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
                 u_L[var] = U.Vector(INDICES_L);
                 u_R[var] = U.Vector(INDICES_R);
             }
-            riemann_llf(f,u_L,u_R,v1,v2,v3);
+            riemann_llf(f,u_L,u_R,v1,v2,v3,gm);
             for(var=0;var<nvar;var++){
                 F.Vector(INDICES_L) = f[var];
                 F.Vector(INDICES_R) = f[var];
@@ -381,7 +381,7 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
                 U.Vector(INDICES_R) = f[var];
             }
         }
-    );
+    });
 }
 
 void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
@@ -395,7 +395,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
     int n = choose(dim,U.nx,U.ny,U.nz);
     int nader = U.n_ader;
     int nvar = U.n_var;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int var;
         double u_L[NVAR];
         double u_R[NVAR];
@@ -418,7 +418,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
                 F.Vector(INDICES_R) += f[var];
             }
         }
-    );
+    });
 }
 
 void compute_gradient(
@@ -438,7 +438,9 @@ void compute_gradient(
     int nader = dU.n_ader;
     int nvar = dU.n_var;
     //Compute dU:
-    SD_for_active_cells_all(
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
         double du=0;
         //Loop over flux points:
         for(int ll=0; ll<q+1; ll++){
@@ -450,7 +452,8 @@ void compute_gradient(
                 du += U.Vector(t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/h;
         }
         dU.Vector(t_id,var,k,j,i,kk,jj,ii) = du;
-    );
+        }}
+    });
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -459,29 +462,23 @@ void viscous_fluxes(
     double* w,
     double* du1,
     int _v1_,
-    #ifdef _2D_
     double* du2,
     int _v2_,
-    #endif
-    #ifdef _3D_
     double* du3,
     int _v3_,
-    #endif
     double nu,
     double beta){
+    //Terms belonging to inactive dimensions vanish identically because the
+    //corresponding velocity components and gradients are zero
     f[_d_]  = 0;
     f[_e_]  = 0;
     f[_v1_] = 2*nu*du1[_v1_] + beta*du1[_v1_];
-    #ifdef _2D_
     f[_v1_] += beta*du2[_v2_];
     f[_v2_] = nu*(du1[_v2_]+du2[_v1_]);
     f[_e_]  += w[_v2_]*f[_v2_];
-    #endif
-    #ifdef _3D_
     f[_v1_] += beta*du3[_v3_];
     f[_v3_] = nu*(du1[_v3_]+du3[_v1_]);
     f[_e_]  += w[_v3_]*f[_v3_];
-    #endif
     f[_e_]  += w[_v1_]*f[_v1_];
 }
 
@@ -489,14 +486,10 @@ void compute_viscous_flux(
     SD_Solution U,
     SD_Solution dU1,
     int _v1_,
-    #ifdef _2D_
     SD_Solution dU2,
     int _v2_,
-    #endif
-     #ifdef _3D_
     SD_Solution dU3,
     int _v3_,
-    #endif
     Matrix sp_to_fp,
     double nu,
     double beta,
@@ -511,11 +504,13 @@ void compute_viscous_flux(
     int q = choose(dim,px,py,pz);
     int nader = U.n_ader;
     int nvar  = U.n_var;
+    double gm = cfg.gamma;
     //Se interpolate dU back to flux points
-    SD_for_ader(
-        double f[NVAR];
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        double f[NVAR]={0};
         double u[NVAR];
-        double w[NVAR];
+        double w[NVAR]={0};
         double du1[NVAR];
         double du2[NVAR];
         double du3[NVAR];
@@ -531,32 +526,16 @@ void compute_viscous_flux(
             for(int ll=0; ll<q-1; ll++){
                 indices_n(nid,kk,jj,ii,ll,dim);
                 du1[var] += dU1.Vector(t_id,var,k,j,i,NODE)*sp_to_fp(id,ll);
-                #ifdef _2D_
                 du2[var] += dU2.Vector(t_id,var,k,j,i,NODE)*sp_to_fp(id,ll);
-                #endif
-                #ifdef _3D_
                 du3[var] += dU3.Vector(t_id,var,k,j,i,NODE)*sp_to_fp(id,ll);
-                #endif
             }
         }
-        primitives(u,w);
-        viscous_fluxes(
-            f,
-            w,
-            du1,
-            _v1_,
-            #ifdef _2D_
-            du2,
-            _v2_,
-            #endif
-            #ifdef _3D_
-            du3,
-            _v3_,
-            #endif
-            nu,beta);
+        primitives(u,w,gm);
+        viscous_fluxes(f,w,du1,_v1_,du2,_v2_,du3,_v3_,nu,beta);
         for(int var=0; var<nvar; var++)
             U.Vector(t_id,var,k,j,i,kk,jj,ii) = f[var];
-    );
+        }
+    });
 }
 
 //////////////////
@@ -577,37 +556,29 @@ void compute_viscous_flux(
 //}
 
 KOKKOS_INLINE_FUNCTION
-void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz){
+void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, double gm){
+    //Terms belonging to inactive dimensions vanish identically because the
+    //corresponding velocity components and slopes are zero
     dWt[_d_] = 0;
     dWt[_p_] = 0;
-    
+
     dWt[_d_] -= W[_vx_]*dWx[_d_] + W[_d_]*dWx[_vx_];
     dWt[_vx_] = -W[_vx_]*dWx[_vx_] - dWx[_p_]/W[_d_];
-    dWt[_p_] -= W[_vx_]*dWx[_p_] + dWx[_vx_]*gmma*W[_p_];
-    #if Y
+    dWt[_p_] -= W[_vx_]*dWx[_p_] + dWx[_vx_]*gm*W[_p_];
     dWt[_vx_] -= W[_vy_]*dWy[_vx_];
-    #endif
-    #if Z
     dWt[_vx_] -= W[_vz_]*dWz[_vx_];
-    #endif
 
-    #if Y
-    dWt[_d_] -= W[_vy_]*dWx[_d_] + W[_d_]*dWy[_vy_];
+    dWt[_d_] -= W[_vy_]*dWy[_d_] + W[_d_]*dWy[_vy_];
     dWt[_vy_] = -W[_vy_]*dWy[_vy_] - dWy[_p_]/W[_d_];
-    dWt[_p_] -= W[_vy_]*dWy[_p_] + dWy[_vy_]*gmma*W[_p_];
+    dWt[_p_] -= W[_vy_]*dWy[_p_] + dWy[_vy_]*gm*W[_p_];
     dWt[_vy_] -= W[_vx_]*dWx[_vy_];
-    #ifdef Z
     dWt[_vy_] -= W[_vz_]*dWz[_vy_];
-    #endif
-    #endif
-                         
-    #if Z
+
     dWt[_d_] -= W[_vz_]*dWz[_d_] + W[_d_]*dWz[_vz_];
     dWt[_vz_] = -W[_vz_]*dWz[_vz_] - dWz[_p_]/W[_d_];
-    dWt[_p_] -= W[_vz_]*dWz[_p_] + dWz[_vz_]*gmma*W[_p_];
+    dWt[_p_] -= W[_vz_]*dWz[_p_] + dWz[_vz_]*gm*W[_p_];
     dWt[_vz_] -= W[_vx_]*dWx[_vz_];
     dWt[_vz_] -= W[_vy_]*dWy[_vz_];
-    #endif
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -615,21 +586,20 @@ void slopes(
     FV_Vector W,
     Vector x_c,
     Vector x_f,
-    #if Y
     Vector y_c,
     Vector y_f,
-    #endif
-    #if Z
     Vector z_c,
     Vector z_f,
-    #endif
     int k,
     int j,
     int i,
     double WL[3][NVAR],
     double WR[3][NVAR],
-    double dt){
-    
+    double dt,
+    bool ay,
+    bool az,
+    double gm){
+
     double wL;
     double wR;
     double h;
@@ -644,60 +614,60 @@ void slopes(
         wR=W(var,k,j,i+1);
         h = x_c(i+1)-x_c(i);
         dwx[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,x_f(i),x_f(i+1));
-        #if Y
-        wL=W(var,k,j-1,i);
-        wR=W(var,k,j+1,i);
-        h = y_c(j+1)-y_c(j);
-        dwy[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,y_f(j),y_f(j+1));
-        #endif
-        #if Z
-        wL=W(var,k-1,j,i);
-        wR=W(var,k+1,j,i);
-        h = z_c(k+1)-z_c(k);
-        dwz[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,z_f(k),z_f(k+1));
-        #endif
+        dwy[var] = 0;
+        dwz[var] = 0;
+        if(ay){
+            wL=W(var,k,j-1,i);
+            wR=W(var,k,j+1,i);
+            h = y_c(j+1)-y_c(j);
+            dwy[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,y_f(j),y_f(j+1));
+        }
+        if(az){
+            wL=W(var,k-1,j,i);
+            wR=W(var,k+1,j,i);
+            h = z_c(k+1)-z_c(k);
+            dwz[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,z_f(k),z_f(k+1));
+        }
     }
-    corrector(w,dwt,dwz,dwy,dwx);
+    corrector(w,dwt,dwx,dwy,dwz,gm);
     for(int var=0; var<NVAR; var++){
         h = x_f(i+1)-x_f(i);
         WR[_x_][var] = w[var] - dwx[var] + dwt[var]*dt/h;
         WL[_x_][var] = w[var] + dwx[var] + dwt[var]*dt/h;
-        #if Y
-        h = y_f(j+1)-y_f(j);
-        WR[_y_][var] = w[var] - dwy[var] + dwt[var]*dt/h;
-        WL[_y_][var] = w[var] + dwy[var] + dwt[var]*dt/h;
-        #endif
-        #if Z
-        h = z_f(k+1)-z_f(k);
-        WR[_z_][var] = w[var] - dwz[var] + dwt[var]*dt/h;
-        WL[_z_][var] = w[var] + dwz[var] + dwt[var]*dt/h;
-        #endif
-    } 
+        if(ay){
+            h = y_f(j+1)-y_f(j);
+            WR[_y_][var] = w[var] - dwy[var] + dwt[var]*dt/h;
+            WL[_y_][var] = w[var] + dwy[var] + dwt[var]*dt/h;
+        }
+        if(az){
+            h = z_f(k+1)-z_f(k);
+            WR[_z_][var] = w[var] - dwz[var] + dwt[var]*dt/h;
+            WL[_z_][var] = w[var] + dwz[var] + dwt[var]*dt/h;
+        }
+    }
 }
 
 KOKKOS_INLINE_FUNCTION
 void compute_fluxes(
     FV_Vector W,
     FV_Vector F,
-    FV_Vector troubles,
+    FV_Vector theta,
     Vector x_c,
     Vector x_f,
-    #if Y
     Vector y_c,
     Vector y_f,
-    #endif
-    #if Z
     Vector z_c,
     Vector z_f,
-    #endif
     int k,
     int j,
     int i,
     double dt,
     int ader,
-    int dim
+    int dim,
+    bool ay,
+    bool az,
+    double gm
     ){
-    int nvar = NVAR-1;
     double wL[3][3][NVAR];
     double wR[3][3][NVAR];
     double uL[NVAR];
@@ -705,9 +675,7 @@ void compute_fluxes(
     double fL[NVAR];
     //double fR[NVAR];
     double f;
-    double tr;
-    double trL;
-    double trR;
+    double th;
     int v1 = choose(dim,_vx_,_vy_,_vz_);
     int v2 = choose(dim,_vy_,_vz_,_vx_);
     int v3 = choose(dim,_vz_,_vx_,_vy_);
@@ -725,42 +693,43 @@ void compute_fluxes(
             i + (dim==_x_ ? l:0),
             (wL[l+NGH]),
             (wR[l+NGH]),
-            dt);
+            dt,
+            ay,
+            az,
+            gm);
     //Now we have the reconstructed values at both faces
     //We can then solve the Riemann problem
     //Left Boundary
-    conservatives(wL[0][dim],uL);
-    conservatives(wR[1][dim],uR);
-    riemann_hllc(fL,uL,uR,v1,v2,v3);
+    conservatives(wL[0][dim],uL,gm);
+    conservatives(wR[1][dim],uR,gm);
+    riemann_hllc(fL,uL,uR,v1,v2,v3,gm);
     //Right Boundary
     //riemann_llf(fR,uL[1][dim],uR[2][dim],v1,v2,v3);
+    //Face blend factor: max of the thetas of the two adjacent cells
+    //(reference: affected_faces). Convex blend of the primary and the
+    //fallback flux; the same value is seen from both sides of the face,
+    //which preserves exact conservation.
+    th = max(theta(0,k,j,i),
+             theta(0,k-(dim==_z_ ? 1:0),j-(dim==_y_ ? 1:0),i-(dim==_x_ ? 1:0)));
     for(int var=0; var<NVAR; var++){
         f  = F(var,k,j,i);
-        tr  = troubles(nvar,k,j,i);
-        trL = troubles(nvar,k-(dim==_z_ ? 1:0),j-(dim==_y_ ? 1:0),i-(dim==_x_ ? 1:0));
-        trR = troubles(nvar,k+(dim==_z_ ? 1:0),j+(dim==_y_ ? 1:0),i+(dim==_x_ ? 1:0));
-        tr = max(tr,max(trL,trR));
-        f  = (1-tr)*f + tr*fL[var];
+        f  = f + th*(fL[var]-f);
         F(var,k,j,i) = f;
     }
 }
 
 void fallback_fluxes(
     FV_Solution U,
-    FV_Solution troubles,
+    FV_Solution theta,
     Vector x_c,
     Vector x_f,
     FV_Solution F_x,
-    #if Y
     Vector y_c,
     Vector y_f,
     FV_Solution F_y,
-    #endif
-    #if Z
     Vector z_c,
     Vector z_f,
     FV_Solution F_z,
-    #endif
     int ader,
     Vector w,
     double dt
@@ -768,64 +737,20 @@ void fallback_fluxes(
     int Nx = U.Nx;
     int Ny = U.Ny;
     int Nz = U.Nz;
-    FV_for_cells_2NGH(
-        compute_fluxes(
-            U.Vector,
-            F_x.Vector,
-            troubles.Vector,
-            x_c,
-            x_f,
-            #if Y
-            y_c,
-            y_f,
-            #endif
-            #if Z
-            z_c,
-            z_f,
-            #endif
-            k,
-            j,
-            i,
-            w[ader]*dt,
-            ader,
-            _x_);
-        #if Y
-        compute_fluxes(
-            U.Vector,
-            F_y.Vector,
-            troubles.Vector,
-            x_c,
-            x_f,
-            y_c,
-            y_f,
-            #if Z
-            z_c,
-            z_f,
-            #endif
-            k,
-            j,
-            i,
-            w[ader]*dt,
-            ader,
-            _y_);
-        #endif
-        #if Z
-        compute_fluxes(
-            U.Vector,
-            F_z.Vector,
-            troubles.Vector,
-            x_c,
-            x_f,
-            y_c,
-            y_f,
-            z_c,
-            z_f,
-            k,
-            j,
-            i,
-            w[ader]*dt,
-            ader,
-            _z_);
-        #endif
-    );
+    double gm = cfg.gamma;
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        compute_fluxes(U.Vector,F_x.Vector,theta.Vector,
+            x_c,x_f,y_c,y_f,z_c,z_f,
+            k,j,i,w[ader]*dt,ader,_x_,ay,az,gm);
+        if(ay)
+            compute_fluxes(U.Vector,F_y.Vector,theta.Vector,
+                x_c,x_f,y_c,y_f,z_c,z_f,
+                k,j,i,w[ader]*dt,ader,_y_,ay,az,gm);
+        if(az)
+            compute_fluxes(U.Vector,F_z.Vector,theta.Vector,
+                x_c,x_f,y_c,y_f,z_c,z_f,
+                k,j,i,w[ader]*dt,ader,_z_,ay,az,gm);
+    });
 }

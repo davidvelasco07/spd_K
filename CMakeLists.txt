@@ -26,13 +26,19 @@ include(FetchContent)
 FetchContent_Declare(
   Kokkos
   GIT_REPOSITORY https://github.com/kokkos/kokkos.git
-  GIT_TAG master
+  GIT_TAG 5.1.1
+  GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(Kokkos)
 
-add_executable(${PROJECT_NAME} 
+#Extra compile definitions for validation builds, e.g.
+#  cmake -DSPD_DEFINES="REF_TRANSFORMS" (see src/define.hpp)
+set(SPD_DEFINES "" CACHE STRING "Semicolon-separated compile definitions for spd_K targets")
+
+add_executable(${PROJECT_NAME}
     src/global.cpp
     src/main.cpp
+    src/parameter_input.cpp
     src/output.cpp
     src/polynomials.cpp
     src/initial_conditions.cpp
@@ -43,6 +49,44 @@ add_executable(${PROJECT_NAME}
     src/trouble_detection.cpp
     src/muscl.cpp
 )
+if(SPD_DEFINES)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE ${SPD_DEFINES})
+endif()
 
 
-target_link_libraries(${PROJECT_NAME} ${MPI_CXX_LIBRARIES} ${HDF5_LIBRARIES} Kokkos::kokkos)
+target_link_libraries(${PROJECT_NAME} ${MPI_CXX_LIBRARIES} Kokkos::kokkos)
+if(HDF5_FOUND)
+  target_link_libraries(${PROJECT_NAME} ${HDF5_LIBRARIES})
+endif()
+
+add_executable(spd_K_test
+    src/global.cpp
+    src/parameter_input.cpp
+    src/test_transforms.cpp
+    src/output.cpp
+    src/polynomials.cpp
+    src/initial_conditions.cpp
+    src/transforms.cpp
+    src/boundary.cpp
+    src/hydro.cpp
+    src/induction.cpp
+    src/trouble_detection.cpp
+    src/muscl.cpp
+)
+if(SPD_DEFINES)
+  target_compile_definitions(spd_K_test PRIVATE ${SPD_DEFINES})
+endif()
+target_link_libraries(spd_K_test ${MPI_CXX_LIBRARIES} Kokkos::kokkos)
+if(HDF5_FOUND)
+  target_link_libraries(spd_K_test ${HDF5_LIBRARIES})
+endif()
+
+enable_testing()
+add_test(NAME transforms_unit COMMAND spd_K_test)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME regression
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/run_tests.py
+                   --build-dir ${CMAKE_BINARY_DIR} --skip-unit)
+  set_tests_properties(regression PROPERTIES TIMEOUT 3600)
+endif()

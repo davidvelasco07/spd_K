@@ -1,17 +1,17 @@
 //#define MPI
 
-#define INDUCTION
-//#define HYDRO
-
-#define FV
-//#define SD
+//The system (hydro/induction), dimensionality, FV fallback, boundary
+//types, problem and physics parameters are all runtime choices made from
+//the input file (see main.cpp and the RunConfig struct in global.hpp).
 
 //#define OHMIC_DIFFUSION
 
+//Use the reference (p+1)^DIM tensor-product transforms instead of the
+//directional sweeps; only for validation/regression comparisons
+//#define REF_TRANSFORMS
+
 #define PI 3.141592653589793
-#define CFL 0.8
 #define min_c2 1E-14
-#define gmma 1.4
 #define LENGHT 1.0//2*PI/0.78
 #define rho_min 1E-10
 #define rho_max 1E10
@@ -20,12 +20,19 @@
 
 #define NGH 1
 #define nGH 2
+
+//All three directions are always compiled; dimensionality is a runtime
+//choice made from the input file (inactive directions have one point,
+//zero ghosts, and are skipped by runtime checks on cfg.active[]).
 #define X 1
 #define Y 1
 #define Z 1
 
 #define DIM (X+Y+Z)
 
+//rho, vx, vy, vz, e + one bookkeeping slot (FV trouble flag aggregate).
+//All velocity components are carried regardless of the runtime
+//dimensionality, so the variable indices below are fixed.
 #define NVAR (2+DIM+1)
 
 #define _x_ 0
@@ -41,6 +48,7 @@
 
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_};
+enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_
@@ -55,31 +63,27 @@ enum {_center_,_face_};
 #endif
 #define LLF
 
-#ifdef X
-#define NGHx NGH
-#define nGHx nGH
-#else
-#define NGHx 0
-#define nGHx 0
-#endif
-#ifdef Y
-#define NGHy NGH
-#define nGHy nGH
-#else
-#define NGHy 0
-#define nGHy 0
-#endif
-#ifdef Z
-#define NGHz NGH
-#define nGHz nGH
-#else
-#define NGHz 0
-#define nGHz 0
-#endif
+//Per-direction ghost counts, set at startup from the runtime
+//dimensionality (NGH/nGH for active directions, 0 for inactive ones).
+//These are HOST-side globals: use them freely when computing loop bounds,
+//but inside device lambdas capture them through GHOST_LOCALS below.
+extern int NGH_rt[3];
+extern int nGH_rt[3];
+#define NGHx NGH_rt[_x_]
+#define NGHy NGH_rt[_y_]
+#define NGHz NGH_rt[_z_]
+#define nGHx nGH_rt[_x_]
+#define nGHy nGH_rt[_y_]
+#define nGHz nGH_rt[_z_]
 
-#define I (ii+nGHx+(i-NGHx)*qx)
-#define J (jj+nGHy+(j-NGHy)*qy)
-#define K (kk+nGHz+(k-NGHz)*qz)
+//Declare ghost-count locals for capture into device lambdas (globals are
+//not accessible from device code)
+#define GHOST_LOCALS int ghx=NGHx, ghy=NGHy, ghz=NGHz, sghx=nGHx, sghy=nGHy, sghz=nGHz
+
+//Element/point -> global FV cell index maps; require GHOST_LOCALS in scope
+#define I (ii+sghx+(i-ghx)*qx)
+#define J (jj+sghy+(j-ghy)*qy)
+#define K (kk+sghz+(k-ghz)*qz)
 
 #define INDICES t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
 #define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
@@ -104,92 +108,79 @@ typedef Kokkos::View<double**,MemSpace>  Matrix;
 typedef Kokkos::View<double********,Layout,MemSpace>  SD_Vector;
 typedef Kokkos::View<double****,Layout,MemSpace> FV_Vector;
 
-typedef Matrix::HostMirror Matrix_h;
-typedef Vector::HostMirror Vector_h;
-typedef SD_Vector::HostMirror SD_Vector_h;
-typedef FV_Vector::HostMirror FV_Vector_h;
+typedef Matrix::host_mirror_type Matrix_h;
+typedef Vector::host_mirror_type Vector_h;
+typedef SD_Vector::host_mirror_type SD_Vector_h;
+typedef FV_Vector::host_mirror_type FV_Vector_h;
 
-#define SD_min_cells( call) \
-double min_value=1; \
-Kokkos::parallel_reduce("min_cells",Kokkos::MDRangePolicy<Kokkos::Rank<6>>({1,1,1,0,0,0},{Nz-1,Ny-1,Nx-1,pz,py,px}), KOKKOS_LAMBDA (int k, int j, int i, int kk, int jj, int ii, double& reduce) { \
-    call; \
-}, Kokkos::Min<double>(min_value)); Kokkos::fence();
+//Loop helpers: thin wrappers over Kokkos::parallel_for/parallel_reduce
+//taking a KOKKOS_LAMBDA. Kernels launched on the same execution space
+//instance execute in order, so no fence is attached here; call
+//Kokkos::fence() explicitly before the host reads device data
+//(outputs, MPI staging).
 
-#define SD_for_cells( call) \
-Kokkos::parallel_for("for_cells",Kokkos::MDRangePolicy<Kokkos::Rank<6>>({0,0,0,0,0,0},{Nz,Ny,Nx,pz,py,px}), KOKKOS_LAMBDA (int k, int j, int i, int kk, int jj, int ii) { \
-    call; \
-}); Kokkos::fence();
+//Element loop over all elements and their solution/flux points.
+//Lambda signature: (int k, int j, int i, int kk, int jj, int ii)
+template <class Functor>
+void sd_for_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                  const Functor& f, const char* label="sd_for_cells"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({0,0,0,0,0,0},{Nz,Ny,Nx,nz,ny,nx}), f);
+}
 
-#define SD_for_all( call) \
-SD_for_cells( \
-    for(int t_id=0; t_id<nader; t_id++){ \
-        for(int var=0; var<nvar; var++){ \
-        call; \
-        } \
-    } \
-);
+//Same as sd_for_cells but skipping ghost elements
+template <class Functor>
+void sd_for_active_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                         const Functor& f, const char* label="sd_for_active_cells"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}), f);
+}
 
-#define SD_for_ader( call) \
-SD_for_cells( \
-    for(int t_id=0; t_id<nader; t_id++){ \
-        call; \
-    } \
-);
+//Min-reduction over interior elements; blocks until the result is ready.
+//Lambda signature: (int k, int j, int i, int kk, int jj, int ii, double& reduce)
+template <class Functor>
+double sd_min_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                    const Functor& f){
+    double min_value=1;
+    Kokkos::parallel_reduce("sd_min_cells",
+        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
+        f, Kokkos::Min<double>(min_value));
+    return min_value;
+}
 
-#define SD_for_variables( call) \
-SD_for_cells( \
-    for(int var=0; var<nvar; var++){ \
-        call; \
-    } \
-);
+//Cell loops for the FV representation.
+//Lambda signature: (int k, int j, int i)
+template <class Functor>
+void fv_for_cells(int Nz, int Ny, int Nx,
+                  const Functor& f, const char* label="fv_for_cells"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{Nz,Ny,Nx}), f);
+}
 
+template <class Functor>
+void fv_for_cells_ngh(int Nz, int Ny, int Nx,
+                      const Functor& f, const char* label="fv_for_cells_ngh"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({NGHz,NGHy,NGHx},{Nz-NGHz,Ny-NGHy,Nx-NGHx}), f);
+}
 
-#define SD_for_active_cells( call) \
-Kokkos::parallel_for("for_active_cells",Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,pz,py,px}), KOKKOS_LAMBDA (int k, int j, int i, int kk, int jj, int ii) { \
-call; \
-}); Kokkos::fence();
+template <class Functor>
+void fv_for_cells_2ngh(int Nz, int Ny, int Nx,
+                       const Functor& f, const char* label="fv_for_cells_2ngh"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({2*NGHz,2*NGHy,2*NGHx},{Nz-2*NGHz,Ny-2*NGHy,Nx-2*NGHx}), f);
+}
 
-#define SD_for_active_cells_all( call) \
-SD_for_active_cells( \
-    for(int t_id=0; t_id<nader; t_id++){ \
-        for(int var=0; var<nvar; var++){ \
-        call; \
-        } \
-    } \
-);
-
-#define FV_for_cells( call) \
-Kokkos::parallel_for("for_cells",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{Nz,Ny,Nx}), KOKKOS_LAMBDA (int k, int j, int i) { \
-    call; \
-}); Kokkos::fence();
-
-#define FV_for_cells_NGH( call) \
-Kokkos::parallel_for("for_cells",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({NGHz,NGHy,NGHx},{Nz-NGHz,Ny-NGHy,Nx-NGHx}), KOKKOS_LAMBDA (int k, int j, int i) { \
-    call; \
-}); Kokkos::fence();
-
-#define FV_for_cells_2NGH( call) \
-Kokkos::parallel_for("for_active_cells",Kokkos::MDRangePolicy<Kokkos::Rank<3>>({2*NGHz,2*NGHy,2*NGHx},{Nz-2*NGHz,Ny-2*NGHy,Nx-2*NGHx}), KOKKOS_LAMBDA (int k, int j, int i) { \
-    call; \
-}); Kokkos::fence();
-
-#define FV_for_cells_all( call) \
-FV_for_cells( \
-    for(int var=0; var<nvar; var++){ \
-        call; \
-    } \
-);
-
-#define FV_for_cells_all_NGH( call) \
-FV_for_cells_NGH( \
-    for(int var=0; var<nvar; var++){ \
-        call; \
-    } \
-);
-
-#define FV_for_cells_all_2NGH( call) \
-FV_for_cells_2NGH( \
-    for(int var=0; var<nvar; var++){ \
-        call; \
-    } \
-);
+//Cell loop for face-writing kernels: each cell writes its LEFT face, so to
+//cover every face of every active cell (including the domain-boundary face
+//on the right) the range extends one cell past the active region in each
+//active direction. For periodic conservation the two boundary faces of a
+//direction must then receive bitwise-identical values, which requires the
+//input arrays (including trouble flags) to hold proper periodic ghosts.
+template <class Functor>
+void fv_for_faces(int Nz, int Ny, int Nx,
+                  const Functor& f, const char* label="fv_for_faces"){
+    Kokkos::parallel_for(label,
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({nGHz,nGHy,nGHx},
+            {Nz-nGHz+(nGHz>0),Ny-nGHy+(nGHy>0),Nx-nGHx+(nGHx>0)}), f);
+}

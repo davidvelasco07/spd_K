@@ -29,18 +29,14 @@ double sine_wave(int var, double x, double y, double z){
 }
 
 KOKKOS_INLINE_FUNCTION
-double sedov_blast(int var, double x, double y, double z){
-    //Note: set gmma=5./3.
+double sedov_blast(int var, double x, double y, double z, double gm, bool az){
+    //Note: set gamma=5./3.
     double r,R=0.1;
-    #ifndef _3D_
-    r=sqrt(pow(x-0.5,2) + pow(y-0.5,2));
-    #else
-    r=sqrt(pow(x-0.5,2.0) + pow(y-0.5,2.0) + pow(z-0.5,2.0));
-    #endif
+    r=sqrt(pow(x-0.5,2.0) + pow(y-0.5,2.0) + (az ? pow(z-0.5,2.0) : 0.0));
     if(var==0) return 1.0;
     else if(var==_p_){
         if(r<R)
-            return 1E-6+(gmma-1);
+            return 1E-6+(gm-1);
         else
             return 1E-6;
     }
@@ -49,17 +45,13 @@ double sedov_blast(int var, double x, double y, double z){
 }
 
 KOKKOS_INLINE_FUNCTION
-double spherical_blast(int var, double x, double y, double z){
-    //Note: set gmma=5./3.
+double spherical_blast(int var, double x, double y, double z, bool az){
+    //Note: set gamma=5./3.
     double r,R=0.1;
     double xc=0.5*LENGHT;
     double yc=0.5*LENGHT;
     double zc=0.5*LENGHT;
-    #ifndef _3D_
-    r=sqrt(pow(x-xc,2) + pow(y-yc,2));
-    #else
-    r=sqrt(pow(x-xc,2) + pow(y-yc,2) + pow(z-zc,2));
-    #endif
+    r=sqrt(pow(x-xc,2) + pow(y-yc,2) + (az ? pow(z-zc,2) : 0.0));
     if(var==0){
         return 1;
     }
@@ -71,6 +63,17 @@ double spherical_blast(int var, double x, double y, double z){
     }
     else
         return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double initial_condition(int problem, int var, double x, double y, double z,
+                         double gm, bool az){
+    switch(problem){
+        case _ic_sine_wave_:       return sine_wave(var,x,y,z);
+        case _ic_sedov_:           return sedov_blast(var,x,y,z,gm,az);
+        case _ic_spherical_blast_: return spherical_blast(var,x,y,z,az);
+        default:                   return 0;
+    }
 }
 
 void Initialize(
@@ -89,36 +92,37 @@ void Initialize(
     int pz = U.nz;
     int nader = U.n_ader;
     int nvar = U.n_var;
-    SD_for_all(
+    int problem = cfg.problem;
+    double gm = cfg.gamma;
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
         double value=0;
         double s;
         double x;
         double y=0;
         double z=0;
         for(int nn=0; nn<pz; nn++){
-            #if Z
-            z = faces_z(k,kk) + x_sp(nn)*(faces_z(k,kk+1)-faces_z(k,kk));
-            #endif
+            if(az)
+                z = faces_z(k,kk) + x_sp(nn)*(faces_z(k,kk+1)-faces_z(k,kk));
             for(int mm=0; mm<py; mm++){
-                y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
+                if(ay)
+                    y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
                 for(int ll=0; ll<px; ll++){
                     x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
-                    s = sine_wave(var,x,y,z);
-                    #if X
+                    s = initial_condition(problem,var,x,y,z,gm,az);
                     s*=w_sp(ll);
-                    #endif
-                    #if Y
-                    s*=w_sp(mm);
-                    #endif
-                    #if Z
-                    s*=w_sp(nn);
-                    #endif
+                    if(ay) s*=w_sp(mm);
+                    if(az) s*=w_sp(nn);
                     value+=s;
                 }
             }
         }
         U.Vector(t_id,var,k,j,i,kk,jj,ii) = value;
-    );
+        }}
+    });
 }
 
 ////////////////
@@ -252,7 +256,7 @@ void Initialize_ep(
     int px = A.nx;
     int py = A.ny;
     int pz = A.nz;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double x;
         double y;
         double z;
@@ -260,7 +264,7 @@ void Initialize_ep(
         y = Ys(j,jj);
         x = Xs(i,ii);
         A.Vector(0,0,k,j,i,kk,jj,ii) = magnetic_loop(dim,x,y,z);
-    );
+    });
 }
 
 

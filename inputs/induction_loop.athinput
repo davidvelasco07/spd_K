@@ -1,0 +1,20 @@
+# 3D magnetic loop advection (induction) with FV update + trouble detection
+<job>
+system   = induction
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 8
+nx2  = 8
+nx3  = 8
+
+<time>
+tlim = 0.2
+cfl  = 0.8
+
+<output>
+dt   = 0.1
+
+<induction>
+nu = 0.0025

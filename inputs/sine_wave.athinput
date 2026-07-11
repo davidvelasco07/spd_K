@@ -1,0 +1,30 @@
+# 3D advected sine wave (hydro), SD only
+<job>
+system   = hydro
+fallback = false
+
+<mesh>
+p    = 3
+nx1  = 8
+nx2  = 8
+nx3  = 8
+
+<time>
+tlim = 0.1
+cfl  = 0.8
+
+<output>
+dt   = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = sine_wave
+
+<fallback>
+# tolerance     = 1e-5      # NAD band width
+# NAD           = relative  # relative | delta (band scaled by local range)
+# NAD_neighbors = 2nd       # 2nd (Moore/box) | 1st (face neighbors)
+# SED           = true      # smooth extrema detection (applied for p>1)
+# blending      = true      # fractional theta blending of fallback fluxes

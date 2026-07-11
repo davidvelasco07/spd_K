@@ -64,7 +64,8 @@ double Induction_compute_dt(
     int px = B2.nx;
     int py = B2.ny;
     int pz = B2.nz;
-    SD_min_cells(
+    double cfl = cfg.cfl;
+    double min_value = sd_min_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii, double& reduce){
         double v_max=0;
         double dx_min=1;
         double dt_min=1;
@@ -80,9 +81,9 @@ double Induction_compute_dt(
         v_max += abs(velocity(_z_,x(i,ii),y(j,jj),z(k,kk)));
         dx_min = min(dx_min,dz);
         #endif
-        dt_min = CFL*dx_min/v_max/px;
-        reduce = reduce < dt_min ? reduce : dt_min; 
-        );
+        dt_min = cfl*dx_min/v_max/px;
+        reduce = reduce < dt_min ? reduce : dt_min;
+    });
     #ifdef MPI
     return MPI_Allreduce(&min_value, &dt, 1, MPI_DOUBLE, MPI_MIN, Comm);
     #else
@@ -106,7 +107,8 @@ void rotational_a_to_b(
     int pz = B.nz;
     int q = choose(dim, px, py, pz);
     int nader = B.n_ader;
-    SD_for_ader(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         double d1a2=0;
         double d2a1=0;
         for(int ll=0; ll<q; ll++){
@@ -130,7 +132,8 @@ void rotational_a_to_b(
             }
         }
         B.Vector(t_id,0,k,j,i,kk,jj,ii) = d1a2/d1 - d2a1/d2;
-    );
+        }
+    });
 }
 
 void compute_E(
@@ -152,7 +155,8 @@ void compute_E(
     int pz = E.nz;
     int q = choose(dim, px, py, pz);
     int nader = E.n_ader;
-    SD_for_ader(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         int dim1 = choose(dim ,_y_, _z_,_x_);
         int dim2 = choose(dim1,_y_, _z_,_x_);
         double b1=0;
@@ -199,7 +203,8 @@ void compute_E(
         E.Vector(t_id,6,k,j,i,kk,jj,ii) = b1;
         E.Vector(t_id,7,k,j,i,kk,jj,ii) = b2;
 
-    );
+        }
+    });
 }
 
 void compute_rotational_B(
@@ -223,7 +228,8 @@ void compute_rotational_B(
     int q = choose(dim, px, py, pz); //p+1 (solution points)
     int nader = E.n_ader;
     //Compute d1B2:
-    SD_for_ader(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         double d1b2=0;
         //Loop over flux points:
         for(int ll=0; ll<q+1; ll++){
@@ -238,12 +244,14 @@ void compute_rotational_B(
                 d1b2 += E.Vector(t_id,_b2d_,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/d1;
         }
         D1.Vector(t_id,0,k,j,i,kk,jj,ii) = d1b2;
-    );
+        }
+    });
     px = D2.nx;
     py = D2.ny;
     pz = D2.nz;
     //Compute d2B1:
-    SD_for_ader(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         double d2b1=0;
         //Loop over flux points:
         for(int ll=0; ll<q+1; ll++){
@@ -258,13 +266,15 @@ void compute_rotational_B(
                 d2b1 += E.Vector(t_id,_b1d_,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/d2;
         }
         D2.Vector(t_id,0,k,j,i,kk,jj,ii) = d2b1;
-    );
+        }
+    });
     //Output: D at solution points
     //Now we interpolate D back to flux points
     px = E.nx;
     py = E.ny;
     pz = E.nz;
-    SD_for_ader(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
         double d1=0;
         double d2=0;
         //Loop over solution points
@@ -286,7 +296,8 @@ void compute_rotational_B(
             }
         }
         E.Vector(t_id,_E_,k,j,i,kk,jj,ii) -= nu*(d1-d2);
-    );
+        }
+    });
 }
 
 void update_B_prediction(
@@ -309,7 +320,7 @@ void update_B_prediction(
     int pz = B.nz;
     int nader = B_ader.n_ader;
     int q = choose(dim, px, py, pz);
-    SD_for_active_cells(
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double dBdt[10];
         int t_id;
         int ll;
@@ -350,7 +361,7 @@ void update_B_prediction(
             }
             B_ader.Vector(t_id,0,k,j,i,kk,jj,ii) = B_old - dB;
         }
-    );
+    });
 }
 
 void update_B_solution(
@@ -373,7 +384,7 @@ void update_B_solution(
     int nader = E_1.n_ader;
     int q = choose(dim, px, py, pz);
     //cout<<dim<<" "<<q<<endl;
-    SD_for_active_cells(
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double dBdt;
         double dB=0;
         double E;
@@ -405,7 +416,7 @@ void update_B_solution(
             dB += dBdt*w(t_id)*dt;
         }
         B.Vector(0,0,k,j,i,kk,jj,ii) -= dB;
-    );
+    });
 }
 
 void compute_B2_cv(
@@ -424,7 +435,7 @@ void compute_B2_cv(
     int pz = B2.nz;
     int q = B_x.nx;
     //cout<<q<<":"<<Nx<<","<<Ny<<","<<Nz<<","<<px<<","<<py<<","<<pz<<endl;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int ll;
         int mm;
         int nn;
@@ -450,7 +461,7 @@ void compute_B2_cv(
         B2.Vector(0,1,k,j,i,kk,jj,ii) = by;
         B2.Vector(0,2,k,j,i,kk,jj,ii) = bz;
         B2.Vector(0,3,k,j,i,kk,jj,ii) = bx*bx + by*by + bz*bz;
-    );
+    });
 }
 
 void compute_B_cv_from_cf(
@@ -470,7 +481,8 @@ void compute_B_cv_from_cf(
     int qx = px;
     int qy = py;
     int qz = pz;
-    SD_for_active_cells(
+    GHOST_LOCALS;
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int ll;
         double bx=0;
         double by=0;
@@ -484,7 +496,7 @@ void compute_B_cv_from_cf(
         B.Vector(1,K,J,I) = by;
         B.Vector(2,K,J,I) = bz;
         B.Vector(3,K,J,I) = bx*bx + by*by + bz*bz;
-    );
+    });
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -508,7 +520,7 @@ void E_riemann_solver(
     int n = choose(dim, E.nx, E.ny, E.nz);
     int nader = E.n_ader;
     int nvar = E.n_var;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double v;
         double v_L;
         double v_R;
@@ -544,7 +556,7 @@ void E_riemann_solver(
                 E.Vector(INDICES_R) = e;
             }
         }
-    );
+    });
 }
 
 void E_Ohmic_riemann_solver(
@@ -560,7 +572,7 @@ void E_Ohmic_riemann_solver(
     int pz = dim==2 ? 1:E.nz; 
     int n = choose(dim, E.nx, E.ny, E.nz);
     int nader = E.n_ader;
-    SD_for_cells(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double e_L;
         double e_R;
         double e;
@@ -580,7 +592,7 @@ void E_Ohmic_riemann_solver(
             E.Vector(INDICES_L) = e;
             E.Vector(INDICES_R) = e;
         }
-    );
+    });
 }
 
 //////////////
@@ -617,8 +629,9 @@ void edge_integral(
     int Ni = E.Nx;
     int Nj = E.Ny;
     int Nk = E.Nz;
+    GHOST_LOCALS;
     //cout<<dim<<" "<<Nx<<" "<<Ny<<" "<<Nz<<" "<<px<<py<<pz<<endl;
-    SD_for_active_cells(
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double s;
         double e=0;
         int nid[3];
@@ -637,7 +650,7 @@ void edge_integral(
         //This ensures no overflow when computing the last element
         if(K < Nk && J < Nj && I < Ni)
             E.Vector(0,K,J,I) = e;
-    );
+    });
 }
 
 void fv_update_B_solution(
@@ -669,8 +682,9 @@ void fv_update_B_solution(
     int Nk = B_new.Nz;
     int dim1 = choose(dim ,_y_,_z_,_x_);
     int dim2 = choose(dim1,_y_,_z_,_x_);
+    GHOST_LOCALS;
     //cout<<dim<<" "<<q<<endl;
-    SD_for_active_cells(
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double dBdt;
         double b_new;
         double b_old;
@@ -702,7 +716,7 @@ void fv_update_B_solution(
             if(update)
                 B.Vector(0,0,k,j,i,kk,jj,ii) = b_new;
         }
-    );
+    });
 }
 
 //////////////////

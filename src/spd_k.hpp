@@ -5,7 +5,10 @@
 #include <string.h>
 #include <list>
 
+#if __has_include("H5Cpp.h")
 #include "H5Cpp.h"
+using namespace H5;
+#endif
 
 #include "define.hpp"
 #include "structs.hpp"
@@ -17,4 +20,3 @@
 #include "hydro_ader.hpp"
 
 using namespace std;
-using namespace H5;

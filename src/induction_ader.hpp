@@ -58,10 +58,13 @@ struct Induction_ader{
     Boundaries BC_Ey_ep_z;
     Boundaries BC_Ex_ep_z;
 
-    #ifdef FV
+    //FV update + fallback (allocated only when cfg.fallback is set)
     SD_Solution Bx;
     SD_Solution By;
     SD_Solution Bz;
+    SD_Solution T_fp_x; //scratch for directional-sweep transforms
+    SD_Solution T_fp_y;
+    SD_Solution T_fp_z;
     FV_Solution Bx_old;
     FV_Solution By_old;
     FV_Solution Bz_old;
@@ -80,7 +83,6 @@ struct Induction_ader{
     FV_Solution alpha_x;
     FV_Solution alpha_y;
     FV_Solution alpha_z;
-    #endif
 
     Induction_ader(
         CommHelper comm,
@@ -94,9 +96,15 @@ struct Induction_ader{
         double* x_fp,
         double _nu
     ){
+        if(cfg.ndim != 3){
+            if(Master)
+                cout<<"ERROR: the induction solver currently requires 3 active dimensions"<<endl;
+            exit(1);
+        }
         //E3,B1,B2,v1,v2,VxB3,B1,B2
         nvar = 1 + 2 + 2 + 1 + 2;
         n_output = 0;
+        n_step = 0;
         n_ader = p+1;
         t=0;
         p=p;
@@ -178,19 +186,22 @@ struct Induction_ader{
         #endif
 
         //X-interfaces
-        BC_Ey_ep_x.init(X_dim,_BCx_,n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_fp,Y_dim.n_sp,1);
-        BC_Ez_ep_x.init(X_dim,_BCx_,n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_fp,1);
+        BC_Ey_ep_x.init(X_dim,cfg.bc[_x_],n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_fp,Y_dim.n_sp,1);
+        BC_Ez_ep_x.init(X_dim,cfg.bc[_x_],n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_fp,1);
         //Y-interfaces
-        BC_Ex_ep_y.init(Y_dim,_BCy_,n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_fp,1,X_dim.n_sp);
-        BC_Ez_ep_y.init(Y_dim,_BCy_,n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_fp);
+        BC_Ex_ep_y.init(Y_dim,cfg.bc[_y_],n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_fp,1,X_dim.n_sp);
+        BC_Ez_ep_y.init(Y_dim,cfg.bc[_y_],n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_fp);
         //Z-interfaces
-        BC_Ex_ep_z.init(Z_dim,_BCz_,n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_fp,X_dim.n_sp);
-        BC_Ey_ep_z.init(Z_dim,_BCz_,n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
+        BC_Ex_ep_z.init(Z_dim,cfg.bc[_z_],n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_fp,X_dim.n_sp);
+        BC_Ey_ep_z.init(Z_dim,cfg.bc[_z_],n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
 
-        #ifdef FV
+        if(cfg.fallback){
         Bx.init("Bx",1,1,Z_dim,Y_dim,X_dim,0,0,1);
         By.init("By",1,1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz.init("Bz",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+        T_fp_x.init("T_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+        T_fp_y.init("T_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+        T_fp_z.init("T_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
         Bx_old.init("Bx_old",1,Z_dim,Y_dim,X_dim,0,0,1);
         By_old.init("By_old",1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz_old.init("Bz_old",1,Z_dim,Y_dim,X_dim,1,0,0);
@@ -206,10 +217,10 @@ struct Induction_ader{
         Ex.init("Ex",1,Z_dim,Y_dim,X_dim,1,1,0);
         Ey.init("Ey",1,Z_dim,Y_dim,X_dim,1,0,1);
         Ez.init("Ez",1,Z_dim,Y_dim,X_dim,0,1,1);
-        BC_x.init(X_dim,_BCx_,4,Z_dim.fv_nfaces,Y_dim.fv_nfaces,nGHx);
-        BC_y.init(Y_dim,_BCy_,4,Z_dim.fv_nfaces,nGHy,X_dim.fv_nfaces);
-        BC_z.init(Z_dim,_BCz_,4,nGHz,Y_dim.fv_nfaces,X_dim.fv_nfaces);
-        #endif
+        BC_x.init(X_dim,cfg.bc[_x_],4,Z_dim.fv_nfaces,Y_dim.fv_nfaces,nGHx);
+        BC_y.init(Y_dim,cfg.bc[_y_],4,Z_dim.fv_nfaces,nGHy,X_dim.fv_nfaces);
+        BC_z.init(Z_dim,cfg.bc[_z_],4,nGHz,Y_dim.fv_nfaces,X_dim.fv_nfaces);
+        }
 
         dt = Induction_compute_dt(
             B2_cv,
@@ -221,7 +232,7 @@ struct Induction_ader{
             Z_dim.sd_centers
             );
         if(nu>0.0)
-            Dt = 0.5*CFL*(X_dim.h*X_dim.h/nu)/(DIM)/(DIM)/(p+1)/(p+1);
+            Dt = 0.5*cfg.cfl*(X_dim.h*X_dim.h/nu)/(cfg.ndim)/(cfg.ndim)/(p+1)/(p+1);
         else Dt=1E6;
         if(Master)
             cout<<"dx = "<<X_dim.h<<" dt_nu = "<<Dt<<" dt_v = "<<dt<<endl;
@@ -265,11 +276,10 @@ struct Induction_ader{
             if(ader<n_ader-1)
                 Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
             }
-            #ifdef FV
-            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
-            #else
-            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-            #endif
+            if(cfg.fallback)
+                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+            else
+                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
             t+=dt;
             n_step++;
             dt=Dt;
@@ -391,8 +401,9 @@ struct Induction_ader{
         if(Master)
             cout<<endl<<"OUTPUT "<<n_output<<endl;
         compute_B2_cv(B2_cv,Bx_fp_x,By_fp_y,Bz_fp_z,fp_to_cv,sp_to_cv);
-        Write(troubles,n_output);
-        Write(B2_cv,n_output++);   
+        if(cfg.fallback)
+            Write(troubles,n_output);
+        Write(B2_cv,n_output++);
     }
 
     void set_value(SD_Solution U,double value){
@@ -404,12 +415,15 @@ struct Induction_ader{
         int pz = U.nz;
         int nader = U.n_ader;
         int nvar = U.n_var;
-        SD_for_all(
+        sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+            for(int t_id=0; t_id<nader; t_id++){
+            for(int var=0; var<nvar; var++){
             if(var==0)
                 U.Vector(t_id,var,k,j,i,kk,jj,ii) = value;
             else
                 U.Vector(t_id,var,k,j,i,kk,jj,ii) = 0;
-        );
+            }}
+        });
     }
 
     void copy_ader(SD_Solution U, SD_Solution U_ader){
@@ -422,12 +436,14 @@ struct Induction_ader{
         int pz = U.nz;
         int nvar = U.n_var;
         int nader = U_ader.n_ader;
-        SD_for_all(
+        sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+            for(int t_id=0; t_id<nader; t_id++){
+            for(int var=0; var<nvar; var++){
             U_ader.Vector(t_id,var,k,j,i,kk,jj,ii) = U.Vector(0,var,k,j,i,kk,jj,ii);
-        );
+            }}
+        });
     }
 
-    #ifdef FV
     void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
         //B(sp)->B(cv)
         Transform_to_cv();
@@ -451,7 +467,9 @@ struct Induction_ader{
                 X_dim,
                 Y_dim,
                 Z_dim,
-                0
+                0,
+                //all three B components enter the NAD/SED checks
+                0b0111
                 ); 
         //    //fallback_fluxes();
         //    //FV_Update_solution();
@@ -470,9 +488,15 @@ struct Induction_ader{
     void Transform_to_cv(){
         //Computes control-face averages,
         //integrating over the perpendicular dimensions
-        transform_a_to_b_2d(Bx_fp_x,Bx,sp_to_cv,_x_);
-        transform_a_to_b_2d(By_fp_y,By,sp_to_cv,_y_);
-        transform_a_to_b_2d(Bz_fp_z,Bz,sp_to_cv,_z_);
+        #ifdef REF_TRANSFORMS
+        transform_a_to_b_2d_ref(Bx_fp_x,Bx,sp_to_cv,_x_);
+        transform_a_to_b_2d_ref(By_fp_y,By,sp_to_cv,_y_);
+        transform_a_to_b_2d_ref(Bz_fp_z,Bz,sp_to_cv,_z_);
+        #else
+        transform_a_to_b_2d(Bx_fp_x,Bx,T_fp_x,sp_to_cv,_x_);
+        transform_a_to_b_2d(By_fp_y,By,T_fp_y,sp_to_cv,_y_);
+        transform_a_to_b_2d(Bz_fp_z,Bz,T_fp_z,sp_to_cv,_z_);
+        #endif
         //We also need contro-volume averages for trouble dection
         compute_B_cv_from_cf(B_old,Bx,By,Bz,fp_to_cv);
     }
@@ -480,9 +504,15 @@ struct Induction_ader{
     void Transform_to_sp(){
         //Computes the solution at faces from the
         //control-face average
-        transform_a_to_b_2d(Bx,Bx_fp_x,cv_to_sp,_x_);
-        transform_a_to_b_2d(By,By_fp_y,cv_to_sp,_y_);
-        transform_a_to_b_2d(Bz,Bz_fp_z,cv_to_sp,_z_);
+        #ifdef REF_TRANSFORMS
+        transform_a_to_b_2d_ref(Bx,Bx_fp_x,cv_to_sp,_x_);
+        transform_a_to_b_2d_ref(By,By_fp_y,cv_to_sp,_y_);
+        transform_a_to_b_2d_ref(Bz,Bz_fp_z,cv_to_sp,_z_);
+        #else
+        transform_a_to_b_2d(Bx,Bx_fp_x,T_fp_x,cv_to_sp,_x_);
+        transform_a_to_b_2d(By,By_fp_y,T_fp_y,cv_to_sp,_y_);
+        transform_a_to_b_2d(Bz,Bz_fp_z,T_fp_z,cv_to_sp,_z_);
+        #endif
     }
 
     void Integrate_edges(int ader){
@@ -524,5 +554,4 @@ struct Induction_ader{
         boundaries(comm,BC_z,Bz_old,_face_,_z_);
         #endif
     }
-    #endif
 };

@@ -113,10 +113,10 @@ struct FV_Boundaries {
     FV_Vector BufferL;
     FV_Vector BufferR;
     #ifdef KOKKOS_ENABLE_CUDA
-    FV_Vector::HostMirror BufferL_h = Kokkos::create_mirror_view(BufferL);
-    FV_Vector::HostMirror BufferR_h = Kokkos::create_mirror_view(BufferR);
-    FV_Vector::HostMirror BoundaryL_h = Kokkos::create_mirror_view(BoundaryL);
-    FV_Vector::HostMirror BoundaryR_h = Kokkos::create_mirror_view(BoundaryR);
+    FV_Vector::host_mirror_type BufferL_h = Kokkos::create_mirror_view(BufferL);
+    FV_Vector::host_mirror_type BufferR_h = Kokkos::create_mirror_view(BufferR);
+    FV_Vector::host_mirror_type BoundaryL_h = Kokkos::create_mirror_view(BoundaryL);
+    FV_Vector::host_mirror_type BoundaryR_h = Kokkos::create_mirror_view(BoundaryR);
     #endif
     #endif
     FV_Boundaries() = default;

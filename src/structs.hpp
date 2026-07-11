@@ -29,8 +29,8 @@ class dimension{
         int dim; //dimension index (x=0, y=1 or z=2)
         int fv_ncells=1;
         int fv_nfaces=1;
-        int idL;
-        int idR;
+        int idL=0; //defaults valid for inactive dimensions
+        int idR=1;
         double L=1.0; //Box lenght
         double h=1.0; //element size
         Matrix sd_faces;
@@ -236,10 +236,10 @@ struct Boundaries {
     SD_Vector BufferL;
     SD_Vector BufferR;
     #ifdef KOKKOS_ENABLE_CUDA
-    SD_Vector::HostMirror BufferL_h = Kokkos::create_mirror_view(BufferL);
-    SD_Vector::HostMirror BufferR_h = Kokkos::create_mirror_view(BufferR);
-    SD_Vector::HostMirror BoundaryL_h = Kokkos::create_mirror_view(BoundaryL);
-    SD_Vector::HostMirror BoundaryR_h = Kokkos::create_mirror_view(BoundaryR);
+    SD_Vector::host_mirror_type BufferL_h = Kokkos::create_mirror_view(BufferL);
+    SD_Vector::host_mirror_type BufferR_h = Kokkos::create_mirror_view(BufferR);
+    SD_Vector::host_mirror_type BoundaryL_h = Kokkos::create_mirror_view(BoundaryL);
+    SD_Vector::host_mirror_type BoundaryR_h = Kokkos::create_mirror_view(BoundaryR);
     #endif
     #endif
     Boundaries() = default;

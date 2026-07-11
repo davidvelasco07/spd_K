@@ -2,6 +2,7 @@
 
 void exec_comm(Boundaries BC, CommHelper comm, int L, int R){
     #ifdef MPI
+    Kokkos::fence(); //buffers must be packed before MPI reads them
     int nreq=0;
     MPI_Request mpi_requests_recv[2];
     MPI_Request mpi_requests_send[2];
@@ -61,7 +62,9 @@ void boundaries(
     int N = BC.N;
     int n = BC.n;
     int dim = BC.dim;
-    SD_for_all(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
         int Nid[3];
         int nid[3];
         if(type == _periodic_){ 
@@ -80,18 +83,22 @@ void boundaries(
         BC.BufferL(t_id,var,k,j,i,kk,jj,ii) = value(U,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
         BC.BufferR(t_id,var,k,j,i,kk,jj,ii) = value(U,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
         #endif
-    );
+        }}
+    });
     #ifdef MPI
     exec_comm(BC, comm, comm.left, comm.right);
     #endif
-    SD_for_all(
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
         int Nid[3];
         int nid[3];
         indices(Nid,nid,k,j,i,kk,jj,ii,  0,n-1,dim);
         U.Vector(INDICES) = BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii);
         indices(Nid,nid,k,j,i,kk,jj,ii,N-1,  0,dim);
         U.Vector(INDICES) = BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii);
-    );
+        }}
+    });
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -121,7 +128,8 @@ void boundaries(
     int N = BC.N;
     
     int nvar  = U.n_var;
-    FV_for_cells_all(
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        for(int var=0; var<nvar; var++){
         int Nid[3];
         int l;
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
@@ -141,11 +149,13 @@ void boundaries(
         BC.BufferL(t_id,var,k,j,i) = value(U,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
         BC.BufferR(t_id,var,k,j,i) = value(U,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
         #endif
-    );
+        }
+    });
     #ifdef MPI
     exec_comm(BC, comm, comm.left, comm.right);
     #endif
-    FV_for_cells_all(
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        for(int var=0; var<nvar; var++){
         int Nid[3];
         int l;
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
@@ -153,5 +163,6 @@ void boundaries(
         U.Vector(FV_INDICES) = BC.BoundaryL(var,k,j,i);
         fv_indices(Nid,k,j,i,N-nGH+l,dim);
         U.Vector(FV_INDICES) = BC.BoundaryR(var,k,j,i);
-    );
+        }
+    });
 }
