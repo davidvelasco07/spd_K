@@ -21,7 +21,14 @@ reflective BCs.
 Options:
 
 - `--skip-unit` — skip `spd_K_test`
+- `--skip-golden` — skip golden bit-comparison checks (machine/compiler
+  specific; used in CI, which runs on a different toolchain)
 - `--regen-goldens` — refresh reference output files
+
+Golden files are exact byte references generated on a specific machine, so they
+are only meaningful on the same compiler/toolchain. CI therefore runs the
+portable checks (analytic accuracy, mass conservation, shock/fallback behavior)
+and skips the golden comparison.
 
 ## Visual suite
 
@@ -58,3 +65,13 @@ make -C docs html
 
 The site is also published to GitHub Pages on push to `main` (see
 `.github/workflows/docs.yml`).
+
+## Continuous integration
+
+Two GitHub Actions workflows run on every pull request to `main`:
+
+- **`ci`** (`.github/workflows/ci.yml`) — configures a CPU (SERIAL) build,
+  compiles `spd_K` and `spd_K_test`, then runs the unit tests and the portable
+  regression checks (`run_tests.py --skip-golden`).
+- **`docs`** (`.github/workflows/docs.yml`) — builds the Sphinx site (build-only
+  on PRs; deploys to Pages on push to `main`).
