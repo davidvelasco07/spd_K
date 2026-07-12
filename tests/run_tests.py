@@ -229,6 +229,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default=os.path.join(ROOT, "build-511"))
     ap.add_argument("--skip-unit", action="store_true")
+    ap.add_argument("--skip-golden", action="store_true",
+                    help="skip golden bit-comparison checks (machine/compiler "
+                         "specific; recommended in CI on a different toolchain)")
     ap.add_argument("--regen-goldens", action="store_true")
     args = ap.parse_args()
 
@@ -257,6 +260,9 @@ def main():
             elif chk == "mass_strict":
                 ok, msg = check_mass(outdir, cfg, 1e-12)
             elif chk == "golden":
+                if args.skip_golden and not args.regen_goldens:
+                    print(f"[SKIP] {name}: golden (skipped)")
+                    continue
                 ok, msg = check_golden(outdir, cfg, args.regen_goldens)
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1

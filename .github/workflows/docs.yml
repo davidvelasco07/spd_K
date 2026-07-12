@@ -29,6 +29,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r docs/requirements.txt
 
+      - name: Configure Pages
+        # Auto-enables GitHub Pages (Source: GitHub Actions) so the first
+        # deployment does not fail with "Get Pages site failed" / 404.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Build HTML
         run: sphinx-build -b html docs docs/_build/html
 

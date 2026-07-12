@@ -331,11 +331,11 @@ struct Induction_ader{
     //(plus Ohmic terms when enabled)
     void Solve_E(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
         ElectricField(X_dim,Y_dim,Z_dim);
-        Boundaries(comm);
+        apply_boundaries(comm);
         Riemann_Solver();
         #ifdef OHMIC_DIFFUSION
         Ohmic_Diffusion(X_dim.h,Y_dim.h,Z_dim.h);
-        Boundaries(comm);
+        apply_boundaries(comm);
         Ohmic_Riemann_Solver();
         #endif
     }
@@ -419,7 +419,7 @@ struct Induction_ader{
             _x_);
     }
 
-    void Boundaries(CommHelper comm){
+    void apply_boundaries(CommHelper comm){
         // Remember: The arrays for Ex,Ey,Ez at edge-points (ep)
         // contain the variables E3,B1,B2,v1,v2 
         // that need to be communicated to solve
@@ -537,7 +537,7 @@ struct Induction_ader{
         for(int ader=0;ader<n_ader;ader++){
             Integrate_edges(ader);
             FV_update_solution(ader, X_dim.fv_faces, Y_dim.fv_faces, Z_dim.fv_faces, 1);
-            FV_Boundaries(comm);
+            apply_fv_boundaries(comm);
             detect_troubles(
                 B_new,
                 B_old,
@@ -614,7 +614,7 @@ struct Induction_ader{
         #endif
     }
 
-    void FV_Boundaries(CommHelper comm){
+    void apply_fv_boundaries(CommHelper comm){
         //Communications are done sequentially in different directions
         //to ensure that corners zare properly communicated
         //B_old contains the control volume averages for Bx,By,Bz
