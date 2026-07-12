@@ -1,0 +1,28 @@
+# 1D Sod shock tube (Sod 1978), gradfree walls in x
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 1
+nx3   = 1
+x1_bc = gradfree
+
+<time>
+tlim = 0.2
+cfl  = 0.8
+
+<output>
+dt   = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = sod_shock_tube
+# dir    = 0      # tube direction (0=x, 1=y, 2=z)
+# radius = 0.5    # interface position
+# d0 = 1.0        # left density     d1 = 0.125  # right density
+# p0 = 1.0        # left pressure    p1 = 0.1    # right pressure

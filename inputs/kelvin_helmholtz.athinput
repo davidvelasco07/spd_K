@@ -1,0 +1,29 @@
+# 2D Kelvin-Helmholtz instability: double shear layer with a sinusoidal
+# vy perturbation (same setup as spd's KH_instability), periodic box
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 32
+nx2  = 32
+nx3  = 1
+
+<time>
+tlim = 0.8
+cfl  = 0.8
+
+<output>
+dt   = 0.4
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = kelvin_helmholtz
+# d0  = 1.0     # outer density      d1 = 2.0   # inner-band density
+# v1  = 0.5     # shear velocity (+v1 inside, -v1 outside)
+# amp = 0.1     # vy perturbation amplitude
+# sigma = 0.0353553  # perturbation width (0.05/sqrt(2))
+# p0  = 2.5     # uniform pressure

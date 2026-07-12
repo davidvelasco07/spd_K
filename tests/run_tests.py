@@ -31,10 +31,14 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import spdk_io  # shared reader module
+from spdk_io import NGH, nGH
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN_DIR = os.path.join(ROOT, "tests", "goldens")
 
-N, P, NGH, nGH = 8, 3, 1, 2
+N, P = 8, 3
 n = P + 1
 
 CONFIGS = {
@@ -116,6 +120,16 @@ CONFIGS = {
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
     },
+    "hydro_implosion_2d": {
+        # reflective BCs: the flux-form update must conserve to round-off
+        # (zero mass flux through the mirrored walls)
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
     "induction_fv_3d": {
         "input": "inputs/induction_loop.athinput",
         "overrides": [],
@@ -147,46 +161,23 @@ def run(build_dir, outdir, cfg):
     sh(cmd, env=env)
 
 
-def shape(ndim):
-    """Element/point shape of the SD output arrays for a given ndim."""
-    Ne = lambda active: N + 2 * NGH if active else 1
-    np_ = lambda active: n if active else 1
-    a = [True, ndim >= 2, ndim >= 3]  # x, y, z activity
-    return (1, 6, Ne(a[2]), Ne(a[1]), Ne(a[0]), np_(a[2]), np_(a[1]), np_(a[0]))
+def field_index(fname):
+    """Output index i of a W_cv_N{N}p{p}_{i}_0.dat filename."""
+    return int(fname.split("_")[-2])
 
 
 def load_rho_cells(outdir, cfg):
     """rho on the active-region global cell grid, shape (nz_c, ny_c, nx_c)."""
-    ndim = cfg["ndim"]
-    A = np.fromfile(os.path.join(outdir, cfg["field"])).reshape(shape(ndim))
-    rho = A[0, 0]
-    sl = lambda active: slice(NGH, -NGH) if active else slice(None)
-    rho = rho[sl(ndim >= 3), sl(ndim >= 2), sl(True)]
-    Nz_, Ny_, Nx_, nz_, ny_, nx_ = rho.shape[0], rho.shape[1], rho.shape[2], \
-                                    rho.shape[3], rho.shape[4], rho.shape[5]
-    return rho.transpose(0, 3, 1, 4, 2, 5).reshape(Nz_ * nz_, Ny_ * ny_, Nx_ * nx_)
+    grid = spdk_io.Grid(outdir)
+    return spdk_io.load_sd(grid, field_index(cfg["field"]), var=0)
 
 
 def active_faces(outdir):
-    xf = np.fromfile(os.path.join(outdir, f"X_N{N}p{P}_0.dat"))
-    return xf[nGH:len(xf) - nGH]
-
-
-def cell_widths(outdir):
-    return np.diff(active_faces(outdir))
+    return spdk_io.Grid(outdir).faces[0]
 
 
 def total_mass(outdir, fname, cfg):
-    cfg2 = dict(cfg, field=fname)
-    rho = load_rho_cells(outdir, cfg2)
-    w = cell_widths(outdir)
-    V = np.ones(rho.shape)
-    V *= w[None, None, :]
-    if cfg["ndim"] >= 2:
-        V *= w[None, :, None]
-    if cfg["ndim"] >= 3:
-        V *= w[:, None, None]
-    return float((rho * V).sum())
+    return spdk_io.total_mass(spdk_io.Grid(outdir), field_index(fname))
 
 
 def check_analytic(outdir, cfg):
@@ -212,8 +203,8 @@ def check_analytic(outdir, cfg):
 
 
 def check_mass(outdir, cfg, limit):
-    outs = sorted(glob.glob(os.path.join(outdir, f"W_cv_N{N}p{P}_*_0.dat")))
-    m = [total_mass(outdir, os.path.basename(f), cfg) for f in outs]
+    grid = spdk_io.Grid(outdir)
+    m = [spdk_io.total_mass(grid, i) for i in spdk_io.output_indices(outdir)]
     drift = max(abs(x - m[0]) / abs(m[0]) for x in m)
     return drift < limit, f"mass drift = {drift:.3e} (limit {limit:.1e})"
 

@@ -13,7 +13,6 @@ extern void inverse(Matrix, Matrix, int);
 //Transforms
 extern void transform_a_to_b_ref(SD_Solution, SD_Solution, Matrix, Matrix, Matrix);
 extern void transform_a_to_b(SD_Solution, SD_Solution, SD_Solution, Matrix);
-extern void transform_a_to_b_team(SD_Solution, SD_Solution, Matrix);
 extern void transform_a_to_b_1d(SD_Solution, SD_Solution, Matrix, int);
 extern void transform_a_to_b_1d_slice(SD_Solution, SD_Solution, Matrix, int, int);
 extern void transform_a_to_b_2d_ref(SD_Solution, SD_Solution, Matrix, int);

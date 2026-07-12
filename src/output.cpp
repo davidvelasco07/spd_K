@@ -20,7 +20,6 @@ void Write(SD_Solution U, int n){
   #else
   Write_arrays(U.Vector.data(), U.Vector.size(), filename);
   #endif
-  Write_arrays(U.Vector.data(), U.Vector.size(), filename);
 }
 
 void Write(FV_Solution U, int n){
@@ -34,7 +33,6 @@ void Write(FV_Solution U, int n){
   #else
   Write_arrays(U.Vector.data(), U.Vector.size(), filename);
   #endif
-  Write_arrays(U.Vector.data(), U.Vector.size(), filename);
 }
 
 void Write_edges(dimension Dim, string name){

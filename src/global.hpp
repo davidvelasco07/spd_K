@@ -15,6 +15,24 @@ extern int z_i;
 extern int Master;
 extern int N_comms;
 
+//Runtime parameters of the initial condition, parsed from the <problem>
+//block. POD, passed by value into the Initialize kernel so device code can
+//read it directly. Each problem uses the subset it needs and ignores the
+//rest (see problem_defaults in main.cpp for the per-problem defaults).
+struct ProblemParams {
+    double amp = 0.125;   //perturbation amplitude
+    double v1 = 1.0;      //background/primary velocity
+    double v2 = 1.0;      //secondary velocity (shear/transverse)
+    double v3 = 0.0;      //tertiary velocity
+    double d0 = 1.0;      //primary density (left/inner)
+    double d1 = 0.125;    //secondary density (right/outer)
+    double p0 = 1.0;      //primary pressure (left/inner)
+    double p1 = 0.1;      //secondary pressure (right/outer)
+    double radius = 0.1;  //feature radius / interface position
+    double sigma = 0.05;  //smoothing/perturbation width
+    int dir = 0;          //direction of 1d profiles (0=x, 1=y, 2=z)
+};
+
 //Runtime configuration chosen from the input file. POD so its fields can
 //be copied into locals and captured by device lambdas.
 struct RunConfig {
@@ -32,6 +50,8 @@ struct RunConfig {
     int bc[3] = {0, 0, 0};               //boundary type per direction
     int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
     int rk_order = 3;                    //SSP-RK order (1, 2 or 3)
+    bool outputs = false;                //file outputs (opt-in via <output> block)
+    ProblemParams pp;                    //initial-condition parameters
 };
 extern RunConfig cfg;
 

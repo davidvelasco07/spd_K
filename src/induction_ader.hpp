@@ -267,7 +267,8 @@ struct Induction_ader{
             cout<<"dx = "<<X_dim.h<<" dt_nu = "<<Dt<<" dt_v = "<<dt<<endl;
         Dt = min(dt,Dt);
         cout<<Dt<<endl;
-        Write_outputs();
+        if(cfg.outputs)
+            Write_outputs();
     }
 
     void time_evolution(
@@ -281,6 +282,12 @@ struct Induction_ader{
         dt=Dt;
         double t_output=dt_output;
 
+        //Time only the evolution loop (see hydro_ader.hpp)
+        Kokkos::fence();
+        Kokkos::Timer timer;
+        double t_io = 0;
+        int step0 = n_step;
+
         while(t<t_end){
             if(cfg.integrator==_integrator_rk_)
                 RK_step(comm,X_dim,Y_dim,Z_dim);
@@ -291,15 +298,32 @@ struct Induction_ader{
             dt=Dt;
             //Outputs
             if(Master)cout<<".";
-            if(t>=t_output){
-                t_output=t+dt_output;
-                Write_outputs();
-            }
-            if(t+dt>t_output){
-                dt=t_output-t;
+            if(cfg.outputs){
+                if(t>=t_output){
+                    t_output=t+dt_output;
+                    Kokkos::fence();
+                    Kokkos::Timer io_timer;
+                    Write_outputs();
+                    t_io += io_timer.seconds();
+                }
+                if(t+dt>t_output){
+                    dt=t_output-t;
+                }
             }
         }
+        Kokkos::fence();
+        double t_evol = timer.seconds() - t_io;
         cout<<endl;
+        if(Master){
+            long long n_cells = (long long)(X_dim.N*X_dim.n_sp)
+                              * (Y_dim.N*Y_dim.n_sp)
+                              * (Z_dim.N*Z_dim.n_sp);
+            int steps = n_step - step0;
+            cout<<"evolution: "<<steps<<" steps, "<<t_evol<<" s"
+                <<" ("<<(steps>0 ? t_evol/steps*1e3 : 0)<<" ms/step), "
+                <<(t_evol>0 ? n_cells*(double)steps/t_evol : 0)
+                <<" zone-cycles/s"<<endl;
+        }
     }
 
     //One evaluation of the edge-E spatial operator on the n_ader slices:

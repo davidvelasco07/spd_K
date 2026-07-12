@@ -47,9 +47,11 @@
 #define _e_  _p_
 
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
-enum {_periodic_, _gradfree_};
+enum {_periodic_, _gradfree_, _reflective_};
 enum {_integrator_ader_, _integrator_rk_};
-enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_};
+enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
+      _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
+      _ic_user_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_
@@ -94,18 +96,31 @@ extern int nGH_rt[3];
 
 #define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
 
+//Bulk solution arrays live in device memory (CudaSpace): all per-step
+//kernels touch only these, so no host<->device traffic occurs during the
+//evolution loop. Small setup arrays (transform matrices, quadrature nodes,
+//face coordinates) are filled by host code once at startup and only read by
+//kernels afterwards, so they use managed memory (SetupSpace) for simplicity.
+//
+//LayoutRight everywhere: with the index order (t,var,k,j,i,kk,jj,ii) the
+//point index ii is stride-1, so a warp of consecutive flat indices reads
+//contiguous memory, and var sits at a large stride outside the coalesced
+//pattern. Measured on A100 (tests/bench_layout.cpp): 1120 GB/s for the
+//production access pattern vs 457 GB/s with LayoutLeft. Files written on
+//GPU and CPU now share the same (C-order) on-disk layout.
 #ifdef KOKKOS_ENABLE_CUDA
-#define MemSpace Kokkos::CudaUVMSpace
-#define Layout Kokkos::LayoutLeft
+#define MemSpace Kokkos::CudaSpace
+#define SetupSpace Kokkos::CudaUVMSpace
 #else
 #define MemSpace Kokkos::HostSpace
-#define Layout Kokkos::LayoutRight
+#define SetupSpace Kokkos::HostSpace
 #endif
+#define Layout Kokkos::LayoutRight
 
 using ExecSpace = MemSpace::execution_space;
 
-typedef Kokkos::View<double*,MemSpace>  Vector;
-typedef Kokkos::View<double**,MemSpace>  Matrix;
+typedef Kokkos::View<double*,SetupSpace>  Vector;
+typedef Kokkos::View<double**,SetupSpace>  Matrix;
 typedef Kokkos::View<double********,Layout,MemSpace>  SD_Vector;
 typedef Kokkos::View<double****,Layout,MemSpace> FV_Vector;
 
@@ -119,22 +134,120 @@ typedef FV_Vector::host_mirror_type FV_Vector_h;
 //instance execute in order, so no fence is attached here; call
 //Kokkos::fence() explicitly before the host reads device data
 //(outputs, MPI staging).
+//
+//All bulk loops are flattened RangePolicy kernels: the 1d thread index is
+//decomposed so that its fastest-varying component is the smallest-stride
+//parallel index of the views (LayoutRight: the point index ii), keeping
+//warp accesses contiguous on GPU and inner loops cache-friendly on host.
+
+//Unsigned 32-bit index arithmetic: 64-bit integer division is emulated on
+//GPUs and would dominate light kernels. All loops here fit comfortably in
+//32 bits (checked with an assert in the helpers below).
+using flat_range = Kokkos::RangePolicy<Kokkos::IndexType<unsigned>>;
+
+//(element,point) index decomposition; extents Mz/My/Mx exclude ghosts,
+//oz/oy/ox are the ghost offsets added back to the element indices
+KOKKOS_INLINE_FUNCTION
+void flat_index6(unsigned idx,
+                 unsigned Mz, unsigned My, unsigned Mx,
+                 unsigned nz, unsigned ny, unsigned nx,
+                 int oz, int oy, int ox,
+                 int& k, int& j, int& i, int& kk, int& jj, int& ii){
+    ii = int(idx % nx);      idx /= nx;
+    jj = int(idx % ny);      idx /= ny;
+    kk = int(idx % nz);      idx /= nz;
+    i  = int(idx % Mx) + ox; idx /= Mx;
+    j  = int(idx % My) + oy;
+    k  = int(idx / My) + oz;
+}
+
+KOKKOS_INLINE_FUNCTION
+void flat_index3(unsigned idx,
+                 unsigned Mz, unsigned My, unsigned Mx,
+                 int oz, int oy, int ox,
+                 int& k, int& j, int& i){
+    i  = int(idx % Mx) + ox; idx /= Mx;
+    j  = int(idx % My) + oy;
+    k  = int(idx / My) + oz;
+}
+
+//Wrapper functors (instead of nested extended lambdas, which nvcc rejects)
+template <class Functor>
+struct Flat6 {
+    Functor f;
+    unsigned Mz, My, Mx, nz, ny, nx;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int k, j, i, kk, jj, ii;
+        flat_index6(idx, Mz, My, Mx, nz, ny, nx, oz, oy, ox, k, j, i, kk, jj, ii);
+        f(k, j, i, kk, jj, ii);
+    }
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx, double& r) const {
+        int k, j, i, kk, jj, ii;
+        flat_index6(idx, Mz, My, Mx, nz, ny, nx, oz, oy, ox, k, j, i, kk, jj, ii);
+        f(k, j, i, kk, jj, ii, r);
+    }
+};
+
+template <class Functor>
+struct Flat3 {
+    Functor f;
+    unsigned Mz, My, Mx;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int k, j, i;
+        flat_index3(idx, Mz, My, Mx, oz, oy, ox, k, j, i);
+        f(k, j, i);
+    }
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx, double& r) const {
+        int k, j, i;
+        flat_index3(idx, Mz, My, Mx, oz, oy, ox, k, j, i);
+        f(k, j, i, r);
+    }
+};
+
+inline unsigned flat_total(int64_t total){
+    assert(total < int64_t(1) << 32);
+    return unsigned(total);
+}
+
+template <class Functor>
+Flat6<Functor> make_flat6(const Functor& f, int Mz, int My, int Mx,
+                          int nz, int ny, int nx, int oz, int oy, int ox){
+    return Flat6<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),
+                          unsigned(nz),unsigned(ny),unsigned(nx),oz,oy,ox};
+}
+
+template <class Functor>
+Flat3<Functor> make_flat3(const Functor& f, int Mz, int My, int Mx,
+                          int oz, int oy, int ox){
+    return Flat3<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),oz,oy,ox};
+}
 
 //Element loop over all elements and their solution/flux points.
 //Lambda signature: (int k, int j, int i, int kk, int jj, int ii)
 template <class Functor>
 void sd_for_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
                   const Functor& f, const char* label="sd_for_cells"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({0,0,0,0,0,0},{Nz,Ny,Nx,nz,ny,nx}), f);
+    int64_t total = (int64_t)Nz*Ny*Nx*nz*ny*nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat6(f,Nz,Ny,Nx,nz,ny,nx,0,0,0));
 }
 
 //Same as sd_for_cells but skipping ghost elements
 template <class Functor>
 void sd_for_active_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
                          const Functor& f, const char* label="sd_for_active_cells"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}), f);
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx*nz*ny*nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat6(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx));
 }
 
 //Min-reduction over interior elements; blocks until the result is ready.
@@ -142,11 +255,28 @@ void sd_for_active_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
 template <class Functor>
 double sd_min_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
                     const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx*nz*ny*nx;
     double min_value=1;
-    Kokkos::parallel_reduce("sd_min_cells",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
-        f, Kokkos::Min<double>(min_value));
+    if(total <= 0) return min_value;
+    Kokkos::parallel_reduce("sd_min_cells", flat_range(0,flat_total(total)),
+        make_flat6(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx),
+        Kokkos::Min<double>(min_value));
     return min_value;
+}
+
+//Sum-reduction over interior elements and their points.
+//Lambda signature: (int k, int j, int i, int kk, int jj, int ii, double& reduce)
+template <class Functor>
+double sd_sum_active_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                           const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx*nz*ny*nx;
+    double sum=0;
+    if(total <= 0) return sum;
+    Kokkos::parallel_reduce("sd_sum_active_cells", flat_range(0,flat_total(total)),
+        make_flat6(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx), sum);
+    return sum;
 }
 
 //Cell loops for the FV representation.
@@ -154,22 +284,43 @@ double sd_min_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
 template <class Functor>
 void fv_for_cells(int Nz, int Ny, int Nx,
                   const Functor& f, const char* label="fv_for_cells"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{Nz,Ny,Nx}), f);
+    int64_t total = (int64_t)Nz*Ny*Nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3(f,Nz,Ny,Nx,0,0,0));
 }
 
 template <class Functor>
 void fv_for_cells_ngh(int Nz, int Ny, int Nx,
                       const Functor& f, const char* label="fv_for_cells_ngh"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({NGHz,NGHy,NGHx},{Nz-NGHz,Ny-NGHy,Nx-NGHx}), f);
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3(f,Mz,My,Mx,NGHz,NGHy,NGHx));
 }
 
 template <class Functor>
 void fv_for_cells_2ngh(int Nz, int Ny, int Nx,
                        const Functor& f, const char* label="fv_for_cells_2ngh"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({2*NGHz,2*NGHy,2*NGHx},{Nz-2*NGHz,Ny-2*NGHy,Nx-2*NGHx}), f);
+    int Mz=Nz-4*NGHz, My=Ny-4*NGHy, Mx=Nx-4*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3(f,Mz,My,Mx,2*NGHz,2*NGHy,2*NGHx));
+}
+
+//Sum-reduction over FV cells inside the nGH ghost frame.
+//Lambda signature: (int k, int j, int i, double& reduce)
+template <class Functor>
+double fv_sum_cells_ngh2(int Nz, int Ny, int Nx, const Functor& f){
+    int Mz=Nz-2*nGHz, My=Ny-2*nGHy, Mx=Nx-2*nGHx;
+    int64_t total = (int64_t)Mz*My*Mx;
+    double sum=0;
+    if(total <= 0) return sum;
+    Kokkos::parallel_reduce("fv_sum_cells_ngh2", flat_range(0,flat_total(total)),
+        make_flat3(f,Mz,My,Mx,nGHz,nGHy,nGHx), sum);
+    return sum;
 }
 
 //Cell loop for face-writing kernels: each cell writes its LEFT face, so to
@@ -181,7 +332,9 @@ void fv_for_cells_2ngh(int Nz, int Ny, int Nx,
 template <class Functor>
 void fv_for_faces(int Nz, int Ny, int Nx,
                   const Functor& f, const char* label="fv_for_faces"){
-    Kokkos::parallel_for(label,
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({nGHz,nGHy,nGHx},
-            {Nz-nGHz+(nGHz>0),Ny-nGHy+(nGHy>0),Nx-nGHx+(nGHx>0)}), f);
+    int Mz=Nz-2*nGHz+(nGHz>0), My=Ny-2*nGHy+(nGHy>0), Mx=Nx-2*nGHx+(nGHx>0);
+    int64_t total = (int64_t)Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3(f,Mz,My,Mx,nGHz,nGHy,nGHx));
 }

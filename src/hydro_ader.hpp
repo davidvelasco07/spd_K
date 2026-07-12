@@ -206,7 +206,8 @@ struct Hydro_ader{
         Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
         if(Master)
             cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
-        Write_outputs();
+        if(cfg.outputs)
+            Write_outputs();
     }
 
     void time_evolution(
@@ -219,6 +220,14 @@ struct Hydro_ader{
 
         dt=Dt;
         double t_output=dt_output;
+
+        //Time only the evolution loop: IC, setup and any host<->device
+        //transfers before/after the run are excluded. Time spent writing
+        //outputs (device->host copy + disk) is measured and subtracted.
+        Kokkos::fence();
+        Kokkos::Timer timer;
+        double t_io = 0;
+        int step0 = n_step;
 
         while(t<t_end){
             if(cfg.integrator==_integrator_rk_)
@@ -233,15 +242,32 @@ struct Hydro_ader{
 
             //Outputs
             if(Master) cout<<".";
-            if(t>=t_output){
-                t_output=t+dt_output;
-                Write_outputs();
-            }
-            if(t+dt>t_output){
-                dt=t_output-t;
+            if(cfg.outputs){
+                if(t>=t_output){
+                    t_output=t+dt_output;
+                    Kokkos::fence();
+                    Kokkos::Timer io_timer;
+                    Write_outputs();
+                    t_io += io_timer.seconds();
+                }
+                if(t+dt>t_output){
+                    dt=t_output-t;
+                }
             }
         }
+        Kokkos::fence();
+        double t_evol = timer.seconds() - t_io;
         cout<<endl;
+        if(Master){
+            long long n_cells = (long long)(X_dim.N*X_dim.n_sp)
+                              * (Y_dim.N*Y_dim.n_sp)
+                              * (Z_dim.N*Z_dim.n_sp);
+            int steps = n_step - step0;
+            cout<<"evolution: "<<steps<<" steps, "<<t_evol<<" s"
+                <<" ("<<(steps>0 ? t_evol/steps*1e3 : 0)<<" ms/step), "
+                <<(t_evol>0 ? n_cells*(double)steps/t_evol : 0)
+                <<" zone-cycles/s"<<endl;
+        }
     }
 
     //One evaluation of the spatial operator on the n_ader slices of the
@@ -300,7 +326,7 @@ struct Hydro_ader{
         #ifdef REF_TRANSFORMS
         transform_a_to_b_ref(U_cv, U_sp, cv_to_sp, cv_to_sp, cv_to_sp);
         #else
-        transform_a_to_b_team(U_cv, U_sp, cv_to_sp);
+        transform_a_to_b(U_cv, U_sp, T_sweep, cv_to_sp);
         #endif
     }
 
@@ -308,12 +334,12 @@ struct Hydro_ader{
         #ifdef REF_TRANSFORMS
         transform_a_to_b_ref(U_sp, U_cv, sp_to_cv, sp_to_cv, sp_to_cv);
         #else
-        transform_a_to_b_team(U_sp, U_cv, sp_to_cv);
+        transform_a_to_b(U_sp, U_cv, T_sweep, sp_to_cv);
         #endif
     }
 
     void Interpolate_to_fp(){
-        // Interpolate to flux points
+        // Interpolate to flux points, one coalesced 1d sweep per direction
         if(cfg.active[_x_])
             transform_a_to_b_1d(U_ader_sp,U_ader_fp_x,sp_to_fp,_x_);
         if(cfg.active[_y_])
@@ -441,16 +467,13 @@ struct Hydro_ader{
         Vector fy = Y_dim.fv_faces;
         Vector fz = Z_dim.fv_faces;
         bool ay=cfg.active[_y_], az=cfg.active[_z_];
-        double mass=0;
-        Kokkos::parallel_reduce("fv_mass_cells",
-            Kokkos::MDRangePolicy<Kokkos::Rank<3>>({nGHz,nGHy,nGHx},{Nz-nGHz,Ny-nGHy,Nx-nGHx}),
+        return fv_sum_cells_ngh2(Nz,Ny,Nx,
             KOKKOS_LAMBDA(int k,int j,int i,double& sum){
                 double V = fx(i+1)-fx(i);
                 if(ay) V *= fy(j+1)-fy(j);
                 if(az) V *= fz(k+1)-fz(k);
                 sum += U.Vector(0,k,j,i)*V;
-            }, mass);
-        return mass;
+            });
     }
 
     double fv_mass(SD_Solution U, dimension X_dim, dimension Y_dim, dimension Z_dim){
@@ -462,16 +485,13 @@ struct Hydro_ader{
         Vector fz = Z_dim.fv_faces;
         bool ay=cfg.active[_y_], az=cfg.active[_z_];
         GHOST_LOCALS;
-        double mass=0;
-        Kokkos::parallel_reduce("fv_mass",
-            Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,pz,py,px}),
+        return sd_sum_active_cells(Nz,Ny,Nx,pz,py,px,
             KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& sum){
                 double V = fx(I+1)-fx(I);
                 if(ay) V *= fy(J+1)-fy(J);
                 if(az) V *= fz(K+1)-fz(K);
                 sum += U.Vector(0,0,k,j,i,kk,jj,ii)*V;
-            }, mass);
-        return mass;
+            });
     }
     #endif
 
