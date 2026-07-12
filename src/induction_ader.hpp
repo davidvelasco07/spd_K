@@ -6,13 +6,15 @@ struct Induction_ader{
     int n_step;
     int n_ader;
     int nvar;
+    int n_stages;     //RK stages (1 for ADER)
+    double rk_a[3];   //per-stage convex weights of the SSP combination
 
     double t;
     double dt;
     double Dt;
     double nu;
 
-    Vector xt;
+    Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
 
     Matrix sp_to_fp;
@@ -39,6 +41,11 @@ struct Induction_ader{
     SD_Solution Bx_ader_fp_x;
     SD_Solution By_ader_fp_y;
     SD_Solution Bz_ader_fp_z;
+
+    //Step-start face fields for the SSP-RK convex combination
+    SD_Solution B0x_fp_x;
+    SD_Solution B0y_fp_y;
+    SD_Solution B0z_fp_z;
 
     SD_Solution Ex_ader_ep_yz;
     SD_Solution Ey_ader_ep_zx;
@@ -105,13 +112,26 @@ struct Induction_ader{
         nvar = 1 + 2 + 2 + 1 + 2;
         n_output = 0;
         n_step = 0;
-        n_ader = p+1;
         t=0;
-        p=p;
         nu = _nu;
-        Kokkos::resize(xt,p+1);
-        Kokkos::resize(wt,p+1);
-        gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
+
+        //See Hydro_ader: ADER carries p+1 temporal GL quadrature slices; an
+        //SSP-RK stage is a single forward-Euler slice (weight 1)
+        if(cfg.integrator==_integrator_rk_){
+            n_ader = 1;
+            n_stages = ssp_rk_coefficients(cfg.rk_order,rk_a);
+            Kokkos::resize(xt,1);
+            Kokkos::resize(wt,1);
+            Kokkos::deep_copy(xt,0.0);
+            Kokkos::deep_copy(wt,1.0);
+        }
+        else{
+            n_ader = p+1;
+            n_stages = 1;
+            Kokkos::resize(xt,p+1);
+            Kokkos::resize(wt,p+1);
+            gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
+        }
 
         //////////////
         //Matrices to perform tensorial transformations
@@ -122,8 +142,6 @@ struct Induction_ader{
         Kokkos::resize(sp_to_cv,p+1,p+1);
         Kokkos::resize(cv_to_sp,p+1,p+1);
         Kokkos::resize(fp_to_cv,p+1,p+2);
-        Kokkos::resize(ader,p+1,p+1);
-        Kokkos::resize(invader,p+1,p+1);
 
         lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
         lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
@@ -131,8 +149,13 @@ struct Induction_ader{
         integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
         integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
         inverse(sp_to_cv, cv_to_sp, p+1);
-        ader_matrix(ader, xt, wt, p+1);
-        inverse(ader, invader, p+1);
+        //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
+        if(cfg.integrator==_integrator_ader_){
+            Kokkos::resize(ader,p+1,p+1);
+            Kokkos::resize(invader,p+1,p+1);
+            ader_matrix(ader, xt, wt, p+1);
+            inverse(ader, invader, p+1);
+        }
 
         Bx_fp_x.init("Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
         By_fp_y.init("By_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
@@ -166,6 +189,12 @@ struct Induction_ader{
         Bx_ader_fp_x.init("Bx_ader_fp_x",n_ader,1,Z_dim,Y_dim,X_dim,0,0,1);
         By_ader_fp_y.init("By_ader_fp_y",n_ader,1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz_ader_fp_z.init("Bz_ader_fp_z",n_ader,1,Z_dim,Y_dim,X_dim,1,0,0);
+
+        if(cfg.integrator==_integrator_rk_){
+            B0x_fp_x.init("B0x_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+            B0y_fp_y.init("B0y_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+            B0z_fp_z.init("B0z_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+        }
 
         //variables: E3,B1,B2,v1,v2
         //D = V x B 
@@ -238,7 +267,8 @@ struct Induction_ader{
             cout<<"dx = "<<X_dim.h<<" dt_nu = "<<Dt<<" dt_v = "<<dt<<endl;
         Dt = min(dt,Dt);
         cout<<Dt<<endl;
-        Write_outputs();
+        if(cfg.outputs)
+            Write_outputs();
     }
 
     void time_evolution(
@@ -252,48 +282,105 @@ struct Induction_ader{
         dt=Dt;
         double t_output=dt_output;
 
-        while(t<t_end){
-            ////Initialize ADER time slices
-            copy_ader(Bx_fp_x,Bx_ader_fp_x);
-            copy_ader(By_fp_y,By_ader_fp_y);
-            copy_ader(Bz_fp_z,Bz_ader_fp_z);
-            
-            //Picard iteration
-            for(int ader=0;ader<n_ader;ader++){ 
-                //Compute electric field at edge points
-                ElectricField(X_dim,Y_dim,Z_dim);
-                //Communicate boundary conditions 
-                Boundaries(comm);
-                //Solve the Riemann problem for E3,B1,B2,v1,v2
-                Riemann_Solver();
-                #ifdef OHMIC_DIFFUSION
-                Ohmic_Diffusion(X_dim.h,Y_dim.h,Z_dim.h);
-                Boundaries(comm);
-                //Solve the Riemann problem for (VxB)^f
-                Ohmic_Riemann_Solver();
-                #endif
+        //Time only the evolution loop (see hydro_ader.hpp)
+        Kokkos::fence();
+        Kokkos::Timer timer;
+        double t_io = 0;
+        int step0 = n_step;
 
-            if(ader<n_ader-1)
-                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
-            }
-            if(cfg.fallback)
-                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+        while(t<t_end){
+            if(cfg.integrator==_integrator_rk_)
+                RK_step(comm,X_dim,Y_dim,Z_dim);
             else
-                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+                ADER_step(comm,X_dim,Y_dim,Z_dim);
             t+=dt;
             n_step++;
             dt=Dt;
             //Outputs
             if(Master)cout<<".";
-            if(t>=t_output){
-                t_output=t+dt_output;
-                Write_outputs();
-            }
-            if(t+dt>t_output){
-                dt=t_output-t;
+            if(cfg.outputs){
+                if(t>=t_output){
+                    t_output=t+dt_output;
+                    Kokkos::fence();
+                    Kokkos::Timer io_timer;
+                    Write_outputs();
+                    t_io += io_timer.seconds();
+                }
+                if(t+dt>t_output){
+                    dt=t_output-t;
+                }
             }
         }
+        Kokkos::fence();
+        double t_evol = timer.seconds() - t_io;
         cout<<endl;
+        if(Master){
+            long long n_cells = (long long)(X_dim.N*X_dim.n_sp)
+                              * (Y_dim.N*Y_dim.n_sp)
+                              * (Z_dim.N*Z_dim.n_sp);
+            int steps = n_step - step0;
+            cout<<"evolution: "<<steps<<" steps, "<<t_evol<<" s"
+                <<" ("<<(steps>0 ? t_evol/steps*1e3 : 0)<<" ms/step), "
+                <<(t_evol>0 ? n_cells*(double)steps/t_evol : 0)
+                <<" zone-cycles/s"<<endl;
+        }
+    }
+
+    //One evaluation of the edge-E spatial operator on the n_ader slices:
+    //electric field at edge points, halo exchange and Riemann solve
+    //(plus Ohmic terms when enabled)
+    void Solve_E(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        ElectricField(X_dim,Y_dim,Z_dim);
+        Boundaries(comm);
+        Riemann_Solver();
+        #ifdef OHMIC_DIFFUSION
+        Ohmic_Diffusion(X_dim.h,Y_dim.h,Z_dim.h);
+        Boundaries(comm);
+        Ohmic_Riemann_Solver();
+        #endif
+    }
+
+    void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        ////Initialize ADER time slices
+        copy_ader(Bx_fp_x,Bx_ader_fp_x);
+        copy_ader(By_fp_y,By_ader_fp_y);
+        copy_ader(Bz_fp_z,Bz_ader_fp_z);
+
+        //Picard iteration
+        for(int ader=0;ader<n_ader;ader++){
+            Solve_E(comm,X_dim,Y_dim,Z_dim);
+            if(ader<n_ader-1)
+                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
+        }
+        if(cfg.fallback)
+            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+        else
+            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+    }
+
+    //SSP-RK step (Shu-Osher form), see Hydro_ader::RK_step: forward-Euler
+    //stages followed by convex combinations with the step-start face fields.
+    //The combination acts on the face-staggered representation, which is
+    //linear in B, so the divergence-free constraint is preserved.
+    void RK_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        Kokkos::deep_copy(B0x_fp_x.Vector,Bx_fp_x.Vector);
+        Kokkos::deep_copy(B0y_fp_y.Vector,By_fp_y.Vector);
+        Kokkos::deep_copy(B0z_fp_z.Vector,Bz_fp_z.Vector);
+        for(int s=0;s<n_stages;s++){
+            copy_ader(Bx_fp_x,Bx_ader_fp_x);
+            copy_ader(By_fp_y,By_ader_fp_y);
+            copy_ader(Bz_fp_z,Bz_ader_fp_z);
+            Solve_E(comm,X_dim,Y_dim,Z_dim);
+            if(cfg.fallback)
+                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
+            else
+                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
+            if(rk_a[s]>0){
+                combine_solution(Bx_fp_x,B0x_fp_x,rk_a[s]);
+                combine_solution(By_fp_y,B0y_fp_y,rk_a[s]);
+                combine_solution(Bz_fp_z,B0z_fp_z,rk_a[s]);
+            }
+        }
     }
 
     void ElectricField(dimension X_dim, dimension Y_dim, dimension Z_dim){

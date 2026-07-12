@@ -1,0 +1,34 @@
+# User-defined initial condition (problem=user): the hook lives in
+# src/user_ic.hpp — edit that one function and rebuild. All <problem>
+# parameters below are forwarded to it through ProblemParams, so simple
+# variations can be explored without recompiling, e.g.:
+#   ./spd_K -i inputs/user.athinput problem/amp=0.3 problem/sigma=0.2
+# The default hook is a Gaussian density pulse advected diagonally.
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 16
+nx2  = 16
+nx3  = 1
+
+<time>
+tlim = 1.0
+cfl  = 0.8
+
+<output>
+dt   = 0.5
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = user
+# amp    = 0.5   # pulse amplitude
+# sigma  = 0.1   # pulse width
+# radius = 0.5   # pulse center (all directions)
+# v1     = 1.0   # advection speed (applied to every active direction)
+# d0     = 1.0   # background density
+# p0     = 1.0   # uniform pressure

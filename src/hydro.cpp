@@ -116,17 +116,16 @@ void compute_primitives(
     int py = W.ny;
     int pz = W.nz;
     int nader = W.n_ader;
-    int nvar = W.n_var;
     double gm = cfg.gamma;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         int var;
         double u[NVAR];
         double w[NVAR]={0};
-        for(var=0; var<nvar; var++)
+        for(var=0; var<NVAR; var++)
             u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
         primitives(u,w,gm);
-        for(var=0; var<nvar; var++)
+        for(var=0; var<NVAR; var++)
             W.Vector(t_id,var,k,j,i,kk,jj,ii) = w[var];
         }
     });
@@ -162,12 +161,13 @@ void fluxes(double* u, double* w, double* f, int _v1_, int _v2_, int _v3_){
     f[_e_] = (u[_e_]+w[_p_])*w[_v1_];
 }
 
-void compute_fluxes(
+//Velocity indices as template parameters: with compile-time V1/V2/V3 the
+//var loops fully unroll and the u/w/f locals stay in registers instead of
+//spilling to local memory (runtime indices force stack-backed arrays)
+template<int V1, int V2, int V3>
+void compute_fluxes_t(
     SD_Solution U,
-    SD_Solution F, 
-    int _v1_, 
-    int _v2_, 
-    int _v3_){
+    SD_Solution F){
     int Nx = U.Nx;
     int Ny = U.Ny;
     int Nz = U.Nz;
@@ -175,7 +175,6 @@ void compute_fluxes(
     int py = U.ny;
     int pz = U.nz;
     int nader = U.n_ader;
-    int nvar = U.n_var;
     double gm = cfg.gamma;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
@@ -183,14 +182,27 @@ void compute_fluxes(
         double u[NVAR];
         double w[NVAR]={0};
         double f[NVAR]={0};
-        for(var=0; var<nvar; var++)
+        for(var=0; var<NVAR; var++)
             u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
         primitives(u,w,gm);
-        fluxes(u,w,f,_v1_,_v2_,_v3_);
-        for(var=0; var<nvar; var++)
+        fluxes(u,w,f,V1,V2,V3);
+        for(var=0; var<NVAR; var++)
             F.Vector(t_id,var,k,j,i,kk,jj,ii) = f[var];
         }
     });
+}
+
+void compute_fluxes(
+    SD_Solution U,
+    SD_Solution F,
+    int _v1_,
+    int _v2_,
+    int _v3_){
+    //Dispatch to the compile-time instantiation (only three cyclic
+    //combinations are ever used, one per direction)
+    if(_v1_==_vx_)      compute_fluxes_t<_vx_,_vy_,_vz_>(U,F);
+    else if(_v1_==_vy_) compute_fluxes_t<_vy_,_vz_,_vx_>(U,F);
+    else                compute_fluxes_t<_vz_,_vx_,_vy_>(U,F);
 }
 
 double compute_dt(
@@ -339,19 +351,21 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
     F[_p_]  = v_gdv*(e_gdv + p_gdv);
 }
 
-void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim){
+//Direction and velocity indices as template parameters (see
+//compute_fluxes_t): compile-time indexing keeps the u_L/u_R/f locals in
+//registers instead of local memory
+template<int D, int V1, int V2, int V3>
+void sd_riemann_solver_t(SD_Solution U, SD_Solution F){
     //Store fluxes at the interface between elements to then solve the unique flux
-    int Nx = U.Nx - (dim==_x_); 
-    int Ny = U.Ny - (dim==_y_);
-    int Nz = U.Nz - (dim==_z_);
-    int px = dim==_x_ ? 1 : U.nx; 
-    int py = dim==_y_ ? 1 : U.ny;
-    int pz = dim==_z_ ? 1 : U.nz;
-    int n = choose(dim, U.nx, U.ny, U.nz);
+    int Nx = U.Nx - (D==_x_);
+    int Ny = U.Ny - (D==_y_);
+    int Nz = U.Nz - (D==_z_);
+    int px = D==_x_ ? 1 : U.nx;
+    int py = D==_y_ ? 1 : U.ny;
+    int pz = D==_z_ ? 1 : U.nz;
+    int n = choose(D, U.nx, U.ny, U.nz);
     int nader = U.n_ader;
-    int nvar = U.n_var;
     double gm = cfg.gamma;
-    //cout<<dim<<": "<<Nx<<","<<Ny<<","<<Nz<<","<<px<<","<<py<<","<<pz<<" "<<n<<" "<<v1<<v2<<v3<<endl;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int var;
         double u_L[NVAR];
@@ -361,27 +375,35 @@ void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int
         int nidL[3];
         int NidR[3];
         int nidR[3];
-        int l = choose(dim,i,j,k);
-        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
-        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,dim);
+        int l = choose(D,i,j,k);
+        indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,D);
+        indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,D);
         for(int t_id=0; t_id<nader; t_id++){
-            for(var=0;var<nvar;var++){
+            for(var=0;var<NVAR;var++){
                 u_L[var] = U.Vector(INDICES_L);
                 u_R[var] = U.Vector(INDICES_R);
             }
-            riemann_llf(f,u_L,u_R,v1,v2,v3,gm);
-            for(var=0;var<nvar;var++){
+            riemann_llf(f,u_L,u_R,V1,V2,V3,gm);
+            for(var=0;var<NVAR;var++){
                 F.Vector(INDICES_L) = f[var];
                 F.Vector(INDICES_R) = f[var];
             }
-            ////For diffusive terms
+            #ifdef VISCOSITY
+            //Central interface state, consumed only by the diffusive terms
             riemann_wind(f,u_L,u_R,0.5);
-            for(var=0;var<nvar;var++){
+            for(var=0;var<NVAR;var++){
                 U.Vector(INDICES_L) = f[var];
                 U.Vector(INDICES_R) = f[var];
             }
+            #endif
         }
     });
+}
+
+void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim){
+    if(dim==_x_)      sd_riemann_solver_t<_x_,_vx_,_vy_,_vz_>(U,F);
+    else if(dim==_y_) sd_riemann_solver_t<_y_,_vy_,_vz_,_vx_>(U,F);
+    else              sd_riemann_solver_t<_z_,_vz_,_vx_,_vy_>(U,F);
 }
 
 void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
@@ -581,8 +603,14 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, do
     dWt[_vz_] -= W[_vy_]*dWy[_vz_];
 }
 
+//MUSCL-Hancock reconstruction of one cell, projected only onto the two
+//faces of direction D (the slopes and the Hancock time corrector still use
+//all active directions). D is a compile-time parameter so all local arrays
+//stay in registers; the arithmetic is identical to reconstructing all
+//directions and discarding the unused ones.
+template<int D>
 KOKKOS_INLINE_FUNCTION
-void slopes(
+void slopes_d(
     FV_Vector W,
     Vector x_c,
     Vector x_f,
@@ -593,8 +621,8 @@ void slopes(
     int k,
     int j,
     int i,
-    double WL[3][NVAR],
-    double WR[3][NVAR],
+    double* WL,
+    double* WR,
     double dt,
     bool ay,
     bool az,
@@ -612,41 +640,36 @@ void slopes(
         w[var] = W(var,k,j,i);
         wL=W(var,k,j,i-1);
         wR=W(var,k,j,i+1);
-        h = x_c(i+1)-x_c(i);
-        dwx[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,x_f(i),x_f(i+1));
+        //Each one-sided difference uses its own center spacing: the FV
+        //sub-grid (Gauss points) is non-uniform, and a shared h breaks the
+        //mirror symmetry at reflective walls (spurious wall mass flux)
+        dwx[var] = minmod((wR - w[var])/(x_c(i+1)-x_c(i)),
+                          (w[var] - wL)/(x_c(i)-x_c(i-1)),x_f(i),x_f(i+1));
         dwy[var] = 0;
         dwz[var] = 0;
         if(ay){
             wL=W(var,k,j-1,i);
             wR=W(var,k,j+1,i);
-            h = y_c(j+1)-y_c(j);
-            dwy[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,y_f(j),y_f(j+1));
+            dwy[var] = minmod((wR - w[var])/(y_c(j+1)-y_c(j)),
+                              (w[var] - wL)/(y_c(j)-y_c(j-1)),y_f(j),y_f(j+1));
         }
         if(az){
             wL=W(var,k-1,j,i);
             wR=W(var,k+1,j,i);
-            h = z_c(k+1)-z_c(k);
-            dwz[var] = minmod((wR - w[var])/h,(w[var] - wL)/h,z_f(k),z_f(k+1));
+            dwz[var] = minmod((wR - w[var])/(z_c(k+1)-z_c(k)),
+                              (w[var] - wL)/(z_c(k)-z_c(k-1)),z_f(k),z_f(k+1));
         }
     }
     corrector(w,dwt,dwx,dwy,dwz,gm);
     for(int var=0; var<NVAR; var++){
-        h = x_f(i+1)-x_f(i);
-        WR[_x_][var] = w[var] - dwx[var] + dwt[var]*dt/h;
-        WL[_x_][var] = w[var] + dwx[var] + dwt[var]*dt/h;
-        if(ay){
-            h = y_f(j+1)-y_f(j);
-            WR[_y_][var] = w[var] - dwy[var] + dwt[var]*dt/h;
-            WL[_y_][var] = w[var] + dwy[var] + dwt[var]*dt/h;
-        }
-        if(az){
-            h = z_f(k+1)-z_f(k);
-            WR[_z_][var] = w[var] - dwz[var] + dwt[var]*dt/h;
-            WL[_z_][var] = w[var] + dwz[var] + dwt[var]*dt/h;
-        }
+        h = (D==_x_ ? x_f(i+1)-x_f(i) : (D==_y_ ? y_f(j+1)-y_f(j) : z_f(k+1)-z_f(k)));
+        double dw = (D==_x_ ? dwx[var] : (D==_y_ ? dwy[var] : dwz[var]));
+        WR[var] = w[var] - dw + dwt[var]*dt/h;
+        WL[var] = w[var] + dw + dwt[var]*dt/h;
     }
 }
 
+template<int D>
 KOKKOS_INLINE_FUNCTION
 void compute_fluxes(
     FV_Vector W,
@@ -663,24 +686,24 @@ void compute_fluxes(
     int i,
     double dt,
     int ader,
-    int dim,
     bool ay,
     bool az,
     double gm
     ){
-    double wL[3][3][NVAR];
-    double wR[3][3][NVAR];
+    //wL/wR hold only the D-direction faces of the two cells adjacent to the
+    //face (l = -1, 0); with D compile-time everything stays in registers
+    double wL[2*NGH][NVAR];
+    double wR[2*NGH][NVAR];
     double uL[NVAR];
     double uR[NVAR];
     double fL[NVAR];
-    //double fR[NVAR];
     double f;
     double th;
-    int v1 = choose(dim,_vx_,_vy_,_vz_);
-    int v2 = choose(dim,_vy_,_vz_,_vx_);
-    int v3 = choose(dim,_vz_,_vx_,_vy_);
+    int v1 = choose(D,_vx_,_vy_,_vz_);
+    int v2 = choose(D,_vy_,_vz_,_vx_);
+    int v3 = choose(D,_vz_,_vx_,_vy_);
     for(int l=-NGH; l<NGH; l++)
-        slopes(
+        slopes_d<D>(
             W,
             x_c,
             x_f,
@@ -688,9 +711,9 @@ void compute_fluxes(
             y_f,
             z_c,
             z_f,
-            k + (dim==_z_ ? l:0),
-            j + (dim==_y_ ? l:0),
-            i + (dim==_x_ ? l:0),
+            k + (D==_z_ ? l:0),
+            j + (D==_y_ ? l:0),
+            i + (D==_x_ ? l:0),
             (wL[l+NGH]),
             (wR[l+NGH]),
             dt,
@@ -700,17 +723,15 @@ void compute_fluxes(
     //Now we have the reconstructed values at both faces
     //We can then solve the Riemann problem
     //Left Boundary
-    conservatives(wL[0][dim],uL,gm);
-    conservatives(wR[1][dim],uR,gm);
+    conservatives(wL[0],uL,gm);
+    conservatives(wR[1],uR,gm);
     riemann_hllc(fL,uL,uR,v1,v2,v3,gm);
-    //Right Boundary
-    //riemann_llf(fR,uL[1][dim],uR[2][dim],v1,v2,v3);
     //Face blend factor: max of the thetas of the two adjacent cells
     //(reference: affected_faces). Convex blend of the primary and the
     //fallback flux; the same value is seen from both sides of the face,
     //which preserves exact conservation.
     th = max(theta(0,k,j,i),
-             theta(0,k-(dim==_z_ ? 1:0),j-(dim==_y_ ? 1:0),i-(dim==_x_ ? 1:0)));
+             theta(0,k-(D==_z_ ? 1:0),j-(D==_y_ ? 1:0),i-(D==_x_ ? 1:0)));
     for(int var=0; var<NVAR; var++){
         f  = F(var,k,j,i);
         f  = f + th*(fL[var]-f);
@@ -741,16 +762,16 @@ void fallback_fluxes(
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        compute_fluxes(U.Vector,F_x.Vector,theta.Vector,
+        compute_fluxes<_x_>(U.Vector,F_x.Vector,theta.Vector,
             x_c,x_f,y_c,y_f,z_c,z_f,
-            k,j,i,w[ader]*dt,ader,_x_,ay,az,gm);
+            k,j,i,w[ader]*dt,ader,ay,az,gm);
         if(ay)
-            compute_fluxes(U.Vector,F_y.Vector,theta.Vector,
+            compute_fluxes<_y_>(U.Vector,F_y.Vector,theta.Vector,
                 x_c,x_f,y_c,y_f,z_c,z_f,
-                k,j,i,w[ader]*dt,ader,_y_,ay,az,gm);
+                k,j,i,w[ader]*dt,ader,ay,az,gm);
         if(az)
-            compute_fluxes(U.Vector,F_z.Vector,theta.Vector,
+            compute_fluxes<_z_>(U.Vector,F_z.Vector,theta.Vector,
                 x_c,x_f,y_c,y_f,z_c,z_f,
-                k,j,i,w[ader]*dt,ader,_z_,ay,az,gm);
+                k,j,i,w[ader]*dt,ader,ay,az,gm);
     });
 }

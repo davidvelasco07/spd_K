@@ -1,0 +1,28 @@
+# 2D advected square (top-hat) signal: a limiter stressor with no
+# smooth-solution excuse; the FV fallback keeps the edges monotone
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 16
+nx2  = 16
+nx3  = 1
+
+<time>
+tlim = 1.0
+cfl  = 0.8
+
+<output>
+dt   = 0.5
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = square
+# d0 = 1.0      # background density   d1 = 2.0  # top-hat density
+# radius = 0.25 # half-width of the box signal
+# v1 = 1.0      # vx                   v2 = 1.0  # vy
+# p0 = 1.0      # uniform pressure

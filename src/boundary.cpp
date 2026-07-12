@@ -79,6 +79,17 @@ void boundaries(
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
             BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
         }
+        else if(type == _reflective_){
+            //Mirror state at the wall: the ghost interface point carries the
+            //interior interface value with the normal velocity (momentum)
+            //component sign-flipped, so the Riemann problem at the wall sees
+            //(U, mirror(U)) and returns zero mass/energy flux
+            double sgn = (var == 1+dim) ? -1.0 : 1.0;
+            indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
+            BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = sgn*U.Vector(INDICES);
+            indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = sgn*U.Vector(INDICES);
+        }
         #ifdef MPI
         BC.BufferL(t_id,var,k,j,i,kk,jj,ii) = value(U,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
         BC.BufferR(t_id,var,k,j,i,kk,jj,ii) = value(U,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
@@ -144,6 +155,17 @@ void boundaries(
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
             fv_indices(Nid,k,j,i,N-2*nGH+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
+        }
+        else if(type == _reflective_){
+            //Mirror the first/last nGH interior cells across the wall with
+            //the normal velocity (momentum) sign-flipped. Only used for
+            //cell-centered fields (shift = 0); flag arrays (nvar = 1) are
+            //mirrored without any sign change.
+            double sgn = (var == 1+dim) ? -1.0 : 1.0;
+            fv_indices(Nid,k,j,i,2*nGH-1-l,dim);
+            BC.BoundaryL(var,k,j,i) = sgn*U.Vector(FV_INDICES);
+            fv_indices(Nid,k,j,i,N-nGH-1-l,dim);
+            BC.BoundaryR(var,k,j,i) = sgn*U.Vector(FV_INDICES);
         }
         #ifdef MPI
         BC.BufferL(t_id,var,k,j,i) = value(U,t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);

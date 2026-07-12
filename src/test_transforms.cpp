@@ -8,7 +8,10 @@ double test_value(int t, int var, int k, int j, int i, int kk, int jj, int ii){
          + 0.1*cos(2.9*i - 1.1*jj + 0.8*var);
 }
 
+//Solution arrays live in device memory, so the test fills and compares
+//through explicit host mirrors
 void fill(SD_Solution U){
+    auto h = Kokkos::create_mirror_view(U.Vector);
     for(int t=0; t<U.n_ader; t++)
     for(int var=0; var<U.n_var; var++)
     for(int k=0; k<U.Nz; k++)
@@ -17,10 +20,13 @@ void fill(SD_Solution U){
     for(int kk=0; kk<U.nz; kk++)
     for(int jj=0; jj<U.ny; jj++)
     for(int ii=0; ii<U.nx; ii++)
-        U.Vector(t,var,k,j,i,kk,jj,ii) = test_value(t,var,k,j,i,kk,jj,ii);
+        h(t,var,k,j,i,kk,jj,ii) = test_value(t,var,k,j,i,kk,jj,ii);
+    Kokkos::deep_copy(U.Vector, h);
 }
 
 double max_diff(SD_Solution A, SD_Solution B){
+    auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), A.Vector);
+    auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), B.Vector);
     double d=0;
     for(int t=0; t<A.n_ader; t++)
     for(int var=0; var<A.n_var; var++)
@@ -30,17 +36,19 @@ double max_diff(SD_Solution A, SD_Solution B){
     for(int kk=0; kk<A.nz; kk++)
     for(int jj=0; jj<A.ny; jj++)
     for(int ii=0; ii<A.nx; ii++)
-        d = max(d, abs(A.Vector(t,var,k,j,i,kk,jj,ii)-B.Vector(t,var,k,j,i,kk,jj,ii)));
+        d = max(d, abs(a(t,var,k,j,i,kk,jj,ii)-b(t,var,k,j,i,kk,jj,ii)));
     return d;
 }
 
 double max_diff_fv(FV_Solution A, FV_Solution B){
+    auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), A.Vector);
+    auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), B.Vector);
     double d=0;
     for(int var=0; var<A.n_var; var++)
     for(int k=0; k<A.Nz; k++)
     for(int j=0; j<A.Ny; j++)
     for(int i=0; i<A.Nx; i++)
-        d = max(d, abs(A.Vector(var,k,j,i)-B.Vector(var,k,j,i)));
+        d = max(d, abs(a(var,k,j,i)-b(var,k,j,i)));
     return d;
 }
 
@@ -103,17 +111,6 @@ int main(int argc, char** argv){
         transform_a_to_b(U_new, U_ref, T, sp_to_cv);
         Kokkos::fence();
         failures += check("round trip cv->sp->cv", max_diff(U_a,U_ref), 1e-12);
-
-        //Team (single-kernel, scratch-staged) version: same sweep arithmetic,
-        //so it must agree with the kernel-per-sweep version bitwise
-        transform_a_to_b(U_a, U_ref, T, sp_to_cv);
-        transform_a_to_b_team(U_a, U_new, sp_to_cv);
-        Kokkos::fence();
-        failures += check("transform_a_to_b_team vs sweeps (bitwise)", max_diff(U_ref,U_new), 1e-300);
-        transform_a_to_b_team(U_a, U_new, cv_to_sp);
-        transform_a_to_b(U_a, U_ref, T, cv_to_sp);
-        Kokkos::fence();
-        failures += check("transform_a_to_b_team (cv_to_sp, bitwise)", max_diff(U_ref,U_new), 1e-300);
 
         //Transverse (2d) transform on face-staggered fields, one per direction
         for(int dim=0; dim<3; dim++){

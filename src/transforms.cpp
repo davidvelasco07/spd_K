@@ -95,93 +95,6 @@ void transform_a_to_b(
     }
 }
 
-//Stage-2 GPU version of the full tensor-product transform: a single kernel
-//with one team per (element, var, t_id). The element's point values are
-//staged in team scratch memory, then swept once per active dimension with a
-//team barrier between sweeps, and written back once. Compared with the
-//kernel-per-sweep version this avoids two full round trips of the array
-//through global memory plus the extra kernel launches. Arithmetic is the
-//same sequence of 1d contractions, so results are bit-identical.
-//On host backends TeamPolicy resolves to team_size 1 and the barriers are
-//no-ops, so the same code runs everywhere.
-//Requires U_a and U_b to have identical point counts (square matrices).
-void transform_a_to_b_team(
-    SD_Solution U_a,
-    SD_Solution U_b,
-    Matrix a_to_b
-    ){
-    int Nx = U_b.Nx;
-    int Ny = U_b.Ny;
-    int Nz = U_b.Nz;
-    int nx = U_b.nx;
-    int ny = U_b.ny;
-    int nz = U_b.nz;
-    int n_pts = nx*ny*nz;
-    int nvar = U_a.n_var;
-    int nader = U_a.n_ader;
-    int dims[3];
-    int nd=0;
-    if(cfg.active[_x_]) dims[nd++]=_x_;
-    if(cfg.active[_y_]) dims[nd++]=_y_;
-    if(cfg.active[_z_]) dims[nd++]=_z_;
-    int d0 = nd>0 ? dims[0] : 0;
-    int d1 = nd>1 ? dims[1] : 0;
-    int d2 = nd>2 ? dims[2] : 0;
-    int league = Nz*Ny*Nx*nvar*nader;
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_t = team_policy::member_type;
-    size_t scratch_bytes = 2*size_t(n_pts)*sizeof(double);
-    Kokkos::parallel_for("transform_a_to_b_team",
-        team_policy(league, Kokkos::AUTO)
-            .set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
-        KOKKOS_LAMBDA(const member_t& team){
-            int r = team.league_rank();
-            int t_id = r % nader; r /= nader;
-            int var  = r % nvar;  r /= nvar;
-            int i    = r % Nx;    r /= Nx;
-            int j    = r % Ny;
-            int k    = r / Ny;
-            double* buf0 = (double*)team.team_scratch(0).get_shmem(n_pts*sizeof(double));
-            double* buf1 = (double*)team.team_scratch(0).get_shmem(n_pts*sizeof(double));
-            //Stage the element in scratch
-            Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                int ii = idx % nx;
-                int jj = (idx/nx) % ny;
-                int kk = idx/(nx*ny);
-                buf0[idx] = U_a.Vector(t_id,var,k,j,i,kk,jj,ii);
-            });
-            team.team_barrier();
-            double* in = buf0;
-            double* out = buf1;
-            for(int s=0; s<nd; s++){
-                int dim = (s==0 ? d0 : (s==1 ? d1 : d2));
-                Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                    int ii = idx % nx;
-                    int jj = (idx/nx) % ny;
-                    int kk = idx/(nx*ny);
-                    int id = (dim==_x_ ? ii : (dim==_y_ ? jj : kk));
-                    int q  = (dim==_x_ ? nx : (dim==_y_ ? ny : nz));
-                    double u=0;
-                    for(int ll=0; ll<q; ll++){
-                        int i2 = (dim==_x_ ? ll : ii);
-                        int j2 = (dim==_y_ ? ll : jj);
-                        int k2 = (dim==_z_ ? ll : kk);
-                        u += in[i2 + nx*(j2 + ny*k2)]*a_to_b(id,ll);
-                    }
-                    out[idx] = u;
-                });
-                team.team_barrier();
-                double* tmp = in; in = out; out = tmp;
-            }
-            //Single write back to global memory
-            Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                int ii = idx % nx;
-                int jj = (idx/nx) % ny;
-                int kk = idx/(nx*ny);
-                U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = in[idx];
-            });
-        });
-}
 
 void transform_a_to_b_1d(
     SD_Solution U_a,
@@ -312,6 +225,18 @@ void transform_a_to_b_2d(
         transform_a_to_b_1d(src, dst, a_to_b, dims[s]);
         src = dst;
     }
+}
+
+//SSP-RK convex combination of time slice 0: U <- a*U0 + (1-a)*U
+void combine_solution(SD_Solution U, SD_Solution U0, double a){
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    int nvar=U.n_var;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int var=0; var<nvar; var++)
+            U.Vector(0,var,k,j,i,kk,jj,ii) =
+                a*U0.Vector(0,var,k,j,i,kk,jj,ii)
+                + (1.0-a)*U.Vector(0,var,k,j,i,kk,jj,ii);
+    });
 }
 
 void update_prediction(

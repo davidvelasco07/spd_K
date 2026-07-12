@@ -1,0 +1,27 @@
+# 2D/3D spherical blast: over-pressured central region (p0 inside a
+# sphere of radius r, p1 outside) in a uniform gas at rest
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 16
+nx2  = 16
+nx3  = 1
+
+<time>
+tlim = 0.1
+cfl  = 0.8
+
+<output>
+dt   = 0.05
+
+<hydro>
+gamma = 1.6666666666667
+
+<problem>
+problem = spherical_blast
+# radius = 0.1   # blast radius
+# d0 = 1.0       # uniform density
+# p0 = 10.0      # inner pressure     p1 = 0.1  # ambient pressure
