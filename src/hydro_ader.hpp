@@ -276,12 +276,12 @@ struct Hydro_ader{
     void Solve_fluxes(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
         Interpolate_to_fp();
         Compute_Fluxes();
-        Boundaries(comm);
+        apply_boundaries(comm);
         Riemann_Solver();
 
         #ifdef VISCOSITY
         Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
-        Boundaries(comm);
+        apply_boundaries(comm);
         Rusanov_Solver();
         #endif
     }
@@ -358,7 +358,7 @@ struct Hydro_ader{
             compute_fluxes(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_);
     }
 
-    void Boundaries(CommHelper comm){
+    void apply_boundaries(CommHelper comm){
         //Communications are done sequentially in different directions
         //to ensure that corners are properly communicated
         if(cfg.active[_x_])
@@ -510,8 +510,8 @@ struct Hydro_ader{
             #ifdef DEBUG_MASS
             printf("  ader %d U_new after SD-flux update : %.15e\n", ader, fv_mass_cells(U_new,X_dim,Y_dim,Z_dim));
             #endif
-            FV_Boundaries(comm,U_old);
-            FV_Boundaries(comm,U_new);
+            apply_fv_boundaries(comm,U_old);
+            apply_fv_boundaries(comm,U_new);
             compute_primitives(U_new,W_new);
             compute_primitives(U_old,W_old);
             //Following the reference implementation, only density and
@@ -523,7 +523,7 @@ struct Hydro_ader{
             //Ghost flags must be periodic images so that the blending
             //stencils near the domain boundary see the same data as their
             //periodic partners
-            FV_Boundaries(comm,troubles);
+            apply_fv_boundaries(comm,troubles);
             //Fractional blend factor: spread the trouble flags to the
             //neighborhood (0.75/0.5/0.375 weights + 0.25 ring), or use the
             //raw flags when blending is disabled
@@ -536,7 +536,7 @@ struct Hydro_ader{
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical
             //blended fluxes (exact conservation)
-            FV_Boundaries(comm,theta);
+            apply_fv_boundaries(comm,theta);
             #ifdef DEBUG_MASS
             if(t==0 && ader==0) Write(F_x,899);
             #endif
@@ -572,7 +572,7 @@ struct Hydro_ader{
         #endif
     }
 
-    void FV_Boundaries(CommHelper comm, FV_Solution U){
+    void apply_fv_boundaries(CommHelper comm, FV_Solution U){
         //Communications are done sequentially in different directions
         //to ensure that corners are properly communicated
         if(cfg.active[_x_])
