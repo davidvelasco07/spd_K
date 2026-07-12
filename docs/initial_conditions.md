@@ -67,6 +67,24 @@ Defaults: `radius=0.15`, `d1=0.125`, `p1=0.14`.
 
 ![Implosion](gallery/implosion_2d.png)
 
+### Sedov–Taylor blast
+
+Point explosion: total energy `γ−1` deposited in a sphere of radius `radius`
+into cold ambient gas (`γ = 5/3`). Runs in 2D or 3D; the panel below is a 3D
+run (`32³` elements), showing the mid-z slice of the expanding spherical shell.
+
+![Sedov blast (3D)](gallery/sedov_3d.png)
+
+### Spherical blast
+
+Over-pressured central region (`p0` inside `radius`, `p1` outside) in uniform
+gas at rest (`γ = 5/3`). With the default `p0/p1 = 100` in a periodic square box
+run to late time, the shock fronts wrap and interact, producing the symmetric
+Richtmyer–Meshkov fingers of the classic
+[Athena blast test](https://www.astro.princeton.edu/~jstone/Athena/tests/blast/blast.html).
+
+![Spherical blast (2D)](gallery/spherical_blast_2d.png)
+
 ## Custom initial conditions
 
 For arbitrary analytic ICs without editing the built-in switch, use
