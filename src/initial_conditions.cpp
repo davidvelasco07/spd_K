@@ -57,9 +57,9 @@ double spherical_blast(int var, double x, double y, double z,
                        bool az, ProblemParams pp){
     //Note: set gamma=5./3.
     double r,R=pp.radius;
-    double xc=0.5*LENGHT;
-    double yc=0.5*LENGHT;
-    double zc=0.5*LENGHT;
+    double xc=pp.cx;
+    double yc=pp.cy;
+    double zc=pp.cz;
     r=sqrt(pow(x-xc,2) + pow(y-yc,2) + (az ? pow(z-zc,2) : 0.0));
     if(var==0){
         return pp.d0;
@@ -129,8 +129,38 @@ double implosion(int var, double x, double y, double z, ProblemParams pp){
 }
 
 KOKKOS_INLINE_FUNCTION
+double rti(int var, double x, double y, double gm, double gy, ProblemParams pp){
+    //Rayleigh-Taylor instability (single mode), ported from the spd
+    //reference (initial_conditions_2d.RTI). Heavy fluid pp.d0 rests below
+    //light fluid pp.d1 across the interface y = pp.radius, in hydrostatic
+    //balance under the constant vertical acceleration gy (= cfg.g[y]); with
+    //heavy fluid on the low side and gy>0 (buoyancy pointing up) the layer is
+    //RT-unstable. A single-mode vertical velocity perturbation seeds it.
+    double yc     = pp.radius;
+    double rho_hi = pp.d0;   //heavy (lower) layer
+    double rho_lo = pp.d1;   //light (upper) layer
+    double P0     = pp.p0;   //reference pressure at the interface
+    bool   top    = y > yc;
+    if(var==_d_)
+        return top ? rho_lo : rho_hi;
+    else if(var==_vy_){
+        //perturbation scaled by the local sound speed (spd's dv), single
+        //mode cos(8 pi x): one wavelength across the x in [0,0.25] box
+        double dv = sqrt(gm*(rho_hi*yc + 1.0)/rho_hi);
+        return -pp.amp*dv*cos(8.0*PI*x);
+    }
+    else if(var==_p_){
+        //hydrostatic: dP/dy = rho*gy, continuous across the interface
+        return top ? (P0 + rho_lo*gy*y + (rho_hi-rho_lo)*gy*yc)
+                   : (P0 + rho_hi*gy*y);
+    }
+    else
+        return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
 double initial_condition(int problem, int var, double x, double y, double z,
-                         double gm, bool ay, bool az, ProblemParams pp){
+                         double gm, double gy, bool ay, bool az, ProblemParams pp){
     switch(problem){
         case _ic_sine_wave_:        return sine_wave(var,x,y,z,pp);
         case _ic_sedov_:            return sedov_blast(var,x,y,z,gm,az,pp);
@@ -140,6 +170,7 @@ double initial_condition(int problem, int var, double x, double y, double z,
         case _ic_shu_osher_:        return shu_osher(var,x,y,z,pp);
         case _ic_kelvin_helmholtz_: return kelvin_helmholtz(var,x,y,z,pp);
         case _ic_implosion_:        return implosion(var,x,y,z,pp);
+        case _ic_rti_:              return rti(var,x,y,gm,gy,pp);
         case _ic_user_:             return user_ic(var,x,y,z,gm,ay,az,pp);
         default:                    return 0;
     }
@@ -163,6 +194,7 @@ void Initialize(
     int nvar = U.n_var;
     int problem = cfg.problem;
     double gm = cfg.gamma;
+    double gy = cfg.g[_y_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     ProblemParams pp = cfg.pp;
@@ -182,7 +214,7 @@ void Initialize(
                     y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
                 for(int ll=0; ll<px; ll++){
                     x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
-                    s = initial_condition(problem,var,x,y,z,gm,ay,az,pp);
+                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp);
                     s*=w_sp(ll);
                     if(ay) s*=w_sp(mm);
                     if(az) s*=w_sp(nn);

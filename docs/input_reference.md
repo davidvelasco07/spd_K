@@ -71,6 +71,9 @@ problem = sine_wave
 | Parameter | Default | Description |
 |---|---|---|
 | `gamma` | `1.4` | Ratio of specific heats |
+| `nu` | `0.0` | Kinematic viscosity; `>0` switches on the viscous terms at runtime (`0` = inviscid Euler) |
+| `beta` | `-2/3·nu` | Bulk-viscosity coefficient (Stokes hypothesis by default) |
+| `g1`, `g2`, `g3` | `0.0` | Constant gravitational acceleration per direction (momentum/energy source term); `0` leaves the homogeneous Euler equations unchanged |
 
 ### `<induction>`
 

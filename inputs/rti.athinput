@@ -1,0 +1,40 @@
+# 2D single-mode Rayleigh-Taylor instability (ported from the spd
+# reference). Heavy fluid (d0=2) rests below light fluid (d1=1) across the
+# interface y = radius = 0.5 in a tall [0,0.25] x [0,1] box, held in
+# hydrostatic balance by a constant vertical acceleration g2. With the heavy
+# layer on the low side and g2>0 (buoyancy pointing up) the configuration is
+# Rayleigh-Taylor unstable: a single-mode cos(8 pi x) velocity perturbation
+# grows into the classic rising mushroom plume. Periodic in x, reflective
+# walls in y. Run to t = 1.8.
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 8
+nx2   = 32
+nx3   = 1
+x1len = 0.25
+x2len = 1.0
+x1_bc = periodic
+x2_bc = reflective
+
+<time>
+tlim       = 1.8
+cfl        = 0.4
+integrator = rk3
+
+<output>
+dt   = 1.8
+
+<hydro>
+gamma = 1.6666666666666667
+g2    = 1.0            # constant vertical acceleration (source term)
+
+<problem>
+problem = rti
+# d0     = 2.0   # heavy (lower) layer     d1 = 1.0   # light (upper) layer
+# p0     = 1.0   # reference pressure at the interface
+# radius = 0.5   # interface height y_c
+# amp    = 0.025 # single-mode velocity perturbation amplitude

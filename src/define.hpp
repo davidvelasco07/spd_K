@@ -51,7 +51,7 @@ enum {_periodic_, _gradfree_, _reflective_};
 enum {_integrator_ader_, _integrator_rk_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
-      _ic_user_};
+      _ic_rti_, _ic_user_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_

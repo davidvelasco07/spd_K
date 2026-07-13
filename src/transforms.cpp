@@ -5,6 +5,27 @@ int choose(int dim, int i, int j, int k){
     return (dim==_x_ ? i : (dim==_y_ ?  j : k));
 }
 
+//Gravity source term S for one conservative variable at one solution point.
+//Momentum equations gain rho*g_i, the energy equation gains (rho v).g. Added
+//to dU/dt as +S (see the callers, which subtract it from the flux
+//divergence). U is the ADER solution-point state; t_id selects the slice.
+//NOTE: U is passed by const reference on purpose. SD_Solution holds a
+//std::string label, so a by-value copy inside device code would invoke
+//std::string's copy constructor on the GPU (invalid) and silently drop the
+//gravity source. A reference is inlined without copying the struct.
+KOKKOS_INLINE_FUNCTION
+double gravity_source(const SD_Solution& U, int var, int t_id,
+                      int k, int j, int i, int kk, int jj, int ii,
+                      double gx, double gy, double gz){
+    if(var==_vx_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gx;
+    if(var==_vy_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gy;
+    if(var==_vz_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gz;
+    if(var==_p_)  return U.Vector(t_id,_vx_,k,j,i,kk,jj,ii)*gx
+                       + U.Vector(t_id,_vy_,k,j,i,kk,jj,ii)*gy
+                       + U.Vector(t_id,_vz_,k,j,i,kk,jj,ii)*gz;
+    return 0.0;
+}
+
 KOKKOS_INLINE_FUNCTION
 void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim){
     //Returns the indeces according to the dimension
@@ -265,6 +286,10 @@ void update_prediction(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    //Gravity source: added to dU/dt at every space-time node using the
+    //current (previous Picard iteration) ADER state U_ader.
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt[10];
@@ -280,6 +305,13 @@ void update_prediction(
                 if(ay) dudt[t_id] += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/dy;
                 if(az) dudt[t_id] += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/dz;
             }
+            //dudt holds the flux divergence div(F); the update below does
+            //U_ader = u_old - integral(dudt), so gravity enters as
+            //dudt -= S with S = (rho*g, rho*v.g) to give +S in dU/dt.
+            if(grav){
+                double S = gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+                dudt[t_id] -= S;
+            }
         }
         for(t_id=0; t_id<nader; t_id++){
             du=0;
@@ -294,6 +326,7 @@ void update_prediction(
 
 void update_solution(
     SD_Solution U,
+    SD_Solution U_ader,
     SD_Solution F_x,
     SD_Solution F_y,
     SD_Solution F_z,
@@ -316,6 +349,8 @@ void update_solution(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt;
@@ -328,6 +363,9 @@ void update_solution(
                 if(ay) dudt += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*da_to_b(jj,ll)/dy;
                 if(az) dudt += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*da_to_b(kk,ll)/dz;
             }
+            //Gravity: subtract S from div(F) so the U -= du below adds +S*dt
+            if(grav)
+                dudt -= gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
             du += dudt*w(t_id)*dt;
         }
         U.Vector(0,var,k,j,i,kk,jj,ii) -= du;
@@ -471,6 +509,8 @@ void fv_update_solution(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     GHOST_LOCALS;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
@@ -491,6 +531,9 @@ void fv_update_solution(
             h = faces_z(K+1)-faces_z(K);
             F += (F_z.Vector(var,K+1,J,I)-F_z.Vector(var,K,J,I))/h;
         }
+        //Gravity source from the current subcell average (U_cv slice 0)
+        if(grav)
+            F -= gravity_source(U_cv,var,0,k,j,i,kk,jj,ii,gx,gy,gz);
         u_new = U_old.Vector(var,K,J,I) - w(t_id)*dt*F;
         U_new.Vector(var,K,J,I) = u_new;
         if(update)

@@ -39,14 +39,34 @@ All `<problem>` block fields are available through `pp`:
 
 | Field | Default (user IC) | Role in the sample hook |
 |---|---|---|
-| `amp` | `0.5` | Gaussian pulse amplitude |
+| `amp` | `0.5` | Pulse amplitude (peak `v_y`) |
 | `sigma` | `0.1` | Pulse width |
-| `radius` | `0.5` | Pulse center (all active directions) |
-| `v1` | `1.0` | Advection speed |
+| `radius` | `0.5` | Pulse center in x |
+| `v1` | `1.0` | Advection speed in x |
 | `d0` | `1.0` | Background density |
 | `p0` | `1.0` | Uniform pressure |
 
-The default hook implements a Gaussian density pulse advected diagonally:
+The default hook implements a Gaussian pulse in the **transverse velocity**
+`v_y` that varies only in x, carried by a uniform flow `v1`. With uniform
+density and pressure this is an exact shear layer that neither compresses nor
+generates sound, so it obeys the linear advection–diffusion equation
+
+```
+∂v_y/∂t + v1 ∂v_y/∂x = ν ∂²v_y/∂x²
+```
+
+With `nu = 0` (the default) the pulse simply advects and returns to its start
+at `t = L/v1`. Viscosity is enabled **at runtime** (athenak-style) by setting
+`hydro/nu > 0` in the input file — no rebuild needed — after which it spreads as
+a Gaussian with `σ²(t) = σ₀² + 2νt`, a clean check of the viscous operator:
+
+```bash
+./build/spd_K -i inputs/user.athinput hydro/nu=1e-3
+```
+
+The panel below (`hydro/nu=1e-3`) compares the initial condition against the
+solution after one advection period: the pulse stays Gaussian while broadening
+and losing amplitude.
 
 ![User IC](gallery/user_2d.png)
 

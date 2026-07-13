@@ -3,7 +3,11 @@
 # parameters below are forwarded to it through ProblemParams, so simple
 # variations can be explored without recompiling, e.g.:
 #   ./spd_K -i inputs/user.athinput problem/amp=0.3 problem/sigma=0.2
-# The default hook is a Gaussian density pulse advected diagonally.
+# The default hook is a Gaussian pulse in the transverse velocity v_y that
+# varies only in x, advected by v1. Set hydro/nu>0 to switch on viscosity at
+# runtime, turning it into an exact advection-diffusion test (see
+# src/user_ic.hpp); e.g.
+#   build/spd_K -i inputs/user.athinput hydro/nu=1e-3
 <job>
 system   = hydro
 fallback = true
@@ -23,12 +27,13 @@ dt   = 0.5
 
 <hydro>
 gamma = 1.4
+# nu   = 1e-3   # kinematic viscosity (0 = inviscid); enables the viscous terms
 
 <problem>
 problem = user
 # amp    = 0.5   # pulse amplitude
 # sigma  = 0.1   # pulse width
-# radius = 0.5   # pulse center (all directions)
-# v1     = 1.0   # advection speed (applied to every active direction)
+# radius = 0.5   # pulse center in x
+# v1     = 1.0   # advection speed in x
 # d0     = 1.0   # background density
 # p0     = 1.0   # uniform pressure

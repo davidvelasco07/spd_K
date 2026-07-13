@@ -1,5 +1,8 @@
 # 2D/3D spherical blast: over-pressured central region (p0 inside a
-# sphere of radius r, p1 outside) in a uniform gas at rest
+# sphere of radius r, p1 outside) in a uniform gas at rest. The blast is
+# centered on the domain, so a rectangular box works too, e.g. add
+#   mesh/x2len=1.5 mesh/nx2=150   (1 x 1.5 box, square cells) for the
+# asymmetric Athena-style blast test.
 <job>
 system   = hydro
 fallback = true
