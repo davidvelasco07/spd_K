@@ -25,10 +25,11 @@ range of the neighborhood rather than `|W|`.
 
 **PAD** flags negative pressure or density after the predictor.
 
-The Sedov blast below shows the trouble map (right column) tightly tracking the
-expanding shock front while the smooth interior stays high-order:
+The Sedov blast below (3D, mid-z slice) shows the trouble map (right column)
+tightly tracking the expanding shock front while the smooth interior stays
+high-order:
 
-![Sedov trouble map](gallery/sedov_2d.png)
+![Sedov trouble map](gallery/sedov_3d.png)
 
 ## Blending
 

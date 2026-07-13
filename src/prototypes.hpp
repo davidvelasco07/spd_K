@@ -20,7 +20,7 @@ extern void transform_a_to_b_2d(SD_Solution, SD_Solution, SD_Solution, Matrix, i
 extern void combine_solution(SD_Solution, SD_Solution, double);
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
-extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
+extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
 extern void update_B_prediction(SD_Solution,SD_Solution,SD_Solution,SD_Solution,Matrix,Matrix,Vector,double,double,double,int);
 extern void update_B_solution(SD_Solution,SD_Solution,SD_Solution,Matrix,Vector,double,double,double,int);
 
@@ -33,7 +33,7 @@ extern void Initialize_ep(SD_Solution,Matrix,Matrix,Matrix,int);
 extern void compute_conservatives(SD_Solution, SD_Solution);
 extern void compute_primitives(SD_Solution, SD_Solution);
 extern void compute_fluxes(SD_Solution, SD_Solution, int, int, int);
-extern double compute_dt(SD_Solution, double, double, double);
+extern double compute_dt(SD_Solution, double, double, double, double nu=0.0);
 extern void compute_gradient(SD_Solution, SD_Solution, double, Matrix, int);
 extern void compute_viscous_flux(SD_Solution, SD_Solution, int, SD_Solution, int, SD_Solution, int, Matrix, double, double, int);
 
@@ -51,7 +51,7 @@ extern void compute_rotational_B(SD_Solution, SD_Solution, SD_Solution, double, 
 extern double Induction_compute_dt(SD_Solution, double, double, double, Matrix, Matrix, Matrix);
 
 //Riemann Solvers
-extern void sd_riemann_solver(SD_Solution, SD_Solution, int, int, int, int);
+extern void sd_riemann_solver(SD_Solution, SD_Solution, int, int, int, int, bool);
 extern void sd_rusanov_solver(SD_Solution, SD_Solution, int dim);
 extern void E_riemann_solver(SD_Solution, int, int);
 extern void E_Ohmic_riemann_solver(SD_Solution, int, int);

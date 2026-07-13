@@ -16,6 +16,7 @@ templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 myst_heading_anchors = 3
+myst_enable_extensions = ["dollarmath", "amsmath"]
 
 html_theme = "furo"
 html_static_path = ["_static"]

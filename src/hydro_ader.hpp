@@ -13,6 +13,7 @@ struct Hydro_ader{
     double Dt;
     double nu;
     double beta;
+    bool viscosity;   //viscous terms active (enabled at runtime when nu>0)
 
     Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
@@ -92,6 +93,7 @@ struct Hydro_ader{
         t=0;
         nu = _nu;
         beta = _beta;
+        viscosity = nu > 0.0;
         Kokkos::resize(xx,p+1);
         Kokkos::resize(wx,p+1);
         gauss_legendre(0.0, 1.0, p+1, xx.data(), wx.data());
@@ -203,7 +205,7 @@ struct Hydro_ader{
         transform_cv_to_sp(W_cv,W_sp);
         compute_conservatives(W_sp,U_sp);
 
-        Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
+        Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
         if(Master)
             cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
         if(cfg.outputs)
@@ -238,7 +240,7 @@ struct Hydro_ader{
             transform_sp_to_cv(W_sp,W_cv);
             t+=dt;
             n_step++;
-            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
+            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
 
             //Outputs
             if(Master) cout<<".";
@@ -279,11 +281,11 @@ struct Hydro_ader{
         apply_boundaries(comm);
         Riemann_Solver();
 
-        #ifdef VISCOSITY
-        Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
-        apply_boundaries(comm);
-        Rusanov_Solver();
-        #endif
+        if(viscosity){
+            Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
+            apply_boundaries(comm);
+            Rusanov_Solver();
+        }
     }
 
     void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
@@ -371,11 +373,11 @@ struct Hydro_ader{
 
     void Riemann_Solver(){
         if(cfg.active[_x_])
-            sd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_,_x_);
+            sd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_,_x_,viscosity);
         if(cfg.active[_y_])
-            sd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_vy_,_vz_,_vx_,_y_);
+            sd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_vy_,_vz_,_vx_,_y_,viscosity);
         if(cfg.active[_z_])
-            sd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_,_z_);
+            sd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_,_z_,viscosity);
     }
 
     void Viscosity(double dx, double dy, double dz){
@@ -409,7 +411,7 @@ struct Hydro_ader{
     }
 
     void Update_solution(double dx, double dy, double dz){
-        update_solution(U_sp,
+        update_solution(U_sp,U_ader_sp,
             F_ader_fp_x,F_ader_fp_y,F_ader_fp_z,
             dfp_to_sp,wt,dx,dy,dz,dt);
     }

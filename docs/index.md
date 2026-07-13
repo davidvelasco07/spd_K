@@ -19,6 +19,7 @@ trouble map (right). See the {doc}`gallery` for the full test suite.*
 getting_started
 input_reference
 initial_conditions
+gravity
 fallback
 user_ic
 gallery

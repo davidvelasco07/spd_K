@@ -31,6 +31,9 @@ struct ProblemParams {
     double radius = 0.1;  //feature radius / interface position
     double sigma = 0.05;  //smoothing/perturbation width
     int dir = 0;          //direction of 1d profiles (0=x, 1=y, 2=z)
+    double cx = 0.5;      //domain center x (set from the box length at runtime)
+    double cy = 0.5;      //domain center y
+    double cz = 0.5;      //domain center z
 };
 
 //Runtime configuration chosen from the input file. POD so its fields can
@@ -42,6 +45,7 @@ struct RunConfig {
     bool fallback = true;                //FV update + fallback scheme
     double gamma = 1.4;
     double cfl = 0.8;
+    double g[3] = {0.0, 0.0, 0.0};       //constant gravitational acceleration (source term)
     double nad_tolerance = 1e-5;         //NAD band width
     bool nad_delta = false;              //band scaled by local range instead of |W|
     bool nad_moore = true;               //DMP bounds over the Moore (box) neighborhood

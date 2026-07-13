@@ -19,6 +19,7 @@ int problem_id(const string &name){
     if(name == "shu_osher")        return _ic_shu_osher_;
     if(name == "kelvin_helmholtz") return _ic_kelvin_helmholtz_;
     if(name == "implosion")        return _ic_implosion_;
+    if(name == "rti")              return _ic_rti_;
     if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
@@ -52,6 +53,10 @@ void problem_defaults(int problem, ProblemParams &pp){
             break;
         case _ic_spherical_blast_:  //d0, p0 inside, p1 outside, radius
             pp = {0.0, 0.0,0.0,0.0, 1.0,0.0, 10.0,0.1, 0.1,0.0, 0};
+            break;
+        case _ic_rti_:              //d0 heavy (lower), d1 light (upper), p0 ref,
+                                    //radius = interface yc, amp = perturbation
+            pp = {0.025, 0.0,0.0,0.0, 2.0,1.0, 1.0,0.0, 0.5,0.0, 0};
             break;
         case _ic_user_:             //free-form: defaults for the sample Gaussian pulse
             pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.5,0.1, 0};
@@ -139,6 +144,12 @@ int main(int argc, char** argv){
 
         cfg.cfl      = pin.GetOrAddReal("time","cfl",0.8);
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
+        //Constant gravitational acceleration (source term); default 0 leaves
+        //the homogeneous Euler equations untouched. Set e.g. hydro/g2 for a
+        //vertical field (Rayleigh-Taylor).
+        cfg.g[_x_]   = pin.GetOrAddReal("hydro","g1",0.0);
+        cfg.g[_y_]   = pin.GetOrAddReal("hydro","g2",0.0);
+        cfg.g[_z_]   = pin.GetOrAddReal("hydro","g3",0.0);
         cfg.fallback = pin.GetOrAddBoolean("job","fallback",true);
         cfg.nad_tolerance = pin.GetOrAddReal("fallback","tolerance",1e-5);
         cfg.nad_delta = pin.GetOrAddString("fallback","NAD","relative")=="delta";
@@ -158,6 +169,11 @@ int main(int argc, char** argv){
         cfg.pp.radius = pin.GetOrAddReal("problem","radius",cfg.pp.radius);
         cfg.pp.sigma  = pin.GetOrAddReal("problem","sigma",cfg.pp.sigma);
         cfg.pp.dir    = pin.GetOrAddInteger("problem","dir",cfg.pp.dir);
+        //Domain center in physical coordinates, so ICs (e.g. spherical_blast)
+        //stay centered in rectangular boxes (x[ilj]len != 1).
+        cfg.pp.cx     = 0.5*boxlen_x;
+        cfg.pp.cy     = 0.5*boxlen_y;
+        cfg.pp.cz     = 0.5*boxlen_z;
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
@@ -214,8 +230,16 @@ int main(int argc, char** argv){
             system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
         }
         else if(system_name == "hydro"){
-            double nu   = pin.GetOrAddReal("hydro","nu",0.00001);
-            double beta = pin.GetOrAddReal("hydro","beta",-2./3*pin.GetReal("hydro","nu"));
+            //Viscosity is opt-in at runtime (athenak-style): set hydro/nu>0 in
+            //the input file to switch on the viscous terms; the default nu=0
+            //runs the inviscid Euler equations.
+            double nu   = pin.GetOrAddReal("hydro","nu",0.0);
+            double beta = pin.GetOrAddReal("hydro","beta",-2./3*nu);
+            if(Master && nu>0.0)
+                cout<<"viscosity on: nu = "<<nu<<", beta = "<<beta<<endl;
+            if(Master && (cfg.g[_x_]||cfg.g[_y_]||cfg.g[_z_]))
+                cout<<"gravity on: g = ("<<cfg.g[_x_]<<", "<<cfg.g[_y_]
+                    <<", "<<cfg.g[_z_]<<")"<<endl;
             Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
             system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
         }

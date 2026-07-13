@@ -209,7 +209,8 @@ double compute_dt(
     SD_Solution W,
     double dx, 
     double dy, 
-    double dz
+    double dz,
+    double nu
     ){
     int Nx = W.Nx;
     int Ny = W.Ny;
@@ -241,6 +242,16 @@ double compute_dt(
             dx_min = min(dx_min,dz);
         }
         dt_min = cfl*dx_min/c_max/px;
+        //Explicit viscous (diffusion-number) limit on the sub-cell grid,
+        //matching the spd reference (sd_scheme.compute_dt): with sub-cell
+        //spacing h = dx/(p+1) the diffusion limit is 0.25*h^2/nu. Only active
+        //when viscosity is requested at runtime (hydro/nu>0); an inviscid run
+        //keeps a pure CFL timestep.
+        if(nu>0.0){
+            double dx_sub = dx_min/px;
+            double dt_visc = 0.25*cfl*dx_sub*dx_sub/nu;
+            dt_min = dt_min < dt_visc ? dt_min : dt_visc;
+        }
         reduce = reduce < dt_min ? reduce : dt_min;
     });
     #ifdef MPI
@@ -355,7 +366,7 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
 //compute_fluxes_t): compile-time indexing keeps the u_L/u_R/f locals in
 //registers instead of local memory
 template<int D, int V1, int V2, int V3>
-void sd_riemann_solver_t(SD_Solution U, SD_Solution F){
+void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
     //Store fluxes at the interface between elements to then solve the unique flux
     int Nx = U.Nx - (D==_x_);
     int Ny = U.Ny - (D==_y_);
@@ -388,22 +399,22 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F){
                 F.Vector(INDICES_L) = f[var];
                 F.Vector(INDICES_R) = f[var];
             }
-            #ifdef VISCOSITY
-            //Central interface state, consumed only by the diffusive terms
-            riemann_wind(f,u_L,u_R,0.5);
-            for(var=0;var<NVAR;var++){
-                U.Vector(INDICES_L) = f[var];
-                U.Vector(INDICES_R) = f[var];
+            if(viscous){
+                //Central interface state, consumed only by the diffusive terms
+                riemann_wind(f,u_L,u_R,0.5);
+                for(var=0;var<NVAR;var++){
+                    U.Vector(INDICES_L) = f[var];
+                    U.Vector(INDICES_R) = f[var];
+                }
             }
-            #endif
         }
     });
 }
 
-void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim){
-    if(dim==_x_)      sd_riemann_solver_t<_x_,_vx_,_vy_,_vz_>(U,F);
-    else if(dim==_y_) sd_riemann_solver_t<_y_,_vy_,_vz_,_vx_>(U,F);
-    else              sd_riemann_solver_t<_z_,_vz_,_vx_,_vy_>(U,F);
+void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim, bool viscous){
+    if(dim==_x_)      sd_riemann_solver_t<_x_,_vx_,_vy_,_vz_>(U,F,viscous);
+    else if(dim==_y_) sd_riemann_solver_t<_y_,_vy_,_vz_,_vx_>(U,F,viscous);
+    else              sd_riemann_solver_t<_z_,_vz_,_vx_,_vy_>(U,F,viscous);
 }
 
 void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
