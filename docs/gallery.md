@@ -6,15 +6,15 @@ reproduces exactly the run that produced it.
 
 ## Initial conditions
 
-### Sine wave (2D advection)
+### Sine wave (2D advection, one period)
 
 ```bash
-build/spd_K -i inputs/sine_wave.athinput mesh/nx3=1 mesh/nx1=16 mesh/nx2=16 time/tlim=0.2 output/dt=0.1
+build/spd_K -i inputs/sine_wave.athinput mesh/nx3=1 mesh/nx1=32 mesh/nx2=32 time/tlim=1.0 output/dt=1.0
 ```
 
 ![sine_wave_2d](gallery/sine_wave_2d.png)
 
-*Smooth density sine wave advected diagonally; profile is preserved with no visible trouble cells.*
+*Smooth density sine wave advected diagonally for one full period (t=1). The maps (left) show the initial and final states; the centerline cut (right) overlays them, confirming the profile returns to its initial shape with negligible dissipation.*
 
 ### Square signal (2D top-hat)
 
@@ -66,15 +66,15 @@ build/spd_K -i inputs/implosion.athinput mesh/nx1=100 mesh/nx2=100 output/dt=2.5
 
 *Liska-Wendroff implosion at 400^2 DOF (N=100, p=3) run to t=2.5; the shock collapses onto the corner and a symmetric jet forms along the diagonal between the reflective walls.*
 
-### User IC hook (Gaussian pulse)
+### User IC hook (viscous velocity pulse)
 
 ```bash
-build/spd_K -i inputs/user.athinput
+build/spd_K -i inputs/user.athinput mesh/nx1=32 mesh/nx2=32 mesh/nx3=1 time/tlim=1.0 output/dt=1.0 problem/sigma=0.08 problem/amp=0.5 problem/v1=1.0 hydro/nu=1e-3
 ```
 
 ![user_2d](gallery/user_2d.png)
 
-*User IC hook: Gaussian density pulse advected diagonally, edited in src/user_ic.hpp.*
+*User IC hook (src/user_ic.hpp): a Gaussian pulse in the transverse velocity v_y that varies only in x, advected one full period by v1=1. With viscosity enabled at runtime (hydro/nu=1e-3) it is an exact advection-diffusion problem: the maps (left) and the centerline cut (right, IC vs t=1) show the pulse stays Gaussian while spreading and losing amplitude, the signature of correct viscous diffusion (variance grows linearly in time).*
 
 ### Sedov-Taylor blast (3D)
 
@@ -86,15 +86,25 @@ build/spd_K -i inputs/sedov.athinput mesh/nx1=32 mesh/nx2=32 mesh/nx3=32 time/tl
 
 *Sedov-Taylor point explosion in 3D (32^3 elements, mid-z slice); an expanding spherical blast wave forms with trouble cells on the shock front.*
 
-### Spherical blast (2D, periodic square box, 400^2 DOF)
+### Spherical blast (2D, periodic rectangular box)
 
 ```bash
-build/spd_K -i inputs/spherical_blast.athinput mesh/nx1=100 mesh/nx2=100 time/tlim=1.5 output/dt=1.5
+build/spd_K -i inputs/spherical_blast.athinput mesh/nx1=100 mesh/nx2=150 mesh/x2len=1.5 time/tlim=1.5 output/dt=1.5
 ```
 
 ![spherical_blast_2d](gallery/spherical_blast_2d.png)
 
-*Over-pressured blast (p_in/p_out = 100) at 400^2 DOF in a periodic square box, run to t=1.5 so the shock fronts wrap and interact (cf. the Athena blast test).*
+*Over-pressured blast (p_in/p_out = 100) in a periodic rectangular box (1 x 1.5, 400x600 DOF, square cells), run to t=1.5. The shock and dense shell expand isotropically, then wrap and interact asymmetrically because of the box aspect ratio (cf. the Athena blast test).*
+
+### Rayleigh-Taylor instability (2D, gravity)
+
+```bash
+build/spd_K -i inputs/rti.athinput
+```
+
+![rti_2d](gallery/rti_2d.png)
+
+*Single-mode Rayleigh-Taylor instability under constant vertical gravity (hydro/g2=1, ported from the spd reference). Heavy fluid (rho=2) rests below light fluid (rho=1) in hydrostatic balance in a tall reflective box (periodic in x); a cos(8 pi x) velocity perturbation grows into the classic rising mushroom plume, with the trouble map (right) tracking the density interface and roll-ups.*
 
 ## Knobs (sine-wave representative)
 
