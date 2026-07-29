@@ -1,0 +1,37 @@
+# Orszag-Tang for AthenaK comparison (spd_K side).
+# True 2D, N=32 elements at p=3 -> 128 fine subcells/direction.
+# Same Gaussian units as AthenaK OT pgen; domain [0,1]^2 (AthenaK uses
+# [-0.5,0.5]^2 — shift by +0.5 when comparing). MOOD cascade on.
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 32
+nx2  = 32
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x3len = 1.0
+
+<time>
+tlim       = 1.0
+cfl        = 0.3
+integrator = rk3
+
+<hydro>
+gamma = 1.6666666666667
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = orszag_tang
+
+<output>
+dt = 0.1
