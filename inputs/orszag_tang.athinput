@@ -1,0 +1,28 @@
+# Orszag-Tang vortex (ideal MHD), true 2D in the x-y plane (nx3 = 1: the CT
+# machinery degenerates to the Ez edge family and Bz evolves cell-centered).
+<job>
+system   = mhd
+fallback = false
+
+<mesh>
+p    = 3
+nx1  = 32
+nx2  = 32
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x3len = 1.0
+
+<time>
+tlim       = 0.5
+cfl        = 0.4
+integrator = rk3        # MHD supports rk1 | rk2 | rk3 (SSP) for now
+
+<hydro>
+gamma = 1.6666666666667
+
+<problem>
+problem = orszag_tang
+
+<output>
+dt = 0.1

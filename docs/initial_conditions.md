@@ -31,6 +31,8 @@ Defaults are set per problem in `problem_defaults()` (`src/main.cpp`).
 | `sedov` | `inputs/sedov.athinput` | 2D–3D | γ = 5/3 |
 | `spherical_blast` | `inputs/spherical_blast.athinput` | 2D–3D | γ = 5/3 |
 | `rti` | `inputs/rti.athinput` | 2D | **reflective** in y, periodic in x; needs `hydro/g2` |
+| `orszag_tang` | `inputs/orszag_tang.athinput` | quasi-2D (`system=mhd`) | periodic; γ = 5/3; see {doc}`mhd` |
+| `field_loop` | `inputs/field_loop.athinput` | quasi-2D (`system=mhd`) | periodic; weak-field loop advection |
 | `user` | `inputs/user.athinput` | any | see {doc}`user_ic` |
 
 ### Sod shock tube

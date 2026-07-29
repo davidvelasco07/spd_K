@@ -15,8 +15,10 @@ python tests/run_tests.py --build-dir build
 ```
 
 Checks include L1 error vs the analytic sine wave, mass conservation to
-round-off, golden-file comparison, and implosion mass conservation with
-reflective BCs.
+round-off, golden-file comparison, implosion mass conservation with
+reflective BCs, and the MHD cases (Orszag-Tang with the MOOD cascade and
+field-loop advection, each both on the 3D z-invariant slab and in true 2D
+with `mesh/nx3 = 1`) with `max|divB|` verified at round-off over the run.
 
 Options:
 
@@ -24,6 +26,7 @@ Options:
 - `--skip-golden` — skip golden bit-comparison checks (machine/compiler
   specific; used in CI, which runs on a different toolchain)
 - `--regen-goldens` — refresh reference output files
+- `--only SUBSTR` — run only the configs whose name contains `SUBSTR`
 
 Golden files are exact byte references generated on a specific machine, so they
 are only meaningful on the same compiler/toolchain. CI therefore runs the

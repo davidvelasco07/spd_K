@@ -1,19 +1,18 @@
 using namespace std;
 
-struct Hydro_ader{
-    int n_output;
-    int n_step;
+struct Hydro_ader : public PhysicsModule{
     int n_ader;
     int nvar;
-    int n_stages;     //RK stages (1 for ADER)
-    double rk_a[3];   //per-stage convex weights of the SSP combination
-
-    double t;
-    double dt;
-    double Dt;
     double nu;
     double beta;
     bool viscosity;   //viscous terms active (enabled at runtime when nu>0)
+
+    //Stored so the task methods (which receive only Driver*) can reach the
+    //comm handle and per-direction geometry.
+    CommHelper comm_;
+    dimension Xdim_;
+    dimension Ydim_;
+    dimension Zdim_;
 
     Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
@@ -85,7 +84,7 @@ struct Hydro_ader{
         double* x_fp,
         double _nu,
         double _beta
-    ){
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim) {
         //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
         nvar = NVAR;
         n_output = 0;
@@ -103,7 +102,6 @@ struct Hydro_ader{
         //by a full forward-Euler step (weight 1) and combined convexly with U0
         if(cfg.integrator==_integrator_rk_){
             n_ader = 1;
-            n_stages = ssp_rk_coefficients(cfg.rk_order,rk_a);
             Kokkos::resize(xt,1);
             Kokkos::resize(wt,1);
             Kokkos::deep_copy(xt,0.0);
@@ -111,7 +109,6 @@ struct Hydro_ader{
         }
         else{
             n_ader = p+1;
-            n_stages = 1;
             xt = xx;
             wt = wx;
         }
@@ -212,65 +209,71 @@ struct Hydro_ader{
             Write_outputs();
     }
 
-    void time_evolution(
-        CommHelper comm,
-        double t_end,
-        double dt_output,
-        dimension X_dim,
-        dimension Y_dim,
-        dimension Z_dim){
-
-        dt=Dt;
-        double t_output=dt_output;
-
-        //Time only the evolution loop: IC, setup and any host<->device
-        //transfers before/after the run are excluded. Time spent writing
-        //outputs (device->host copy + disk) is measured and subtracted.
-        Kokkos::fence();
-        Kokkos::Timer timer;
-        double t_io = 0;
-        int step0 = n_step;
-
-        while(t<t_end){
-            if(cfg.integrator==_integrator_rk_)
-                RK_step(comm,X_dim,Y_dim,Z_dim);
-            else
-                ADER_step(comm,X_dim,Y_dim,Z_dim);
-            compute_primitives(U_sp,W_sp);
-            transform_sp_to_cv(W_sp,W_cv);
-            t+=dt;
-            n_step++;
-            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
-
-            //Outputs
-            if(Master) cout<<".";
-            if(cfg.outputs){
-                if(t>=t_output){
-                    t_output=t+dt_output;
-                    Kokkos::fence();
-                    Kokkos::Timer io_timer;
-                    Write_outputs();
-                    t_io += io_timer.seconds();
-                }
-                if(t+dt>t_output){
-                    dt=t_output-t;
-                }
-            }
-        }
-        Kokkos::fence();
-        double t_evol = timer.seconds() - t_io;
-        cout<<endl;
-        if(Master){
-            long long n_cells = (long long)(X_dim.N*X_dim.n_sp)
-                              * (Y_dim.N*Y_dim.n_sp)
-                              * (Z_dim.N*Z_dim.n_sp);
-            int steps = n_step - step0;
-            cout<<"evolution: "<<steps<<" steps, "<<t_evol<<" s"
-                <<" ("<<(steps>0 ? t_evol/steps*1e3 : 0)<<" ms/step), "
-                <<(t_evol>0 ? n_cells*(double)steps/t_evol : 0)
-                <<" zone-cycles/s"<<endl;
-        }
+    /////////////////////////////////////////////////////////////////////
+    // Tasklist interface (PhysicsModule): the monolithic ADER_step/RK_step
+    // are broken into task methods registered into the driver's phases. The
+    // per-stage chain is CopyCons -> Advance -> Combine; Advance folds the
+    // ADER Picard predictor (degenerating to a single flux solve under RK).
+    /////////////////////////////////////////////////////////////////////
+    void AssembleTasks(Driver* d) override {
+        TaskID none(0);
+        auto bti = d->tl_map["before_timeintegrator"];
+        auto stg = d->tl_map["stagen"];
+        auto ati = d->tl_map["after_timeintegrator"];
+        //SSP-RK saves the step-start state once per cycle for the convex combine
+        if(cfg.integrator==_integrator_rk_)
+            bti->AddTask(&Hydro_ader::TaskSaveState, this, none);
+        TaskID copy = stg->AddTask(&Hydro_ader::TaskCopyCons, this, none);
+        TaskID adv  = stg->AddTask(&Hydro_ader::TaskAdvance,  this, copy);
+        stg->AddTask(&Hydro_ader::TaskCombine, this, adv);
+        //cons->prim + control-volume averages (consumed by outputs and the CFL)
+        ati->AddTask(&Hydro_ader::TaskConsToPrim, this, none);
     }
+
+    TaskStatus TaskSaveState(Driver* d, int stage){
+        Kokkos::deep_copy(U0_sp.Vector,U_sp.Vector);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskCopyCons(Driver* d, int stage){
+        copy_ader(U_sp,U_ader_sp);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskAdvance(Driver* d, int stage){
+        //ADER: Picard predictor over the p+1 temporal slices (the final slice
+        //leaves the fluxes ready for the corrector). RK: n_ader==1, a single
+        //forward-Euler flux solve.
+        for(int ader=0; ader<n_ader; ader++){
+            Solve_fluxes(comm_,Xdim_,Ydim_,Zdim_);
+            if(ader<n_ader-1)
+                Update_prediction(Xdim_.h,Ydim_.h,Zdim_.h);
+        }
+        if(cfg.fallback)
+            FV_Update_solution(comm_,Xdim_,Ydim_,Zdim_);
+        else
+            Update_solution(Xdim_.h,Ydim_.h,Zdim_.h);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskCombine(Driver* d, int stage){
+        //SSP convex combination U <- a*U0 + (1-a)*U (RK only; stage is 1-based)
+        if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0)
+            combine_solution(U_sp,U0_sp,d->rk_a[stage-1]);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskConsToPrim(Driver* d, int stage){
+        compute_primitives(U_sp,W_sp);
+        transform_sp_to_cv(W_sp,W_cv);
+        return TaskStatus::complete;
+    }
+
+    double ComputeDt() override {
+        return compute_dt(W_cv,Xdim_.h,Ydim_.h,Zdim_.h,nu);
+    }
+
+    void WriteOutputs() override { Write_outputs(); }
 
     //One evaluation of the spatial operator on the n_ader slices of the
     //U_ader_* arrays: interpolation to flux points, physical fluxes, halo
@@ -285,42 +288,6 @@ struct Hydro_ader{
             Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
             apply_boundaries(comm);
             Rusanov_Solver();
-        }
-    }
-
-    void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
-        ////Initialize ADER time slices
-        copy_ader(U_sp,U_ader_sp);
-
-        //Picard iteration
-        for(int ader=0;ader<n_ader;ader++){
-            Solve_fluxes(comm,X_dim,Y_dim,Z_dim);
-            if(ader<n_ader-1)
-                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
-        }
-        if(cfg.fallback)
-            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
-        else
-            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-    }
-
-    //SSP-RK step (Shu-Osher form): each stage is a full forward-Euler step
-    //(reusing the ADER machinery with a single time slice, so the per-stage
-    //fallback detection/blending applies unchanged) followed by the convex
-    //combination U <- a*U0 + (1-a)*U. Convexity preserves the admissibility
-    //enforced per stage, and every contribution stays in flux form, so the
-    //blended update remains exactly conservative.
-    void RK_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
-        Kokkos::deep_copy(U0_sp.Vector,U_sp.Vector);
-        for(int s=0;s<n_stages;s++){
-            copy_ader(U_sp,U_ader_sp);
-            Solve_fluxes(comm,X_dim,Y_dim,Z_dim);
-            if(cfg.fallback)
-                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
-            else
-                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-            if(rk_a[s]>0)
-                combine_solution(U_sp,U0_sp,rk_a[s]);
         }
     }
 

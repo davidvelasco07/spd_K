@@ -20,6 +20,8 @@ int problem_id(const string &name){
     if(name == "kelvin_helmholtz") return _ic_kelvin_helmholtz_;
     if(name == "implosion")        return _ic_implosion_;
     if(name == "rti")              return _ic_rti_;
+    if(name == "orszag_tang")      return _ic_orszag_tang_;
+    if(name == "field_loop")       return _ic_field_loop_;
     if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
@@ -156,6 +158,12 @@ int main(int argc, char** argv){
         cfg.nad_moore = pin.GetOrAddString("fallback","NAD_neighbors","2nd")=="2nd";
         cfg.sed       = pin.GetOrAddBoolean("fallback","SED",true);
         cfg.blending  = pin.GetOrAddBoolean("fallback","blending",true);
+        cfg.max_revs  = pin.GetOrAddInteger("fallback","max_revs",3);
+        cfg.pad_min_rho = pin.GetOrAddReal("fallback","min_rho",1e-10);
+        cfg.pad_min_P   = pin.GetOrAddReal("fallback","min_P",1e-10);
+        cfg.floor_cons  = pin.GetOrAddString("hydro","floors","ramses")=="athenak";
+        cfg.dfloor      = pin.GetOrAddReal("hydro","dfloor",1e-10);
+        cfg.pfloor      = pin.GetOrAddReal("hydro","pfloor",-1.0);
         cfg.problem  = problem_id(pin.GetOrAddString("problem","problem","sine_wave"));
         problem_defaults(cfg.problem, cfg.pp);
         cfg.pp.amp    = pin.GetOrAddReal("problem","amp",cfg.pp.amp);
@@ -227,7 +235,8 @@ int main(int argc, char** argv){
         if(system_name == "induction"){
             double eta = pin.GetOrAddReal("induction","nu",0.0025);
             Induction_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,eta);
-            system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+            Driver driver(&system);
+            driver.Execute(tlim,dt_output);
         }
         else if(system_name == "hydro"){
             //Viscosity is opt-in at runtime (athenak-style): set hydro/nu>0 in
@@ -241,7 +250,13 @@ int main(int argc, char** argv){
                 cout<<"gravity on: g = ("<<cfg.g[_x_]<<", "<<cfg.g[_y_]
                     <<", "<<cfg.g[_z_]<<")"<<endl;
             Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
-            system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+            Driver driver(&system);
+            driver.Execute(tlim,dt_output);
+        }
+        else if(system_name == "mhd"){
+            MHD_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);
+            Driver driver(&system);
+            driver.Execute(tlim,dt_output);
         }
         else{
             if(Master) cout<<"ERROR: unknown system '"<<system_name<<"'"<<endl;

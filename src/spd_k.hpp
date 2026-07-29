@@ -16,7 +16,10 @@ using namespace H5;
 #include "global.hpp"
 #include "muscl.hpp"
 #include "prototypes.hpp"
+#include "tasklist/task_list.hpp"
+#include "driver.hpp"
 #include "induction_ader.hpp"
 #include "hydro_ader.hpp"
+#include "mhd.hpp"
 
 using namespace std;

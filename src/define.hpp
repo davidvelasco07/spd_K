@@ -51,7 +51,7 @@ enum {_periodic_, _gradfree_, _reflective_};
 enum {_integrator_ader_, _integrator_rk_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
-      _ic_rti_, _ic_user_};
+      _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_
@@ -263,6 +263,21 @@ double sd_min_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
         make_flat6(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx),
         Kokkos::Min<double>(min_value));
     return min_value;
+}
+
+//Max-reduction over interior elements; blocks until the result is ready.
+//Lambda signature: (int k, int j, int i, int kk, int jj, int ii, double& reduce)
+template <class Functor>
+double sd_max_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                    const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)Mz*My*Mx*nz*ny*nx;
+    double max_value=0;
+    if(total <= 0) return max_value;
+    Kokkos::parallel_reduce("sd_max_cells", flat_range(0,flat_total(total)),
+        make_flat6(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx),
+        Kokkos::Max<double>(max_value));
+    return max_value;
 }
 
 //Sum-reduction over interior elements and their points.

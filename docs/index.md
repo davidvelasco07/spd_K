@@ -21,6 +21,7 @@ input_reference
 initial_conditions
 gravity
 fallback
+mhd
 user_ic
 gallery
 testing

@@ -1,8 +1,11 @@
 # spd_K
 
-Kokkos C++ port of the spectral-difference hydrodynamics and induction solvers
-from [spd](https://github.com/davidvelasco07/spd). Configure problems at runtime
-with Athena++-style input files; run on CPU or NVIDIA GPU via Kokkos.
+Kokkos C++ port of the spectral-difference hydrodynamics, induction, and
+ideal-MHD solvers from [spd](https://github.com/davidvelasco07/spd). MHD uses
+constrained transport (div B = 0 to round-off) with a MOOD cascade fallback
+(|B|-based NAD). Physics modules register tasks into an athenak-style
+tasklist/driver. Configure problems at runtime with input
+files; run on CPU or NVIDIA GPU via Kokkos.
 
 **Documentation:** [davidvelasco07.github.io/spd_K](https://davidvelasco07.github.io/spd_K/)
 

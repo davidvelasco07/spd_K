@@ -51,6 +51,19 @@ struct RunConfig {
     bool nad_moore = true;               //DMP bounds over the Moore (box) neighborhood
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
+    int max_revs = 3;                    //cap on MOOD detection/revision sweeps; the loop
+                                         //exits early once no revisable troubled cell
+                                         //remains, so this is a safety cap, not a cost.
+                                         //Truncating it commits unverified candidates
+                                         //(they lean on the ctoprim floors).
+    double pad_min_rho = 1e-10;          //PAD floors (runtime-tunable detection
+    double pad_min_P   = 1e-10;          //strictness, cf. fallback min_rho/min_P)
+    bool floor_cons = false;             //ctoprim floor semantics: false = RAMSES
+                                         //(primitive view only; matches Python spd),
+                                         //true = AthenaK (repair the conserved state)
+    double dfloor = 1e-10;               //ctoprim density floor
+    double pfloor = -1.0;                //ctoprim pressure floor; <0 derives the
+                                         //RAMSES smallp from dfloor
     int bc[3] = {0, 0, 0};               //boundary type per direction
     int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
     int rk_order = 3;                    //SSP-RK order (1, 2 or 3)

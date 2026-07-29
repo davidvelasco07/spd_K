@@ -86,14 +86,14 @@ class FV_Solution{
         kR = Zdim.idR;
 
         Kokkos::resize(Vector,nvar,Nz,Ny,Nx);
-        #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(Vector_h,nvar,Nz,Ny,Nx);
-        #endif
         label=name;
     }
 
+    //Lazy host mirror: allocated on first copy() (see SD_Solution::copy)
     void copy(){
         #ifdef KOKKOS_ENABLE_CUDA
+        if(Vector_h.size() != Vector.size())
+            Vector_h = Kokkos::create_mirror_view(Vector);
         Kokkos::deep_copy (Vector_h, Vector);
         #endif
     }

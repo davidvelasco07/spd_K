@@ -46,6 +46,7 @@ add_executable(${PROJECT_NAME}
     src/boundary.cpp
     src/hydro.cpp
     src/induction.cpp
+    src/mhd.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
 )
@@ -70,6 +71,7 @@ add_executable(spd_K_test
     src/boundary.cpp
     src/hydro.cpp
     src/induction.cpp
+    src/mhd.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
 )
