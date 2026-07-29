@@ -6,10 +6,10 @@ Matched setup (see inputs/compare/):
   AthenaK : nx = N*(p+1), domain [-0.5,0.5]^2, same Gaussian OT units
 
 Coordinate / IC mapping
-  x_K = x_A + 0.5
-  AthenaK OT pgen uses the opposite signs for (vx, vy, Bx) relative to spd_K
-  (and to the common Toth convention). The comparison flips those three
-  AthenaK fields before differencing.
+  AthenaK domain [-0.5,0.5]^2 vs spd_K [0,1]^2. Arrays are compared
+  index-wise: the half-box shift makes sin(2π(y-1/2)) = -sin(2πy), so
+  AthenaK's opposite-looking OT velocity/Bx IC already matches spd_K on the
+  aligned grid — do NOT flip signs.
 
 Usage:
   compare_ot_athenak.py <spdk_W_cv.dat> <athenak_mhd_w_bcc.bin> <N> <p>
@@ -100,10 +100,9 @@ def read_athenak_w(path: str, vis_dir: str, gamma: float) -> tuple[float, np.nda
     bcc3 = stitch("bcc3")
     prs = (gamma - 1.0) * eint
 
-    # Flip AthenaK (vx, vy, Bx) to the spd_K / Toth sign convention, then
-    # nothing else — domain shift is handled by the caller via axis alignment
-    # (both arrays are indexed j=y, i=x over a periodic unit box).
-    W = np.stack([dens, -velx, -vely, velz, prs, -bcc1, bcc2, bcc3], axis=0)
+    # Index-aligned with spd_K's [0,1]^2 grid: the AthenaK [-0.5,0.5]^2
+    # shift already reconciles the OT IC sign convention (see module docstring).
+    W = np.stack([dens, velx, vely, velz, prs, bcc1, bcc2, bcc3], axis=0)
     return float(fd["time"]), W
 
 
