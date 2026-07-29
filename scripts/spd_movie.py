@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Launch an spd_K MHD simulation and produce a 4-panel movie from it.
+"""Launch an spd_K MHD simulation and produce a panel movie from it.
 
-Runs the solver, renders each output as a 2x2 panel figure (density, gas
-pressure, |B|^2, MOOD cascade level; mid-z slice) as soon as it is written,
-deletes the raw .dat files to keep disk usage bounded, and encodes the frames
-into an mp4 when the run ends.
+Runs the solver, renders each output as soon as it is written, deletes the
+raw .dat files to keep disk usage bounded, and encodes the frames into an mp4
+when the run ends.
+
+Panel layouts (`--panels`):
+  rho,prs,cascade   — 1x3 (default): density, gas pressure, MOOD revision level
+  rho,prs,b2,cascade — 2x2: density, pressure, |B|^2, cascade
 
 Any `block/key=value` pair accepted by spd_K can be appended to modify the
 run, e.g.:
 
   scripts/spd_movie.py --movie plots/ot_revs3.mp4 \\
-      fallback/max_revs=3 fallback/min_P=1e-4 mesh/nx1=256 mesh/nx2=256
+      fallback/max_revs=3 fallback/min_P=1e-4 mesh/nx1=64 mesh/nx2=64
 
   # encode an existing frame directory only (no simulation):
   scripts/spd_movie.py --encode-only /tmp/spd_ot_frames --movie plots/ot.mp4
@@ -50,6 +53,9 @@ def parse_args():
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--title", default="Orszag-Tang",
                     help="figure title prefix (resolution/time appended)")
+    ap.add_argument("--panels", default="rho,prs,cascade",
+                    choices=("rho,prs,cascade", "rho,prs,b2,cascade"),
+                    help="panel layout (default: density / pressure / cascade)")
     ap.add_argument("--keep-frames", action="store_true",
                     help="keep the rendered .png frames")
     ap.add_argument("--keep-data", action="store_true",
@@ -125,13 +131,23 @@ def frame_complete(outdir, i, N, p, nz_tot):
 # Rendering / encoding
 # ----------------------------------------------------------------------------
 
-def render(framedir, i, t, title, rho, prs, b2, casc):
-    fig, ax = plt.subplots(2, 2, figsize=(11.2, 10.2), constrained_layout=True)
-    panels = [(rho, "density", "viridis", None),
-              (prs, "gas pressure", "inferno", None),
-              (b2, r"$|B|^2$", "magma", None),
-              (casc, "MOOD cascade level", "Reds", (0, 2))]
-    for a, (f, name, cmap, clim) in zip(ax.flat, panels):
+def render(framedir, i, t, title, rho, prs, b2, casc, panels="rho,prs,cascade"):
+    catalog = {
+        "rho": (rho, "density", "viridis", None),
+        "prs": (prs, "gas pressure", "inferno", None),
+        "b2": (b2, r"$|B|^2$", "magma", None),
+        "cascade": (casc, "MOOD revision level", "Reds", (0, 2)),
+    }
+    keys = [k.strip() for k in panels.split(",")]
+    n = len(keys)
+    if n == 3:
+        fig, ax = plt.subplots(1, 3, figsize=(14.4, 4.6), constrained_layout=True)
+        axes = list(ax)
+    else:
+        fig, ax = plt.subplots(2, 2, figsize=(11.2, 10.2), constrained_layout=True)
+        axes = list(ax.flat)
+    for a, key in zip(axes, keys):
+        f, name, cmap, clim = catalog[key]
         if f is None:
             a.text(0.5, 0.5, "fallback off", ha="center", va="center")
             a.set_title(name)
@@ -200,7 +216,8 @@ def main():
             time.sleep(1)          # let the last write settle (NFS/page cache)
             try:
                 rho, prs, b2, casc = load_frame(outdir, done, N, p, nz_tot)
-                render(framedir, done, done * args.dt_out, title, rho, prs, b2, casc)
+                render(framedir, done, done * args.dt_out, title, rho, prs, b2, casc,
+                       panels=args.panels)
             except Exception as e:
                 print(f"frame {done}: render failed: {e}", flush=True)
             if not args.keep_data:
