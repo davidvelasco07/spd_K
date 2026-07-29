@@ -10,7 +10,7 @@ compare   = spd_K ot_spdk_n32_fb
 basename   = ot_hlld_uct_n128
 
 <mesh>
-nghost    = 5
+nghost    = 7
 nx1       = 128
 x1min     = -0.5
 x1max     = 0.5
