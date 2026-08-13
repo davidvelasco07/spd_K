@@ -18,6 +18,14 @@ void lagrange_matrix(Matrix a_to_b, double *x_a, double *x_b, int n_a, int n_b){
     }
 }
 
+void lagrange_matrix(Matrix_h a_to_b, double *x_a, double *x_b, int n_a, int n_b){
+  for(int j=0;j<n_b;j++){
+        for(int i=0;i<n_a;i++){
+            a_to_b(j,i)=lagrange(x_a,x_b[j],i,n_a);
+        }
+    }
+}
+
 double lagrange_prime(double *x, double y, int i, int n){
     int j,k;
     double lag,lagp=0;
@@ -36,6 +44,14 @@ double lagrange_prime(double *x, double y, int i, int n){
 }
 
 void lagrange_prime_matrix(Matrix da_to_b, double *x_a, double *x_b, int n_a, int n_b){
+  for(int j=0;j<n_b;j++){
+        for(int i=0;i<n_a;i++){
+            da_to_b(j,i)=lagrange_prime(x_a,x_b[j],i,n_a);
+        }
+    }
+}
+
+void lagrange_prime_matrix(Matrix_h da_to_b, double *x_a, double *x_b, int n_a, int n_b){
   for(int j=0;j<n_b;j++){
         for(int i=0;i<n_a;i++){
             da_to_b(j,i)=lagrange_prime(x_a,x_b[j],i,n_a);
@@ -100,6 +116,14 @@ void ader_matrix(Matrix ader, Vector x_t, Vector w_t, int n){
     }
 }
 
+void ader_matrix(Matrix_h ader, Vector_h x_t, Vector_h w_t, int n){
+    for(int j=0;j<n;j++){
+        for(int i=0;i<n;i++){
+          ader(j,i)=lagrange(x_t.data(),1,i,n)*lagrange(x_t.data(),1,j,n)-lagrange_prime(x_t.data(),x_t(i),j,n)*w_t(i);
+        }
+    }
+}
+
 void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int n_sp){
     double integral;
     int p = n_sp-1;
@@ -123,7 +147,31 @@ void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int 
     }
 }
 
-void inverse(Matrix A, Matrix C, int n){
+void integral_matrix(Matrix_h sp_to_cv, double *x_fp, double *x_sp, int n_cv, int n_sp){
+    double integral;
+    int p = n_sp-1;
+    double *x = malloc_host<double>(p);
+    double *w = malloc_host<double>(p);
+    gauss_legendre(0.0, 1.0, p, x, w);
+    for(int k=0;k<n_cv;k++){
+        if(p>0)
+            gauss_legendre(x_fp[k], x_fp[k+1], p, x, w);
+        for(int j=0;j<n_sp;j++){
+            if(p>0){
+                integral=0.0;
+                for(int i=0;i<p;i++){
+                    integral+=lagrange(x_sp,x[i],j,p+1)*w[i];
+                }
+            }
+            else
+                integral = 1.0;
+            sp_to_cv(k,j)=integral/(x_fp[k+1]-x_fp[k]);
+        }
+    }
+}
+
+template<typename Mat>
+static void inverse_impl(Mat A, Mat C, int n){
   double coeff;
   double *b = malloc_host<double>(n);
   double *d = malloc_host<double>(n);
@@ -195,4 +243,12 @@ void inverse(Matrix A, Matrix C, int n){
   free(x);
   free(b);
   free(d);
+}
+
+void inverse(Matrix A, Matrix C, int n){
+    inverse_impl(A, C, n);
+}
+
+void inverse(Matrix_h A, Matrix_h C, int n){
+    inverse_impl(A, C, n);
 }

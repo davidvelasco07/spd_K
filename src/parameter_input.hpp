@@ -43,6 +43,9 @@ class ParameterInput {
     //Echo the effective parameters (input-file format) for provenance
     void Dump(std::ostream &os) const;
 
+    //Sorted list of block names present in the file
+    std::vector<std::string> BlockNames() const;
+
   private:
     //block -> (name -> value); maps keep blocks/names sorted, which is fine
     std::map<std::string, std::map<std::string, std::string>> params_;

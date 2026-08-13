@@ -1,3 +1,6 @@
+#ifndef DEFINE_HPP_
+#define DEFINE_HPP_
+
 //#define MPI
 
 //The system (hydro/induction), dimensionality, FV fallback, boundary
@@ -49,7 +52,7 @@
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_};
 enum {_integrator_ader_, _integrator_rk_};
-enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_};
+enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_kelvin_helmholtz_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_
@@ -95,7 +98,8 @@ extern int nGH_rt[3];
 #define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
 
 #ifdef KOKKOS_ENABLE_CUDA
-#define MemSpace Kokkos::CudaUVMSpace
+#define MemSpace Kokkos::CudaSpace
+#define SetupSpace MemSpace
 #define Layout Kokkos::LayoutLeft
 #else
 #define MemSpace Kokkos::HostSpace
@@ -113,6 +117,21 @@ typedef Matrix::host_mirror_type Matrix_h;
 typedef Vector::host_mirror_type Vector_h;
 typedef SD_Vector::host_mirror_type SD_Vector_h;
 typedef FV_Vector::host_mirror_type FV_Vector_h;
+
+template<typename View>
+inline typename View::host_mirror_type setup_mirror(const View& dev){
+    return Kokkos::create_mirror_view(dev);
+}
+
+template<typename View>
+inline void setup_push(View& dev, const typename View::host_mirror_type& host){
+    Kokkos::deep_copy(dev, host);
+}
+
+template<typename View>
+inline void setup_pull(const View& dev, typename View::host_mirror_type& host){
+    Kokkos::deep_copy(host, dev);
+}
 
 //Loop helpers: thin wrappers over Kokkos::parallel_for/parallel_reduce
 //taking a KOKKOS_LAMBDA. Kernels launched on the same execution space
@@ -185,3 +204,5 @@ void fv_for_faces(int Nz, int Ny, int Nx,
         Kokkos::MDRangePolicy<Kokkos::Rank<3>>({nGHz,nGHy,nGHx},
             {Nz-nGHz+(nGHz>0),Ny-nGHy+(nGHy>0),Nx-nGHx+(nGHx>0)}), f);
 }
+
+#endif

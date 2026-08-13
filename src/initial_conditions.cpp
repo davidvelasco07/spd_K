@@ -65,6 +65,32 @@ double spherical_blast(int var, double x, double y, double z, bool az){
         return 0;
 }
 
+//Smooth-interface Kelvin-Helmholtz, Athena++ (Stone et al. 2020) eq. 26.
+//
+//The paper writes the tanh argument as |y - 0.25|/L, but that puts a single
+//interface at y=0.25 and gives a density contrast of 1.5 with a velocity jump
+//of 0.5 -- contradicting its own text ("a density contrast of two and a
+//velocity jump of one") and leaving the state non-periodic across y. The
+//intended argument is (|y| - 0.25)/L: interfaces at y = +-0.25, rho in
+//[1,2], vx in [-0.5,0.5]. The perturbation wavelength is 0.5, so each
+//interface carries two wavelengths across the unit box.
+//
+//Paper coordinates are [-0.5,0.5]^2; the code box is [0,LENGHT]^2, so y is
+//shifted. The x shift is a whole number of periods of cos(4 pi x) and drops out.
+KOKKOS_INLINE_FUNCTION
+double kelvin_helmholtz(int var, double x, double y){
+    const double Lsh = 0.01;   //shear layer thickness
+    const double amp = 0.01;   //perturbation amplitude
+    const double sig = 0.2;    //thickness of the perturbed layer
+    double dy = fabs(y - 0.5*LENGHT) - 0.25;
+    double s  = tanh(dy/Lsh);
+    if(var==_d_)  return 1.5 - 0.5*s;
+    if(var==_vx_) return 0.5*s;
+    if(var==_vy_) return amp*cos(4*PI*x)*exp(-(dy*dy)/(sig*sig));
+    if(var==_p_)  return 2.5;
+    return 0;
+}
+
 KOKKOS_INLINE_FUNCTION
 double initial_condition(int problem, int var, double x, double y, double z,
                          double gm, bool az){
@@ -72,6 +98,7 @@ double initial_condition(int problem, int var, double x, double y, double z,
         case _ic_sine_wave_:       return sine_wave(var,x,y,z);
         case _ic_sedov_:           return sedov_blast(var,x,y,z,gm,az);
         case _ic_spherical_blast_: return spherical_blast(var,x,y,z,az);
+        case _ic_kelvin_helmholtz_:return kelvin_helmholtz(var,x,y);
         default:                   return 0;
     }
 }

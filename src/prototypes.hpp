@@ -2,13 +2,18 @@
 extern double lagrange(double*,double,int,int);
 extern double lagrange_prime(double*,double,int,int);
 extern void lagrange_matrix(Matrix,double*,double*,int,int);
+extern void lagrange_matrix(Matrix_h,double*,double*,int,int);
 extern void lagrange_prime_matrix(Matrix,double*,double*,int,int);
+extern void lagrange_prime_matrix(Matrix_h,double*,double*,int,int);
 extern void gauss_legendre(double, double, int, double*, double*);
 extern void flux_points(double*, double*, int);
 extern void solution_points(double *, int);
 extern void ader_matrix(Matrix, Vector, Vector, int);
+extern void ader_matrix(Matrix_h, Vector_h, Vector_h, int);
 extern void integral_matrix(Matrix, double*, double*, int, int);
+extern void integral_matrix(Matrix_h, double*, double*, int, int);
 extern void inverse(Matrix, Matrix, int);
+extern void inverse(Matrix_h, Matrix_h, int);
 
 //Transforms
 extern void transform_a_to_b_ref(SD_Solution, SD_Solution, Matrix, Matrix, Matrix);
@@ -22,9 +27,16 @@ extern void combine_solution(SD_Solution, SD_Solution, double);
 
 //AMR transfer operators (prolongation/restriction between levels)
 extern void transfer_matrices(Matrix, Matrix, double*, int);
+extern void build_overlap_restrict_matrices(Matrix R_sp[2], Matrix R_cv[2],
+                                            double* x_sp, double* x_fp, int p);
 extern void prolongate_block(SD_Solution, SD_Solution, Matrix, int, int, int);
 extern void restrict_block(SD_Solution, SD_Solution, Matrix, int, int, int);
+extern void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
+                                     SD_Solution& coarse_face, Matrix R, int dim);
+extern void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
+                                    Matrix P, int dim, int sub);
 extern void gather_block(SD_Solution, SD_Solution, int, int, int);
+extern void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
@@ -114,3 +126,7 @@ extern string output_folder();
 extern void Write(SD_Solution, int);
 extern void Write(FV_Solution, int);
 extern void Write_dimensions(dimension, dimension, dimension);
+class BlockForest;
+//Leaf-block metadata for AMR visualization (text): one file per output index.
+extern void Write_amr_blocks(const BlockForest& forest, int n_output,
+                             int NBx, int NBy, int NBz);

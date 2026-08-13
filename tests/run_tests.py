@@ -22,13 +22,20 @@ plus command-line overrides. Checks per configuration:
                    stitched output array has no evolved ghost data)
   induction_fv_3d: golden file comparison of B2_cv (linear problem, no
                    chaotic amplification, so a tight tolerance is portable)
+  hydro_smr_2d   : static centre patch; the mesh must stay mixed-level
+  hydro_amr_2d   : dynamic AMR on a pulse; the mesh must become mixed-level
+
+Every configuration is additionally gated on all dumps being finite, before
+any tolerance is applied.
 
 Usage:
   tests/run_tests.py [--build-dir DIR] [--skip-unit] [--regen-goldens]
 """
 import argparse
 import glob
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -172,6 +179,45 @@ CONFIGS = {
         "golden_name": "induction_fv",
         "golden_rtol": 1e-8,   # linear problem: cross-compiler safe
     },
+    "hydro_smr_2d": {
+        # static refinement via <refinement1>. 4x4 base blocks with only the
+        # centre tagged, so a coarse rim survives and the run exercises real
+        # coarse-fine interfaces (12 coarse + 16 fine blocks).
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "amr/max_level=1",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_smr_fallback_2d": {
+        # static refinement with the FV fallback active. Isolates the
+        # coarse-fine handling of the blended fluxes from regridding: the
+        # mesh never changes, so any drift is the interface, not the transfer.
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_amr_2d": {
+        # dynamic AMR on a Gaussian pulse
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": [],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
 }
 
 
@@ -193,18 +239,33 @@ def run(build_dir, outdir, cfg):
     sh(cmd, env=env)
 
 
-def shape(ndim):
-    """Element/point shape of the SD output arrays for a given ndim."""
-    Ne = lambda active: N + 2 * NGH if active else 1
+def n_from_field(field):
+    import re
+    m = re.search(r"N(\d+)p", field)
+    return int(m.group(1)) if m else N
+
+
+def shape_for(n_cells, ndim):
+    """Element/point shape of the SD output arrays for a given ndim and N."""
+    Ne = lambda active, nc: nc + 2 * NGH if active else 1
     np_ = lambda active: n if active else 1
     a = [True, ndim >= 2, ndim >= 3]  # x, y, z activity
-    return (1, 6, Ne(a[2]), Ne(a[1]), Ne(a[0]), np_(a[2]), np_(a[1]), np_(a[0]))
+    nx_c = n_cells if a[0] else 1
+    ny_c = n_cells if a[1] else 1
+    nz_c = n_cells if a[2] else 1
+    return (1, 6, Ne(a[2], nz_c), Ne(a[1], ny_c), Ne(a[0], nx_c),
+            np_(a[2]), np_(a[1]), np_(a[0]))
+
+
+def shape(ndim):
+    return shape_for(N, ndim)
 
 
 def load_rho_cells(outdir, cfg):
     """rho on the active-region global cell grid, shape (nz_c, ny_c, nx_c)."""
     ndim = cfg["ndim"]
-    A = np.fromfile(os.path.join(outdir, cfg["field"])).reshape(shape(ndim))
+    nc = n_from_field(cfg["field"])
+    A = np.fromfile(os.path.join(outdir, cfg["field"])).reshape(shape_for(nc, ndim))
     rho = A[0, 0]
     sl = lambda active: slice(NGH, -NGH) if active else slice(None)
     rho = rho[sl(ndim >= 3), sl(ndim >= 2), sl(True)]
@@ -218,14 +279,21 @@ def active_faces(outdir):
     return xf[nGH:len(xf) - nGH]
 
 
-def cell_widths(outdir):
-    return np.diff(active_faces(outdir))
+def cell_widths(outdir, cfg=None):
+    nc_elem = n_from_field(cfg["field"]) if cfg and "field" in cfg else N
+    xf_path = os.path.join(outdir, f"X_N{nc_elem}p{P}_0.dat")
+    if os.path.isfile(xf_path):
+        xf = np.fromfile(xf_path)
+        return np.diff(xf[nGH:len(xf) - nGH])
+    #Unit-box AMR stitched outputs: N in the filename is the element count.
+    ncells = nc_elem * n
+    return np.full(ncells, 1.0 / ncells)
 
 
 def total_mass(outdir, fname, cfg):
     cfg2 = dict(cfg, field=fname)
     rho = load_rho_cells(outdir, cfg2)
-    w = cell_widths(outdir)
+    w = cell_widths(outdir, cfg2)
     V = np.ones(rho.shape)
     V *= w[None, None, :]
     if cfg["ndim"] >= 2:
@@ -257,11 +325,95 @@ def check_analytic(outdir, cfg):
     return err < limit, f"L1(rho) vs analytic = {err:.3e} (limit {limit:.1e})"
 
 
+def output_index(path):
+    m = re.search(r"_(\d+)_\d+\.dat$", os.path.basename(path))
+    return int(m.group(1)) if m else -1
+
+
+def sorted_outputs(outdir):
+    """W_cv dumps in output order. Under AMR the element count in the file
+    name changes with the mesh, so lexicographic order is not time order."""
+    return sorted(glob.glob(os.path.join(outdir, "W_cv_N*p*_0.dat")),
+                  key=output_index)
+
+
+def field_dumps(outdir):
+    """Every cell-average field dump, whichever variable a config writes."""
+    return sorted(glob.glob(os.path.join(outdir, "*_cv_N*p*_*.dat")),
+                  key=lambda f: (os.path.basename(f).split("_cv_")[0],
+                                 output_index(f)))
+
+
+def check_finite(outdir, cfg):
+    """No NaN/Inf anywhere in any dump. Runs unconditionally for every config:
+    NaN silently satisfies the comparisons the other checks are built on
+    (max() keeps the finite operand, `nan < tol` is False), so a run that
+    produces NaN must be rejected before any tolerance is consulted."""
+    outs = field_dumps(outdir)
+    if not outs:
+        return False, "no field output files found"
+    bad = []
+    for f in outs:
+        A = np.fromfile(f)
+        n_bad = int((~np.isfinite(A)).sum())
+        if n_bad:
+            bad.append(f"{os.path.basename(f)} {100.0 * n_bad / A.size:.1f}%")
+    if bad:
+        return False, "non-finite output: " + ", ".join(bad)
+    return True, f"{len(outs)} outputs finite"
+
+
 def check_mass(outdir, cfg, limit):
-    outs = sorted(glob.glob(os.path.join(outdir, f"W_cv_N{N}p{P}_*_0.dat")))
-    m = [total_mass(outdir, os.path.basename(f), cfg) for f in outs]
+    """Mass drift from the solver's own block-by-block integral (mass.txt).
+
+    Integrating the dumped field instead is only valid on a single-level mesh:
+    the mixed-level dump interpolates coarse blocks up onto the finest grid,
+    and interpolation does not preserve an integral, so it reports drift for a
+    perfectly conservative run.
+    """
+    path = os.path.join(outdir, "mass.txt")
+    if not os.path.exists(path):
+        return False, "no mass.txt written"
+    m = [float(tok[1]) for tok in
+         (line.split() for line in open(path)) if len(tok) == 2]
+    if len(m) < 2:
+        return False, f"mass.txt has {len(m)} entries, need at least 2"
+    if not all(math.isfinite(x) for x in m):
+        return False, f"non-finite mass: {m}"
+    if m[0] == 0.0:
+        return False, "reference mass is zero"
     drift = max(abs(x - m[0]) / abs(m[0]) for x in m)
+    if not math.isfinite(drift):
+        return False, f"non-finite mass drift (masses {m})"
     return drift < limit, f"mass drift = {drift:.3e} (limit {limit:.1e})"
+
+
+def check_mixed_levels(outdir, cfg):
+    """The mesh must really carry a coarse-fine interface at some point in the
+    run. Without this a refinement region that happens to cover the whole
+    domain degenerates to a uniform grid and tests nothing about AMR."""
+    files = sorted(glob.glob(os.path.join(outdir, "amr_blocks_*.txt")),
+                   key=lambda f: int(re.search(r"_(\d+)\.txt$", f).group(1)))
+    if not files:
+        return False, "no amr_blocks_*.txt written"
+    seen = []
+    for path in files:
+        levels = []
+        with open(path) as fh:
+            header = None
+            for line in fh:
+                if line.startswith("#") or not line.strip():
+                    continue
+                tok = line.split()
+                if header is None:
+                    header = tok
+                    continue
+                levels.append(int(tok[1]))
+        seen.append(sorted(set(levels)))
+        if len(seen[-1]) > 1:
+            return True, (f"{os.path.basename(path)}: levels {seen[-1]} over "
+                          f"{len(levels)} blocks (coarse-fine present)")
+    return False, f"mesh never mixed-level (levels per output: {seen})"
 
 
 def check_golden(outdir, cfg, regen, active_only=False):
@@ -278,7 +430,8 @@ def check_golden(outdir, cfg, regen, active_only=False):
     if a.shape != b.shape:
         return False, f"golden size mismatch {a.size} vs {b.size}"
     if active_only:
-        shp = shape(cfg["ndim"])
+        nc = n_from_field(cfg["field"])
+        shp = shape_for(nc, cfg["ndim"])
         sl = tuple(slice(NGH, -NGH) if s > 1 else slice(None) for s in shp[2:5])
         s = (slice(None),) * 2 + sl
         a, b = a.reshape(shp)[s], b.reshape(shp)[s]
@@ -313,11 +466,17 @@ def main():
             print(f"[FAIL] {name}: {e}")
             failures += 1
             continue
+        ok, msg = check_finite(outdir, cfg)
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
+        failures += 0 if ok else 1
+
         for chk in cfg["checks"]:
             if chk == "analytic":
                 ok, msg = check_analytic(outdir, cfg)
             elif chk == "mass_strict":
                 ok, msg = check_mass(outdir, cfg, 1e-12)
+            elif chk == "mixed_levels":
+                ok, msg = check_mixed_levels(outdir, cfg)
             elif chk == "golden":
                 ok, msg = check_golden(outdir, cfg, args.regen_goldens)
             elif chk == "golden_active":

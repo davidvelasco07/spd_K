@@ -1,0 +1,43 @@
+---
+description: Kokkos memory-space policy for spd_K — never use CudaUVMSpace
+alwaysApply: true
+---
+
+# Kokkos memory spaces (spd_K)
+
+**Never use `Kokkos::CudaUVMSpace`.** Experiments on Apollo (A100, CUDA build) showed UVM is a show-stopper: MHD init can SIGFPE inside Kokkos `ViewCopy` during setup-view resize (especially quasi-2D runs with inactive dimensions, `nx3=1`).
+
+## Required layout
+
+- **Bulk evolution arrays**: `Kokkos::CudaSpace` (`MemSpace` in `src/define.hpp`).
+- **Setup arrays** (transform matrices, quadrature nodes, `dimension` face/center coords): also `CudaSpace` via `SetupSpace` (= `MemSpace`). **Not UVM.**
+
+## Host access pattern
+
+Do not write setup views from host code directly on CUDA builds. Use the existing **dual-view** pattern:
+
+- Device view: `Matrix`, `Vector` (SetupSpace)
+- Host mirror: `Matrix_h`, `Vector_h` (`create_mirror_view`)
+- Fill on host mirror, then `Kokkos::deep_copy(dev, host)` once at startup
+
+Same idea as `SD_Solution::Vector` / `Vector_h` and `FV_Solution::copy()`.
+
+For setup init, prefer direct construction (`Matrix("name", n, m)`) over `Kokkos::resize` on empty views when possible.
+
+## Do not
+
+```cpp
+#define SetupSpace Kokkos::CudaUVMSpace  // BAD — FPE on Apollo MHD
+sd_faces(j, i) = ...;                    // BAD on CUDA — use mirror first
+```
+
+## Do
+
+```cpp
+#define SetupSpace MemSpace              // CudaSpace on GPU builds
+Matrix_h h = Kokkos::create_mirror_view(sd_faces);
+h(j, i) = ...;
+Kokkos::deep_copy(sd_faces, h);
+```
+
+Also avoid `CudaUVMSpace` in benchmarks/tests; use `CudaSpace` + mirrors for consistency.

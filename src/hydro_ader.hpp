@@ -95,7 +95,13 @@ struct Hydro_ader{
         beta = _beta;
         Kokkos::resize(xx,p+1);
         Kokkos::resize(wx,p+1);
-        gauss_legendre(0.0, 1.0, p+1, xx.data(), wx.data());
+        {
+            Vector_h xx_h = setup_mirror(xx);
+            Vector_h wx_h = setup_mirror(wx);
+            gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
+            setup_push(xx, xx_h);
+            setup_push(wx, wx_h);
+        }
 
         //ADER carries p+1 temporal quadrature slices at the same GL nodes as
         //the spatial quadrature; an SSP-RK stage is a single slice advanced
@@ -125,18 +131,40 @@ struct Hydro_ader{
         Kokkos::resize(cv_to_sp,p+1,p+1);
         Kokkos::resize(fp_to_cv,p+1,p+2);
 
-        lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
-        lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
-        lagrange_prime_matrix(dfp_to_sp, x_fp, x_sp, p+2, p+1);
-        integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
-        integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
-        inverse(sp_to_cv, cv_to_sp, p+1);
-        //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
-        if(cfg.integrator==_integrator_ader_){
-            Kokkos::resize(ader,p+1,p+1);
-            Kokkos::resize(invader,p+1,p+1);
-            ader_matrix(ader, xt, wt, p+1);
-            inverse(ader, invader, p+1);
+        {
+            Matrix_h sp_to_fp_h = setup_mirror(sp_to_fp);
+            Matrix_h fp_to_sp_h = setup_mirror(fp_to_sp);
+            Matrix_h dfp_to_sp_h = setup_mirror(dfp_to_sp);
+            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
+            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
+            Matrix_h fp_to_cv_h = setup_mirror(fp_to_cv);
+            lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
+            lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
+            integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
+            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
+            setup_push(sp_to_fp, sp_to_fp_h);
+            setup_push(fp_to_sp, fp_to_sp_h);
+            setup_push(dfp_to_sp, dfp_to_sp_h);
+            setup_push(sp_to_cv, sp_to_cv_h);
+            setup_push(cv_to_sp, cv_to_sp_h);
+            setup_push(fp_to_cv, fp_to_cv_h);
+            //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
+            if(cfg.integrator==_integrator_ader_){
+                Kokkos::resize(ader,p+1,p+1);
+                Kokkos::resize(invader,p+1,p+1);
+                Matrix_h ader_h = setup_mirror(ader);
+                Matrix_h invader_h = setup_mirror(invader);
+                Vector_h xt_h = setup_mirror(xt);
+                Vector_h wt_h = setup_mirror(wt);
+                setup_pull(xt, xt_h);
+                setup_pull(wt, wt_h);
+                ader_matrix(ader_h, xt_h, wt_h, p+1);
+                inverse(ader_h, invader_h, p+1);
+                setup_push(ader, ader_h);
+                setup_push(invader, invader_h);
+            }
         }
 
         W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -208,7 +236,7 @@ struct Hydro_ader{
         if(standalone){
             if(Master)
                 cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
-            Write_outputs();
+            Write_outputs(X_dim,Y_dim,Z_dim);
         }
     }
 
@@ -234,11 +262,22 @@ struct Hydro_ader{
             n_step++;
             dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
 
+            //A diverged state gives a NaN dt, which makes t NaN and turns
+            //t<t_end false, so the run would exit reporting success while
+            //dumping garbage. Fail loudly instead.
+            if(!std::isfinite(dt)){
+                if(Master)
+                    cout<<endl<<"ERROR: non-finite dt at step "<<n_step
+                        <<" (t = "<<t<<"), solution has diverged"<<endl;
+                Kokkos::finalize();
+                exit(1);
+            }
+
             //Outputs
             if(Master) cout<<".";
             if(t>=t_output){
                 t_output=t+dt_output;
-                Write_outputs();
+                Write_outputs(X_dim,Y_dim,Z_dim);
             }
             if(t+dt>t_output){
                 dt=t_output-t;
@@ -396,9 +435,15 @@ struct Hydro_ader{
             dfp_to_sp,wt,dx,dy,dz,dt);
     }
 
-    void Write_outputs(){
+    void Write_outputs(dimension X_dim, dimension Y_dim, dimension Z_dim){
         if(Master)
             cout<<endl<<"OUTPUT "<<n_output<<endl;
+        if(Master){
+            std::ofstream f(output_folder()+"mass.txt",
+                            n_output==0 ? std::ios::trunc : std::ios::app);
+            f<<std::setprecision(17)<<t<<" "
+             <<fv_mass(W_cv,X_dim,Y_dim,Z_dim)<<endl;
+        }
         if(cfg.fallback)
             Write(troubles,n_output);
         Write(F_ader_fp_x,n_output);
@@ -460,6 +505,7 @@ struct Hydro_ader{
             }, mass);
         return mass;
     }
+    #endif
 
     double fv_mass(SD_Solution U, dimension X_dim, dimension Y_dim, dimension Z_dim){
         //Total mass of the cv-average density over active cells
@@ -481,7 +527,6 @@ struct Hydro_ader{
             }, mass);
         return mass;
     }
-    #endif
 
     //FV update phases: the per-node body is split at every ghost exchange
     //(U_old/U_new, troubles, theta) so a multi-block driver can run each
@@ -504,8 +549,12 @@ struct Hydro_ader{
 
     //Requires ghosted U_old/U_new
     void FV_detect(dimension X_dim, dimension Y_dim, dimension Z_dim){
-        compute_primitives(U_new,W_new);
+        //W_old feeds the MUSCL reconstruction, so it is needed either way.
         compute_primitives(U_old,W_old);
+        //Pure MUSCL blends in the fallback everywhere, so the flags are never
+        //read and the whole detection stencil can be skipped.
+        if(cfg.muscl_only) return;
+        compute_primitives(U_new,W_new);
         //Following the reference implementation, only density and
         //pressure enter the NAD/SED checks (uniform or zero fields,
         //like transverse velocities, have no meaningful relative band)
@@ -518,6 +567,11 @@ struct Hydro_ader{
     //(0.75/0.5/0.375 weights + 0.25 ring), or use the raw flags when
     //blending is disabled. Requires ghosted trouble flags.
     void FV_theta(){
+        //Fills the ghosts too, so the usual theta exchange is a no-op here.
+        if(cfg.muscl_only){
+            Kokkos::deep_copy(theta.Vector, 1.0);
+            return;
+        }
         if(cfg.blending){
             apply_blending(troubles,theta_tmp);
             blending_ring(theta_tmp,theta);
@@ -529,17 +583,27 @@ struct Hydro_ader{
     //Blend MUSCL fluxes into the troubled faces and redo the update.
     //Requires ghosted theta (identical blended fluxes on both sides of
     //every face, so the correction stays exactly conservative).
-    void FV_apply(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+    void FV_blend(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
         fallback_fluxes(W_old,theta,
             X_dim.fv_centers,X_dim.fv_faces,F_x,
             Y_dim.fv_centers,Y_dim.fv_faces,F_y,
             Z_dim.fv_centers,Z_dim.fv_faces,F_z,
             ader,wt,dt);
+    }
+
+    void FV_commit(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
         fv_update_solution(U_new,U_old,U_cv,
             F_x,X_dim.fv_faces,
             F_y,Y_dim.fv_faces,
             F_z,Z_dim.fv_faces,
             wt,ader,dt,1);
+    }
+
+    //Split so a multi-block driver can reconcile the blended fluxes across
+    //coarse-fine faces before they are committed to the solution.
+    void FV_apply(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        FV_blend(ader,X_dim,Y_dim,Z_dim);
+        FV_commit(ader,X_dim,Y_dim,Z_dim);
     }
 
     void FV_end(){
@@ -562,12 +626,12 @@ struct Hydro_ader{
             //Ghost flags must be periodic images so that the blending
             //stencils near the domain boundary see the same data as their
             //periodic partners
-            FV_Boundaries(comm,troubles);
+            if(!cfg.muscl_only) FV_Boundaries(comm,troubles);
             FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical
             //blended fluxes (exact conservation)
-            FV_Boundaries(comm,theta);
+            if(!cfg.muscl_only) FV_Boundaries(comm,theta);
             #ifdef DEBUG_MASS
             if(t==0 && ader==0) Write(F_x,899);
             #endif

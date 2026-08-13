@@ -2,6 +2,8 @@
 #include <mpi.h>
 #include <iostream>
 #include <fstream>
+#include <cmath>
+#include <iomanip>
 #include <string.h>
 #include <list>
 
@@ -17,7 +19,9 @@ using namespace H5;
 #include "muscl.hpp"
 #include "prototypes.hpp"
 #include "induction_ader.hpp"
+#include "forest.hpp"
 #include "hydro_ader.hpp"
+#include "amr_criteria.hpp"
 #include "hydro_mesh.hpp"
 
 using namespace std;

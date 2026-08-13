@@ -29,11 +29,24 @@ struct RunConfig {
     bool nad_moore = true;               //DMP bounds over the Moore (box) neighborhood
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
+    bool muscl_only = false;             //take every face from the MUSCL fallback (theta=1)
     int bc[3] = {0, 0, 0};               //boundary type per direction
     int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
     int rk_order = 3;                    //SSP-RK order (1, 2 or 3)
+    int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
+    int amr_max_level = 0;               //maximum refinement level
+    int amr_criterion = 0;               //0=Lohner, 1=pressure gradient, 2=trouble fraction
 };
 extern RunConfig cfg;
+
+//AMR prolongation / overlap-restriction matrices (built once at startup)
+extern Matrix amr_P;
+extern Matrix amr_R;
+extern Matrix amr_RS_sp[2];
+extern Matrix amr_RS_cv[2];
+//Conservative face-flux restriction (n x 2n), exact on the face integral
+extern Matrix amr_RF;
+void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 void set_runtime_dimensionality(bool ax, bool ay, bool az);
 

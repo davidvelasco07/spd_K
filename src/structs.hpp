@@ -1,3 +1,6 @@
+#ifndef STRUCTS_HPP_
+#define STRUCTS_HPP_
+
 using namespace std;
 
 template <typename T>
@@ -37,6 +40,7 @@ class dimension{
         Matrix sd_centers;
         Vector fv_faces;
         Vector fv_centers;
+        dimension() = default;
         dimension(int _dim, int N_elements_global, int N_elements, int degree, int start, double box_lenght, double *x_fp, bool active){
             dim = _dim,
             N_global = N_elements_global;
@@ -54,24 +58,44 @@ class dimension{
                 fv_nfaces = fv_ncells+1;
                 idL = n_sp-nGH;
                 idR = fv_ncells+idL;
+            }else{
+                n_sp = 1;
+                n_fp = 2;
             }
-            Kokkos::resize(sd_faces, N_total,n_fp);
-            Kokkos::resize(sd_centers, N_total,n_sp);
-            Kokkos::resize(fv_faces  , fv_nfaces);
-            Kokkos::resize(fv_centers, fv_ncells);
+            int sd_nrows = N_total, sd_ncols = n_fp, sd_spcols = n_sp;
+            int fv_nf = fv_nfaces, fv_nc = fv_ncells;
+            if(!active){
+                if(sd_nrows < 2) sd_nrows = 2;
+                if(sd_ncols < 2) sd_ncols = 2;
+                if(sd_spcols < 2) sd_spcols = 2;
+                if(fv_nf < 2) fv_nf = 2;
+                if(fv_nc < 2) fv_nc = 2;
+            }
+            sd_faces = Matrix("sd_faces", sd_nrows, sd_ncols);
+            sd_centers = Matrix("sd_centers", sd_nrows, sd_spcols);
+            fv_faces = Vector("fv_faces", fv_nf);
+            fv_centers = Vector("fv_centers", fv_nc);
+            Matrix_h sd_faces_h = setup_mirror(sd_faces);
+            Matrix_h sd_centers_h = setup_mirror(sd_centers);
+            Vector_h fv_faces_h = setup_mirror(fv_faces);
+            Vector_h fv_centers_h = setup_mirror(fv_centers);
 
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){
-                    sd_faces(j,i)= (start+j-NGH + x_fp[i])*h;
+                    sd_faces_h(j,i)= (start+j-NGH + x_fp[i])*h;
                     if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
-                        fv_faces(i-idL+j*n_sp) = sd_faces(j,i);
+                        fv_faces_h(i-idL+j*n_sp) = sd_faces_h(j,i);
                 }
                 for(int i=0;i<n_sp;i++){
-                    sd_centers(j,i)= 0.5*(sd_faces(j,i+1)+sd_faces(j,i));
+                    sd_centers_h(j,i)= 0.5*(sd_faces_h(j,i+1)+sd_faces_h(j,i));
                     if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
-                        fv_centers(i-idL+j*n_sp) = sd_centers(j,i);
+                        fv_centers_h(i-idL+j*n_sp) = sd_centers_h(j,i);
                 }
             }
+            setup_push(sd_faces, sd_faces_h);
+            setup_push(sd_centers, sd_centers_h);
+            setup_push(fv_faces, fv_faces_h);
+            setup_push(fv_centers, fv_centers_h);
         }	
 };
 
@@ -134,8 +158,12 @@ class SD_Solution{
         #endif
     }
 
+    //Slowest-to-fastest (k,j,i / kk,jj,ii) argument order, matching the free
+    //value() in boundary.cpp and the sd_for_cells lambda signature. The body
+    //places k in the z slot, so the transposed (i,j,k) order silently indexes
+    //z with an x index -- out of bounds whenever z is inactive.
     KOKKOS_INLINE_FUNCTION
-    double value(int t_id, int var, int i, int j, int k, int ii, int jj, int kk, int l, int ll, int dim){
+    double value(int t_id, int var, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim) const{
         if(dim==0)
             return Vector(t_id,var,k,j,l,kk,jj,ll);
         else if(dim==1)
@@ -293,3 +321,5 @@ struct Boundaries {
     }
     #endif
 };
+
+#endif

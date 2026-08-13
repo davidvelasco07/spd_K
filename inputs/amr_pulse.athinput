@@ -1,0 +1,39 @@
+# Dynamic AMR Gaussian pulse (2D hydro, RK3)
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 16
+nx2  = 16
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+
+<meshblock>
+nx1 = 4
+nx2 = 4
+nx3 = 1
+
+<amr>
+adapt_interval = 3
+max_level = 1
+criterion = pressure
+
+<time>
+tlim = 0.1
+cfl  = 0.4
+integrator = rk3
+
+<output>
+dt = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = spherical_blast
+
+<fallback>
+blending = true

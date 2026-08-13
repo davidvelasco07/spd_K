@@ -142,6 +142,14 @@ std::string ParameterInput::GetOrAddString(const std::string &block, const std::
     return GetString(block, name);
 }
 
+std::vector<std::string> ParameterInput::BlockNames() const {
+    std::vector<std::string> names;
+    names.reserve(params_.size());
+    for(const auto &b : params_)
+        names.push_back(b.first);
+    return names;
+}
+
 void ParameterInput::Dump(std::ostream &os) const {
     for (const auto &b : params_) {
         os << "<" << b.first << ">\n";

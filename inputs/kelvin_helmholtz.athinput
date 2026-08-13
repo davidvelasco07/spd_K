@@ -1,0 +1,50 @@
+# Smooth-interface Kelvin-Helmholtz instability (2D hydro).
+# Athena++ (Stone et al. 2020) section 3.4.3 / figure 21.
+#
+# Two shear interfaces at y = 0.25 and y = 0.75 (paper's y = -+0.25 on its
+# [-0.5,0.5] box), density contrast 2, velocity jump 1, perturbation
+# wavelength 0.5. Reference time for figure 21 is t = 1.2.
+#
+# Set the scheme on the command line:
+#   job/scheme=muscl              plain MUSCL-Hancock on the flux-point subgrid
+#   job/scheme=sd job/fallback=true   SD(p) with MUSCL fallback ("SDFB")
+#
+# Degrees of freedom are (p+1)^2 per element, so mesh/nx1 = D/(p+1) elements
+# gives a DxD DoF grid for any p.
+
+<job>
+system   = hydro
+fallback = true
+scheme   = sd
+
+<mesh>
+p    = 3
+nx1  = 64
+nx2  = 64
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x1_bc = periodic
+x2_bc = periodic
+
+<meshblock>
+nx1 = 64
+nx2 = 64
+nx3 = 1
+
+<time>
+tlim = 1.2
+cfl  = 0.4
+integrator = rk3
+
+<output>
+dt = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = kelvin_helmholtz
+
+<fallback>
+blending = true

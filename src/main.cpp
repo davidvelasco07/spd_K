@@ -1,6 +1,8 @@
 #include "spd_k.hpp"
 #include "parameter_input.hpp"
+#include "forest.hpp"
 #include <fstream>
+#include <regex>
 
 int bc_id(const string &name){
     if(name == "periodic") return _periodic_;
@@ -13,6 +15,7 @@ int problem_id(const string &name){
     if(name == "sine_wave")       return _ic_sine_wave_;
     if(name == "sedov")           return _ic_sedov_;
     if(name == "spherical_blast") return _ic_spherical_blast_;
+    if(name == "kelvin_helmholtz")return _ic_kelvin_helmholtz_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
 }
@@ -103,10 +106,29 @@ int main(int argc, char** argv){
         cfg.nad_moore = pin.GetOrAddString("fallback","NAD_neighbors","2nd")=="2nd";
         cfg.sed       = pin.GetOrAddBoolean("fallback","SED",true);
         cfg.blending  = pin.GetOrAddBoolean("fallback","blending",true);
+        //job/scheme = muscl pins the fallback blend to 1 on every face, so the
+        //run is plain MUSCL-Hancock on the flux-point subgrid instead of SD
+        //with a fallback. Useful as a low-order reference at matched DoF.
+        string scheme = pin.GetOrAddString("job","scheme","sd");
+        if(scheme=="muscl"){
+            cfg.muscl_only = true;
+            cfg.fallback = true;
+        } else if(scheme!="sd"){
+            cout<<"ERROR: unknown scheme '"<<scheme<<"' (expected sd or muscl)"<<endl;
+            exit(1);
+        }
         cfg.problem  = problem_id(pin.GetOrAddString("problem","problem","sine_wave"));
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
+
+        cfg.adapt_interval = pin.GetOrAddInteger("amr","adapt_interval",0);
+        cfg.amr_max_level  = pin.GetOrAddInteger("amr","max_level",0);
+        string crit = pin.GetOrAddString("amr","criterion","lohner");
+        if(crit=="pressure") cfg.amr_criterion = 1;
+        else if(crit=="trouble") cfg.amr_criterion = 2;
+        else if(crit=="shear") cfg.amr_criterion = 3;
+        else cfg.amr_criterion = 0;
 
         double tlim      = pin.GetOrAddReal("time","tlim",0.1);
         double dt_output = pin.GetOrAddReal("output","dt",tlim);
@@ -125,19 +147,41 @@ int main(int argc, char** argv){
         int NBz = pin.GetOrAddInteger("meshblock","nx3",Nz);
         if(!ay) NBy = 1;
         if(!az) NBz = 1;
+        int nbx = Nx/NBx, nby = Ny/NBy, nbz = Nz/NBz;
         bool multiblock = (NBx!=Nx)||(NBy!=Ny)||(NBz!=Nz);
-        if(multiblock){
+        bool use_mesh = multiblock || cfg.amr_max_level>0;
+
+        std::vector<RefinementRegion> refinements;
+        std::regex ref_re("^refinement\\d+$");
+        for(const string& bname : pin.BlockNames()){
+            if(!std::regex_match(bname, ref_re)) continue;
+            RefinementRegion r;
+            r.level = pin.GetOrAddInteger(bname,"level",1);
+            r.xmin = pin.GetOrAddReal(bname,"x1min",0.0);
+            r.xmax = pin.GetOrAddReal(bname,"x1max",1.0);
+            r.ymin = pin.GetOrAddReal(bname,"x2min",0.0);
+            r.ymax = pin.GetOrAddReal(bname,"x2max",1.0);
+            r.zmin = pin.GetOrAddReal(bname,"x3min",0.0);
+            r.zmax = pin.GetOrAddReal(bname,"x3max",1.0);
+            refinements.push_back(r);
+        }
+
+        if(use_mesh){
             if(NBx<1 || Nx%NBx || NBy<1 || Ny%NBy || NBz<1 || Nz%NBz){
                 if(Master) cout<<"ERROR: meshblock size ("<<NBx<<","<<NBy<<","<<NBz
                                <<") must divide the rank domain ("<<Nx<<","<<Ny<<","<<Nz<<")"<<endl;
                 exit(1);
             }
             if(comm.nx*comm.ny*comm.nz>1){
-                if(Master) cout<<"ERROR: meshblocks are not yet supported with MPI"<<endl;
+                if(Master) cout<<"ERROR: meshblocks/AMR are not yet supported with MPI"<<endl;
                 exit(1);
             }
             if(system_name!="hydro"){
-                if(Master) cout<<"ERROR: meshblocks are only supported for the hydro system"<<endl;
+                if(Master) cout<<"ERROR: meshblocks/AMR are only supported for the hydro system"<<endl;
+                exit(1);
+            }
+            if(cfg.amr_max_level>0 && cfg.integrator==_integrator_ader_){
+                if(Master) cout<<"ERROR: ADER is not supported with mixed-level AMR (use rk2/rk3)"<<endl;
                 exit(1);
             }
         }
@@ -151,6 +195,15 @@ int main(int argc, char** argv){
             //Echo the effective parameters for provenance
             std::ofstream dump(output_folder()+"parameters.txt");
             pin.Dump(dump);
+            //Binary dumps inherit the Kokkos view layout, which differs
+            //between CUDA (LayoutLeft) and host (LayoutRight) builds, so
+            //record it: otherwise post-processing has to guess and silently
+            //scrambles the field when it guesses wrong.
+            dump<<"<build>"<<endl;
+            dump<<"layout = "
+                <<(std::is_same<Layout,Kokkos::LayoutLeft>::value
+                   ? "LayoutLeft" : "LayoutRight")<<endl;
+            dump<<endl;
         }
 
         double *x = malloc_host<double>(p);
@@ -162,6 +215,8 @@ int main(int argc, char** argv){
 
         flux_points(x_fp,x,p);
         solution_points(x_sp,p);
+        if(use_mesh)
+            init_amr_transfer_matrices(x_sp, x_fp, p);
 
         dimension X_dim(_x_,NX,Nx,ax ? p:0,comm.x*Nx,boxlen_x,x_fp,ax);
         dimension Y_dim(_y_,NY,Ny,ay ? p:0,comm.y*Ny,boxlen_y,x_fp,ay);
@@ -177,9 +232,25 @@ int main(int argc, char** argv){
         else if(system_name == "hydro"){
             double nu   = pin.GetOrAddReal("hydro","nu",0.00001);
             double beta = pin.GetOrAddReal("hydro","beta",-2./3*pin.GetReal("hydro","nu"));
-            if(multiblock){
-                Hydro_mesh mesh(comm,p,X_dim,Y_dim,Z_dim,NBx,NBy,NBz,x,w,x_sp,x_fp,nu,beta);
-                mesh.time_evolution(comm,tlim,dt_output);
+            if(use_mesh){
+                double lim[3][2] = {
+                    {0.0, boxlen_x},
+                    {0.0, boxlen_y},
+                    {0.0, boxlen_z}
+                };
+                int bc3[3] = {cfg.bc[_x_], cfg.bc[_y_], cfg.bc[_z_]};
+                BlockForest forest = BlockForest::uniform_grid(
+                    cfg.ndim, ax, ay, az, NBx, NBy, NBz, nbx, nby, nbz, lim, bc3);
+                if(!refinements.empty()){
+                    for(auto& r : refinements)
+                        r.level = min(r.level, cfg.amr_max_level);
+                    forest.refine_to_levels(refinements);
+                    forest.enforce_2to1_balance();
+                }
+                Hydro_mesh mesh(std::move(forest), comm, p, X_dim, Y_dim, Z_dim,
+                                NBx, NBy, NBz, x, w, x_sp, x_fp, nu, beta);
+                mesh.time_evolution(comm, tlim, dt_output, p, x, w, x_sp, x_fp, nu, beta,
+                                    X_dim, Y_dim, Z_dim);
             }
             else{
                 Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
@@ -192,6 +263,12 @@ int main(int argc, char** argv){
         }
         Kokkos::fence();
         cout<<"time taken: "<<timer.seconds()<<endl;
+        //Release AMR setup matrices before Kokkos::finalize (globals outlive main)
+        amr_P = Matrix();
+        amr_R = Matrix();
+        amr_RS_sp[0] = amr_RS_sp[1] = Matrix();
+        amr_RS_cv[0] = amr_RS_cv[1] = Matrix();
+        amr_RF = Matrix();
     }
     Kokkos::finalize();
     #ifdef MPI
