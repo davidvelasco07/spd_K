@@ -304,6 +304,37 @@ CONFIGS = {
         "golden_name": "mhd_loop_2d",
         "golden_rtol": 1e-6,
     },
+    "mhd_field_loop_smr_2d": {
+        # Statically refined patch; field loop crosses the coarse-fine boundary.
+        # Pure SD CT + EMF correction (short tlim: longer advection still drifts).
+        "input": "inputs/field_loop.athinput",
+        "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.02", "output/dt=0.01",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "mhd_orszag_tang_smr_2d": {
+        # Short OT with static refinement (no fallback): mass + divb + mixed levels
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
 }
 
 

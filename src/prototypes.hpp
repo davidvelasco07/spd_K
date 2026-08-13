@@ -34,6 +34,17 @@ extern void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
                                      SD_Solution& coarse_face, Matrix R, int dim);
 extern void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
                                     Matrix P, int dim, int sub);
+//Face-staggered B (CT): restrict one normal-component field from a fine child
+//onto the covered coarse subregion (transverse amr_RF, inject along face normal).
+extern void restrict_block_face_B(SD_Solution fine, SD_Solution coarse, Matrix R,
+                                  int face_dim, int cx, int cy, int cz);
+//Prolongate face B from coarse parent to fine child. Shared faces: transverse
+//amr_P. Interior faces (2D): Toth–Roe on face averages so discrete divB=0.
+//3D mixed-level errors out (Stage 4 is 2D-first).
+extern void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
+                                    SD_Solution BxF, SD_Solution ByF, SD_Solution BzF,
+                                    Matrix P, Matrix sp_to_cv, Matrix cv_to_sp,
+                                    int cx, int cy, int cz);
 extern void gather_block(SD_Solution, SD_Solution, int, int, int);
 extern void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 

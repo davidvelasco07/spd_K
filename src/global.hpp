@@ -83,6 +83,10 @@ extern Matrix amr_RS_sp[2];
 extern Matrix amr_RS_cv[2];
 //Conservative face-flux restriction (n x 2n), exact on the face integral
 extern Matrix amr_RF;
+//Same operators on the flux-point lattice (edge EMF / face-normal B along
+//the staggered dim). Built from x_fp; size (p+2) instead of (p+1).
+extern Matrix amr_P_fp;
+extern Matrix amr_RF_fp;
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 void set_runtime_dimensionality(bool ax, bool ay, bool az);

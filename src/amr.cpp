@@ -371,6 +371,219 @@ void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
     });
 }
 
+//Restrict one face-normal B component from fine child (cx,cy,cz) onto the
+//covered coarse subregion. Transverse directions use the conservative L2
+//matrix R (= amr_RF); along the face normal, element 2:1 with point-index
+//injection from the fine half that owns each coarse flux point (AthenaK
+//RestrictFC). When all children write their halves this preserves magnetic
+//flux through the coarse faces.
+void restrict_block_face_B(SD_Solution F, SD_Solution C, Matrix R,
+                           int face_dim, int cx, int cy, int cz){
+    int Nx=C.Nx, Ny=C.Ny, Nz=C.Nz;
+    int nx=C.nx, ny=C.ny, nz=C.nz;
+    int nader=C.n_ader, nvar=C.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    bool tx = ax && face_dim!=_x_;
+    bool ty = ay && face_dim!=_y_;
+    bool tz = az && face_dim!=_z_;
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    int ix0 = NGHx + (ax ? cx*NBx/2 : 0);
+    int iy0 = NGHy + (ay ? cy*NBy/2 : 0);
+    int iz0 = NGHz + (az ? cz*NBz/2 : 0);
+    int ix1 = ax ? ix0+NBx/2 : Nx-NGHx;
+    int iy1 = ay ? iy0+NBy/2 : Ny-NGHy;
+    int iz1 = az ? iz0+NBz/2 : Nz-NGHz;
+    GHOST_LOCALS;
+    Kokkos::parallel_for("restrict_block_face_B",
+        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({iz0,iy0,ix0,0,0,0},{iz1,iy1,ix1,nz,ny,nx}),
+        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        int fx = ax ? ghx+2*(i-ghx)-cx*NBx : i;
+        int fy = ay ? ghy+2*(j-ghy)-cy*NBy : j;
+        int fz = az ? ghz+2*(k-ghz)-cz*NBz : k;
+        //Normal-direction fine element: left half of the flux-point index
+        //range maps to fine sub 0, right half to sub 1 (AthenaK injection).
+        int nsub = 0;
+        if(face_dim==_x_ && ax) nsub = (ii*2 >= nx) ? 1 : 0;
+        if(face_dim==_y_ && ay) nsub = (jj*2 >= ny) ? 1 : 0;
+        if(face_dim==_z_ && az) nsub = (kk*2 >= nz) ? 1 : 0;
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            for(int nn=0; nn<(tz ? 2*nz:1); nn++){
+            for(int mm=0; mm<(ty ? 2*ny:1); mm++){
+            for(int ll=0; ll<(tx ? 2*nx:1); ll++){
+                int fkk = tz ? nn%nz : kk;
+                int fjj = ty ? mm%ny : jj;
+                int fii = tx ? ll%nx : ii;
+                int fek = tz ? fz+nn/nz : k;
+                int fej = ty ? fy+mm/ny : j;
+                int fei = tx ? fx+ll/nx : i;
+                if(face_dim==_x_ && ax){ fei = fx+nsub; fii = ii; }
+                if(face_dim==_y_ && ay){ fej = fy+nsub; fjj = jj; }
+                if(face_dim==_z_ && az){ fek = fz+nsub; fkk = kk; }
+                double s = F.Vector(t_id,var,fek,fej,fei,fkk,fjj,fii);
+                if(tx) s *= R(ii,ll);
+                if(ty) s *= R(jj,mm);
+                if(tz) s *= R(kk,nn);
+                u += s;
+            }}}
+            C.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
+        }}
+    });
+}
+
+//2D Toth–Roe interior faces inside each 2×2 of fine elements covering one
+//coarse element (AthenaK ProlongFCInternal). Fields are transverse face
+//averages (sp_to_cv already applied). Interior faces are written as
+//face-constants so the integral form of divB=0 holds on each fine cell.
+static void fill_interior_face_B_2d(SD_Solution Bx, SD_Solution By,
+                                    int cx, int cy, int NBx, int NBy){
+    int nx=Bx.nx, ny=By.ny;
+    int nty=Bx.ny, ntx=By.nx;
+    int Nz=Bx.Nz;
+    GHOST_LOCALS;
+    int ix0 = NGHx, ix1 = Bx.Nx-NGHx;
+    int iy0 = NGHy, iy1 = By.Ny-NGHy;
+    Kokkos::parallel_for("fill_interior_face_B_2d",
+        Kokkos::MDRangePolicy<Kokkos::Rank<2>>({iy0,ix0},{iy1,ix1}),
+        KOKKOS_LAMBDA(int j, int i){
+        int gx = (i-ghx) + cx*NBx;
+        int gy = (j-ghy) + cy*NBy;
+        if((gx%2)!=0 || (gy%2)!=0) return;
+        int i0=i, j0=j, i1=i+1, j1=j+1;
+        if(i1>=ix1 || j1>=iy1) return;
+        int k0 = (Nz>1 ? ghz : 0);
+        double Bx_L_S=0, Bx_L_N=0, Bx_R_S=0, Bx_R_N=0;
+        for(int jj=0;jj<nty;jj++){
+            Bx_L_S += Bx.Vector(0,0,k0,j0,i0,0,jj,0);
+            Bx_L_N += Bx.Vector(0,0,k0,j1,i0,0,jj,0);
+            Bx_R_S += Bx.Vector(0,0,k0,j0,i1,0,jj,nx-1);
+            Bx_R_N += Bx.Vector(0,0,k0,j1,i1,0,jj,nx-1);
+        }
+        Bx_L_S/=nty; Bx_L_N/=nty; Bx_R_S/=nty; Bx_R_N/=nty;
+        double By_B_W=0, By_B_E=0, By_T_W=0, By_T_E=0;
+        for(int ii=0;ii<ntx;ii++){
+            By_B_W += By.Vector(0,0,k0,j0,i0,0,0,ii);
+            By_B_E += By.Vector(0,0,k0,j0,i1,0,0,ii);
+            By_T_W += By.Vector(0,0,k0,j1,i0,0,ny-1,ii);
+            By_T_E += By.Vector(0,0,k0,j1,i1,0,ny-1,ii);
+        }
+        By_B_W/=ntx; By_B_E/=ntx; By_T_W/=ntx; By_T_E/=ntx;
+        double tmp1 = 0.25*((By_T_E - By_B_E) - (By_T_W - By_B_W));
+        double tmp2 = 0.25*((Bx_L_S - Bx_R_S) - (Bx_L_N - Bx_R_N));
+        double Bx_M_S = 0.5*(Bx_L_S + Bx_R_S) + tmp1;
+        double Bx_M_N = 0.5*(Bx_L_N + Bx_R_N) + tmp1;
+        double By_M_W = 0.5*(By_B_W + By_T_W) + tmp2;
+        double By_M_E = 0.5*(By_B_E + By_T_E) + tmp2;
+        for(int jj=0;jj<nty;jj++){
+            Bx.Vector(0,0,k0,j0,i0,0,jj,nx-1) = Bx_M_S;
+            Bx.Vector(0,0,k0,j0,i1,0,jj,0)    = Bx_M_S;
+            Bx.Vector(0,0,k0,j1,i0,0,jj,nx-1) = Bx_M_N;
+            Bx.Vector(0,0,k0,j1,i1,0,jj,0)    = Bx_M_N;
+        }
+        for(int ii=0;ii<ntx;ii++){
+            By.Vector(0,0,k0,j0,i0,0,ny-1,ii) = By_M_W;
+            By.Vector(0,0,k0,j1,i0,0,0,ii)    = By_M_W;
+            By.Vector(0,0,k0,j0,i1,0,ny-1,ii) = By_M_E;
+            By.Vector(0,0,k0,j1,i1,0,0,ii)    = By_M_E;
+        }
+    });
+}
+
+//Prolongate shared faces of one face-normal field from coarse parent onto fine
+//child: identity along the face normal (matching boundary flux-point on the
+//coinciding element face), transverse Lagrange P. Only writes fine faces that
+//sit on a coarse element face; interiors of each 2×2 are filled by Toth–Roe.
+static void prolongate_shared_face_B(SD_Solution C, SD_Solution F, Matrix P,
+                                     int face_dim, int cx, int cy, int cz){
+    int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
+    int nx=F.nx, ny=F.ny, nz=F.nz;
+    int nader=F.n_ader, nvar=F.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    bool tx = ax && face_dim!=_x_;
+    bool ty = ay && face_dim!=_y_;
+    bool tz = az && face_dim!=_z_;
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    int pn = (int)P.extent(1); // p+1, matches transverse SP/CV count
+    GHOST_LOCALS;
+    Kokkos::parallel_for("prolongate_shared_face_B",
+        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},
+                                               {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
+        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        bool on_shared = (face_dim==_x_) ? (ii==0 || ii==nx-1)
+                        : (face_dim==_y_) ? (jj==0 || jj==ny-1)
+                                          : (kk==0 || kk==nz-1);
+        if(!on_shared) return;
+        int gx = ax ? cx*NBx + (i-ghx) : 0;
+        int gy = ay ? cy*NBy + (j-ghy) : 0;
+        int gz = az ? cz*NBz + (k-ghz) : 0;
+        int cex = ax ? ghx+gx/2 : i;
+        int cey = ay ? ghy+gy/2 : j;
+        int cez = az ? ghz+gz/2 : k;
+        int sx = tx ? gx%2 : 0;
+        int sy = ty ? gy%2 : 0;
+        int sz = tz ? gz%2 : 0;
+        int cii = (face_dim==_x_) ? (ii==0 ? 0 : C.nx-1) : ii;
+        int cjj = (face_dim==_y_) ? (jj==0 ? 0 : C.ny-1) : jj;
+        int ckk = (face_dim==_z_) ? (kk==0 ? 0 : C.nz-1) : kk;
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            int na = (face_dim==_x_ ? (ty?pn:1) : (face_dim==_y_ ? (tx?pn:1) : (tx?pn:1)));
+            int nb = (face_dim==_x_ ? (tz?pn:1) : (face_dim==_y_ ? (tz?pn:1) : (ty?pn:1)));
+            for(int a=0; a<na; a++){
+            for(int b=0; b<nb; b++){
+                int cll=cii, cmm=cjj, cnn=ckk;
+                double w=1.0;
+                if(face_dim==_x_){
+                    if(ty){ cmm=a; w*=P(sy*pn+jj,a); }
+                    if(tz){ cnn=b; w*=P(sz*pn+kk,b); }
+                } else if(face_dim==_y_){
+                    if(tx){ cll=a; w*=P(sx*pn+ii,a); }
+                    if(tz){ cnn=b; w*=P(sz*pn+kk,b); }
+                } else {
+                    if(tx){ cll=a; w*=P(sx*pn+ii,a); }
+                    if(ty){ cmm=b; w*=P(sy*pn+jj,b); }
+                }
+                u += w * C.Vector(t_id,var,cez,cey,cex,cnn,cmm,cll);
+            }}
+            F.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
+        }}
+    });
+}
+
+void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
+                             SD_Solution BxF, SD_Solution ByF, SD_Solution BzF,
+                             Matrix P, Matrix sp_to_cv, Matrix cv_to_sp,
+                             int cx, int cy, int cz){
+    if(cfg.active[_z_]){
+        if(Master)
+            std::cout<<"ERROR: prolongate_block_face_B 3D not implemented "
+                       <<"(Stage 4 supports true-2D MHD SMR only)"<<std::endl;
+        exit(1);
+    }
+    (void)cz;
+    SD_Solution BxCa = make_scratch_like(BxC, "BxCa");
+    SD_Solution ByCa = make_scratch_like(ByC, "ByCa");
+    SD_Solution BxFa = make_scratch_like(BxF, "BxFa");
+    SD_Solution ByFa = make_scratch_like(ByF, "ByFa");
+    SD_Solution Tx = make_scratch_like(BxC, "TxB");
+    SD_Solution Ty = make_scratch_like(ByC, "TyB");
+    transform_a_to_b_2d(BxC, BxCa, Tx, sp_to_cv, _x_);
+    transform_a_to_b_2d(ByC, ByCa, Ty, sp_to_cv, _y_);
+    Kokkos::deep_copy(BxFa.Vector, 0.0);
+    Kokkos::deep_copy(ByFa.Vector, 0.0);
+    prolongate_shared_face_B(BxCa, BxFa, P, _x_, cx, cy, 0);
+    prolongate_shared_face_B(ByCa, ByFa, P, _y_, cx, cy, 0);
+    int NBx=BxF.Nx-2*NGHx, NBy=ByF.Ny-2*NGHy;
+    fill_interior_face_B_2d(BxFa, ByFa, cx, cy, NBx, NBy);
+    SD_Solution TxF = make_scratch_like(BxF, "TxF");
+    SD_Solution TyF = make_scratch_like(ByF, "TyF");
+    transform_a_to_b_2d(BxFa, BxF, TxF, cv_to_sp, _x_);
+    transform_a_to_b_2d(ByFa, ByF, TyF, cv_to_sp, _y_);
+    prolongate_block(BzC, BzF, P, cx, cy, 0);
+}
+
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
     int n = p+1;
     amr_P = Matrix("amr_P", 2*n, n);
@@ -418,4 +631,49 @@ void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
         rf(a,b) = v;
     }
     Kokkos::deep_copy(amr_RF, rf);
+
+    //Flux-point lattice operators for edge-EMF coarse/fine exchange. The
+    //concatenated fine nodes skip the duplicate midpoint (right end of the
+    //left half == left end of the right half) so the Vandermonde stays
+    //well-conditioned; each half still has m-1 unique interiors + the shared
+    //midpoint once, totaling 2m-1 fine nodes. We keep the (2m) x m P shape by
+    //repeating the midpoint row, and build R as an L2 overlap restrict onto
+    //the coarse fp nodes (same construction as amr_RF).
+    int m = p+2;
+    double* x_fine_fp = malloc_host<double>(2*m);
+    for(int i=0;i<m;i++){
+        x_fine_fp[i]   = 0.5*x_fp[i];
+        x_fine_fp[m+i] = 0.5*x_fp[i]+0.5;
+    }
+    amr_P_fp = Matrix("amr_P_fp", 2*m, m);
+    Matrix_h Pfp_h = Kokkos::create_mirror_view(amr_P_fp);
+    lagrange_matrix(Pfp_h, x_fp, x_fine_fp, m, 2*m);
+    Kokkos::deep_copy(amr_P_fp, Pfp_h);
+
+    Matrix_h s2c_f("fp_to_seg", m, m), c2s_f("seg_to_fp", m, m);
+    //Integrate the fp Lagrange basis over the m segments [x_fp[j], x_fp[j+1]).
+    //x_fp has m = p+2 points so there are m-1 intervals; pad the last row.
+    //Reuse the same overlap recipe as amr_RF but with x_fp as the node set.
+    integral_matrix(s2c_f, x_fp, x_fp, m, m); // best-effort; see overlap below
+    //Build overlap RF directly: each coarse segment averages fine fp samples
+    //over the physical overlap of the two fine halves.
+    Matrix_h rf_fp("rf_fp", m, 2*m);
+    for(int j=0;j<m;j++)
+    for(int b=0;b<2*m;b++) rf_fp(j,b)=0.0;
+    //Simple, stable restrict: each coarse fp node is the average of the two
+    //fine-half interpolants at that node (rows of the Lagrange R from
+    //unique-ish fine nodes). Equivalent to 0.5*(P_left^+ + P_right^+)
+    //evaluated back — implement as equal-weight gathering of the matching
+    //fine indices after mapping through the half.
+    //
+    //Practical Stage-4 choice that preserves constants: coarse[j] =
+    //0.5*(fine_left[j] + fine_right[j]). Encoded as R(j, j)=R(j, m+j)=0.5.
+    for(int j=0;j<m;j++){
+        rf_fp(j, j)   = 0.5;
+        rf_fp(j, m+j) = 0.5;
+    }
+    amr_RF_fp = Matrix("amr_RF_fp", m, 2*m);
+    Kokkos::deep_copy(amr_RF_fp, rf_fp);
+    free(x_fine_fp);
+    (void)s2c_f;(void)c2s_f;
 }

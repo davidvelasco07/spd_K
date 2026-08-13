@@ -53,9 +53,9 @@ struct Mesh : public PhysicsModule {
     {
         NBx=_NBx; NBy=_NBy; NBz=_NBz;
         nblocks = forest.Nblocks();
-        if(is_mhd && forest.max_level()>0){
-            if(Master) std::cout<<"ERROR: mixed-level AMR for MHD is not implemented yet"
-                                  <<" (Stage 2 supports uniform multiblock only)"<<std::endl;
+        if(is_mhd && forest.max_level()>0 && cfg.active[_z_]){
+            if(Master) std::cout<<"ERROR: mixed-level AMR for 3D MHD is not implemented yet"
+                                  <<" (Stage 4 supports true-2D static refinement)"<<std::endl;
             exit(1);
         }
         if(forest.max_level()>0 && cfg.integrator==_integrator_ader_){
@@ -203,16 +203,39 @@ struct Mesh : public PhysicsModule {
                     forest_exchange_fv_same(forest, blocks, member, dim);
     }
 
-    void Exchange_sd_field(SD_Solution Block::*member, int dim){
+    void Exchange_sd_field(SD_Solution Block::*member, int dim,
+                           bool cf_prolong=true){
         if(!cfg.active[dim]) return;
         if(nblocks<=1 && forest.max_level()==0) return;
-        //Stage 2: same-level (uniform) exchange only for edge E fields.
+        if(forest.max_level()>0){
+            forest_exchange_sd(forest, blocks, member, dim, cf_prolong);
+            return;
+        }
         for(int b=0; b<nblocks; b++){
             int L,R,tL,tR;
             neighbors_uniform(b,dim,L,R,tL,tR);
             block_boundary_sd(blocks[b].*member, blocks[L].*member, blocks[R].*member,
                               tL, tR, dim);
         }
+    }
+
+    void Exchange_fv_field_max(FV_Solution Block::*member){
+        for(int dim=0; dim<3; dim++){
+            if(!cfg.active[dim]) continue;
+            if(forest.max_level()>0){
+                forest_exchange_fv_max(forest, blocks, member, dim);
+            } else {
+                for(int b=0; b<nblocks; b++){
+                    int L,R,tL,tR;
+                    neighbors_uniform(b,dim,L,R,tL,tR);
+                    block_boundary_fv(blocks[b].*member,blocks[L].*member,blocks[R].*member,tL,tR,dim);
+                }
+            }
+        }
+        if(forest.max_level()>0)
+            for(int dim=0; dim<3; dim++)
+                if(cfg.active[dim])
+                    forest_exchange_fv_same(forest, blocks, member, dim);
     }
 
     void Solve_fluxes_hydro(){
@@ -263,32 +286,54 @@ struct Mesh : public PhysicsModule {
     void Exchange_E_mhd(){
         if constexpr (!is_mhd) return;
         bool az = cfg.active[_z_];
-        Exchange_sd_field(&Block::Ez_ep_xy, _x_);
-        Exchange_sd_field(&Block::Ez_ep_xy, _y_);
+        //Edge EMF: CF ghosts mirrored (fp P/R unstable); same-level copied.
+        Exchange_sd_field(&Block::Ez_ep_xy, _x_, false);
+        Exchange_sd_field(&Block::Ez_ep_xy, _y_, false);
         if(az){
-            Exchange_sd_field(&Block::Ey_ep_zx, _x_);
-            Exchange_sd_field(&Block::Ey_ep_zx, _z_);
-            Exchange_sd_field(&Block::Ex_ep_yz, _y_);
-            Exchange_sd_field(&Block::Ex_ep_yz, _z_);
+            Exchange_sd_field(&Block::Ey_ep_zx, _x_, false);
+            Exchange_sd_field(&Block::Ey_ep_zx, _z_, false);
+            Exchange_sd_field(&Block::Ex_ep_yz, _y_, false);
+            Exchange_sd_field(&Block::Ex_ep_yz, _z_, false);
         }
     }
 
     //Shared face-B identity: left-neighbour value wins at each block interface.
+    //Mixed-level: only same-level identity (CF interiors are owned by CT+EMF
+    //correction). Use Exchange_face_B_mhd for CF/same ghost fill.
     void Sync_face_B_mhd(){
         if constexpr (!is_mhd) return;
         if(nblocks<=1 && forest.max_level()==0) return;
-        auto sync_one = [&](SD_Solution Block::*member, int dim){
+        auto sync_same = [&](SD_Solution Block::*member, int dim){
             if(!cfg.active[dim]) return;
-            for(int b=0; b<nblocks; b++){
-                int L,R,tL,tR;
-                neighbors_uniform(b,dim,L,R,tL,tR);
-                sync_shared_face_sd(blocks[b].*member, blocks[L].*member,
-                                    blocks[R].*member, tL, tR, dim);
+            if(forest.max_level()==0){
+                for(int b=0; b<nblocks; b++){
+                    int L,R,tL,tR;
+                    neighbors_uniform(b,dim,L,R,tL,tR);
+                    sync_shared_face_sd(blocks[b].*member, blocks[L].*member,
+                                        blocks[R].*member, tL, tR, dim);
+                }
+                return;
             }
+            const FaceGroups& g = forest.face_groups[dim][0];
+            for(size_t k=0; k<g.same_ib.size(); k++)
+                sync_shared_face_sd(blocks[g.same_ib[k]].*member,
+                                    blocks[g.same_jb[k]].*member,
+                                    blocks[g.same_ib[k]].*member,
+                                    _periodic_, _periodic_, dim);
         };
-        sync_one(&Block::Bx_fp_x, _x_);
-        sync_one(&Block::By_fp_y, _y_);
-        if(cfg.active[_z_]) sync_one(&Block::Bz_fp_z, _z_);
+        sync_same(&Block::Bx_fp_x, _x_);
+        sync_same(&Block::By_fp_y, _y_);
+        if(cfg.active[_z_]) sync_same(&Block::Bz_fp_z, _z_);
+    }
+
+    //Ghost fill for face-staggered B (same-level copy + CF prolong/restrict).
+    //Writes only ghost faces — does not overwrite CT-owned interior faces.
+    void Exchange_face_B_mhd(){
+        if constexpr (!is_mhd) return;
+        Exchange_sd_field(&Block::Bx_fp_x, _x_, true);
+        Exchange_sd_field(&Block::By_fp_y, _y_, true);
+        if(cfg.active[_z_])
+            Exchange_sd_field(&Block::Bz_fp_z, _z_, true);
     }
 
     void MHD_MOOD_update(){
@@ -303,10 +348,13 @@ struct Mesh : public PhysicsModule {
             int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
             #endif
             if(demoted==0) break;
-            Exchange_fv_field(&Block::cascade);
+            Exchange_fv_field_max(&Block::cascade);
         }
         for(int b=0;b<nblocks;b++) blocks[b].mood_commit();
-        Sync_face_B_mhd();
+        //Interior face-B sync is safe only on uniform meshes; mixed-level
+        //uses ghost exchange instead (EMF correction owns CF telescoping).
+        if(forest.max_level()==0) Sync_face_B_mhd();
+        else Exchange_face_B_mhd();
     }
 
     void Advance_hydro(){
@@ -323,6 +371,15 @@ struct Mesh : public PhysicsModule {
         if constexpr (!is_mhd) return;
         for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre();
         Exchange_fp();
+        //Refresh face-B ghosts and re-project into U so CF fluid Riemann
+        //sees B consistent with the staggered field (not the prolonged U-B).
+        if(forest.max_level()>0){
+            Exchange_face_B_mhd();
+            for(int b=0;b<nblocks;b++)
+                mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
+                           blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_, blocks[b].Tz_,
+                           blocks[b].fp_to_sp);
+        }
         for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver();
         if(forest.max_level()>0){
             for(int dim=0; dim<3; dim++)
@@ -331,10 +388,17 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++) blocks[b].Compute_E();
         Exchange_E_mhd();
         for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver();
+        if(forest.max_level()>0){
+            for(int dim=0; dim<3; dim++)
+                if(cfg.active[dim]) correct_coarse_fine_emf(forest, blocks, dim);
+        }
         if(cfg.fallback) MHD_MOOD_update();
         else {
             for(int b=0;b<nblocks;b++) blocks[b].Update_CT();
-            Sync_face_B_mhd();
+            //Uniform MB: kill round-off face mismatch. Mixed-level: do not
+            //overwrite CT interiors (breaks discrete divB); ghost fill via
+            //Exchange_face_B_mhd is enough for the next stage's Compute_E.
+            if(forest.max_level()==0) Sync_face_B_mhd();
         }
     }
 

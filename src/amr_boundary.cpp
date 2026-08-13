@@ -1,5 +1,6 @@
 #include "spd_k.hpp"
 #include "forest.hpp"
+#include <type_traits>
 
 KOKKOS_INLINE_FUNCTION
 void amr_indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii,
@@ -29,6 +30,19 @@ static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
     Kokkos::resize(s.Vector, ref.n_ader, ref.n_var, ref.Nz, ref.Ny, ref.Nx,
                    ref.nz, ref.ny, ref.nx);
     return s;
+}
+
+//Pick SP or FP transfer matrices from the transverse point count of U.
+static Matrix prolong_mat_for(const SD_Solution& U, int dim){
+    int nt = (dim==_x_ ? U.ny : (dim==_y_ ? U.nx : U.nx));
+    //Inactive transverse dims report n=1; prefer SP matrices then.
+    if(nt == (int)amr_P_fp.extent(1)) return amr_P_fp;
+    return amr_P;
+}
+static Matrix restrict_mat_for(const SD_Solution& U, int dim){
+    int nt = (dim==_x_ ? U.ny : (dim==_y_ ? U.nx : U.nx));
+    if(nt == (int)amr_RF_fp.extent(0)) return amr_RF_fp;
+    return amr_RF;
 }
 
 template<typename Block>
@@ -86,8 +100,7 @@ static void copy_face_to_ghost(SD_Solution U, SD_Solution& src, int dim, int sid
     });
 }
 
-static void apply_domain_bc_fp(SD_Solution U, int dim, int side){
-    if(cfg.bc[dim] != _gradfree_) return;
+static void mirror_face_to_ghost(SD_Solution U, int dim, int side){
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
     int nader=U.n_ader, nvar=U.n_var;
@@ -108,6 +121,11 @@ static void apply_domain_bc_fp(SD_Solution U, int dim, int side){
         U.Vector(INDICES) = v;
         }}
     });
+}
+
+static void apply_domain_bc_fp(SD_Solution U, int dim, int side){
+    if(cfg.bc[dim] != _gradfree_) return;
+    mirror_face_to_ghost(U, dim, side);
 }
 
 //Overwrite the shared interface flux on a block's boundary face. The Riemann
@@ -186,6 +204,108 @@ void forest_exchange_fp(BlockForest& forest, std::vector<Block>& blocks, int dim
     }
 }
 
+//Generic SD-field forest exchange (face B, edge EMF, etc.).
+//cf_prolong=true: coarse↔fine use transverse P/R (face-B / fluid-like).
+//cf_prolong=false: coarse↔fine mirror own interior (edge EMF on the fp
+//lattice — Lagrange fp P is ill-conditioned for long SMR runs).
+template<typename Block>
+void forest_exchange_sd(BlockForest& forest, std::vector<Block>& blocks,
+                        SD_Solution Block::*member, int dim, bool cf_prolong){
+    if(!cfg.active[dim]) return;
+    int nb = forest.Nblocks();
+    for(int side=0; side<2; side++){
+        const auto& sj = forest.same_jb[dim][side];
+        if(!sj.empty()){
+            for(int ib=0; ib<nb; ib++)
+                copy_face_to_ghost(blocks[ib].*member, blocks[sj[ib]].*member,
+                                   dim, side);
+            continue;
+        }
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.same_ib.size(); k++)
+            copy_face_to_ghost(blocks[g.same_ib[k]].*member,
+                               blocks[g.same_jb[k]].*member, dim, side);
+        for(int ib : g.bc_ib)
+            apply_domain_bc_fp(blocks[ib].*member, dim, side);
+        if(!cf_prolong){
+            for(size_t k=0; k<g.co_ib.size(); k++)
+                mirror_face_to_ghost(blocks[g.co_ib[k]].*member, dim, side);
+            for(size_t k=0; k<g.fi_ib.size(); k++)
+                mirror_face_to_ghost(blocks[g.fi_ib[k]].*member, dim, side);
+            continue;
+        }
+        for(size_t k=0; k<g.co_ib.size(); k++){
+            SD_Solution& fine = blocks[g.co_ib[k]].*member;
+            SD_Solution& coarse = blocks[g.co_jb[k]].*member;
+            SD_Solution ghost = make_scratch_like(fine, "ghostE");
+            prolongate_face_coarser(coarse, ghost, prolong_mat_for(fine, dim),
+                                    dim, g.co_sub[k]);
+            copy_face_to_ghost(fine, ghost, dim, side);
+        }
+        for(size_t k=0; k<g.fi_ib.size(); k++){
+            int ib = g.fi_ib[k];
+            SD_Solution& coarse = blocks[ib].*member;
+            SD_Solution ghost = make_scratch_like(coarse, "ghostE");
+            const SD_Solution* traces[8];
+            int ns = (int)g.fi_jb[k].size();
+            for(int s=0; s<ns; s++)
+                traces[s] = &(blocks[g.fi_jb[k][s]].*member);
+            restrict_face_overlap_sp(traces, ns, ghost,
+                                     restrict_mat_for(coarse, dim), dim);
+            copy_face_to_ghost(coarse, ghost, dim, side);
+        }
+    }
+}
+
+//Shared face-B identity across levels: left/coarse-fine interface gets a
+//single value. Same-level: left neighbour wins. Fine next to coarse: prolongate
+//the coarse face onto the fine interface. Coarse next to fine: restrict the
+//covering fine faces onto the coarse interface (both sides of the face).
+template<typename Block>
+void forest_sync_face_B(BlockForest& forest, std::vector<Block>& blocks,
+                        SD_Solution Block::*member, int dim){
+    if(!cfg.active[dim]) return;
+    int nb = forest.Nblocks();
+    for(int side=0; side<2; side++){
+        const auto& sj = forest.same_jb[dim][side];
+        if(!sj.empty()){
+            for(int ib=0; ib<nb; ib++){
+                int L = (side==0 ? sj[ib] : ib);
+                if(side==0)
+                    sync_shared_face_sd(blocks[ib].*member, blocks[L].*member,
+                                        blocks[ib].*member, _periodic_, _periodic_, dim);
+            }
+            continue;
+        }
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.same_ib.size(); k++){
+            if(side==0)
+                sync_shared_face_sd(blocks[g.same_ib[k]].*member,
+                                    blocks[g.same_jb[k]].*member,
+                                    blocks[g.same_ib[k]].*member,
+                                    _periodic_, _periodic_, dim);
+        }
+        for(size_t k=0; k<g.co_ib.size(); k++){
+            SD_Solution& fine = blocks[g.co_ib[k]].*member;
+            SD_Solution& coarse = blocks[g.co_jb[k]].*member;
+            SD_Solution ghost = make_scratch_like(fine, "syncB");
+            prolongate_face_coarser(coarse, ghost, prolong_mat_for(fine, dim),
+                                    dim, g.co_sub[k]);
+            set_interface_flux(fine, ghost, dim, side);
+        }
+        for(size_t k=0; k<g.fi_ib.size(); k++){
+            SD_Solution& coarse = blocks[g.fi_ib[k]].*member;
+            SD_Solution ghost = make_scratch_like(coarse, "syncB");
+            const SD_Solution* traces[8];
+            int ns = (int)g.fi_jb[k].size();
+            for(int s=0; s<ns; s++)
+                traces[s] = &(blocks[g.fi_jb[k][s]].*member);
+            restrict_face_overlap_sp(traces, ns, ghost, restrict_mat_for(coarse, dim), dim);
+            set_interface_flux(coarse, ghost, dim, side);
+        }
+    }
+}
+
 template<typename Block>
 void correct_coarse_fine_flux(BlockForest& forest, std::vector<Block>& blocks, int dim){
     if(forest.max_level()==0 || !cfg.active[dim]) return;
@@ -201,6 +321,46 @@ void correct_coarse_fine_flux(BlockForest& forest, std::vector<Block>& blocks, i
                 traces[s] = &block_Ffp(blocks[g.fi_jb[k][s]], dim);
             restrict_face_overlap_sp(traces, ns, ghost, amr_RF, dim);
             set_interface_flux(coarse, ghost, dim, side);
+        }
+    }
+}
+
+//At a coarse-fine face the coarse block's edge EMF must equal the line-integral
+//average of the overlapping fine EMFs, or the CT update of face B fails to
+//telescope across the interface (AthenaK flux_correct_fc).
+template<typename Block>
+void correct_coarse_fine_emf(BlockForest& forest, std::vector<Block>& blocks, int dim){
+    if(forest.max_level()==0 || !cfg.active[dim]) return;
+    if constexpr (std::is_same_v<Block, MHD_ader>){
+        auto correct_one = [&](SD_Solution MHD_ader::*member){
+            for(int side=0; side<2; side++){
+                const FaceGroups& g = forest.face_groups[dim][side];
+                for(size_t k=0; k<g.fi_ib.size(); k++){
+                    SD_Solution& coarse = blocks[g.fi_ib[k]].*member;
+                    int ns = (int)g.fi_jb[k].size();
+                    //Build a coarse-shaped buffer holding only the interface
+                    //face: transverse restrict of each fine neighbour's facing
+                    //trace, then set_interface_flux.
+                    SD_Solution ghost = make_scratch_like(coarse, "emf");
+                    Kokkos::deep_copy(ghost.Vector, coarse.Vector);
+                    const SD_Solution* traces[8];
+                    for(int s=0; s<ns; s++)
+                        traces[s] = &(blocks[g.fi_jb[k][s]].*member);
+                    //Use SP restrict when transverse count matches amr_RF,
+                    //else the constant-preserving fp restrict.
+                    restrict_face_overlap_sp(traces, ns, ghost,
+                                             restrict_mat_for(coarse, dim), dim);
+                    set_interface_flux(coarse, ghost, dim, side);
+                }
+            }
+        };
+        //Only the EMF itself (used by CT) must match; correcting all NEMHD
+        //channels is fine and matches the fluid flux-correction pattern.
+        if(dim==_x_ || dim==_y_)
+            correct_one(&MHD_ader::Ez_ep_xy);
+        if(cfg.active[_z_]){
+            if(dim==_x_ || dim==_z_) correct_one(&MHD_ader::Ey_ep_zx);
+            if(dim==_y_ || dim==_z_) correct_one(&MHD_ader::Ex_ep_yz);
         }
     }
 }
@@ -440,10 +600,79 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
     }
 }
 
+//Like forest_exchange_fv but coarse-fine takes the max (MOOD cascade index:
+//a demotion on either side of a level jump must be visible to both).
+static void fv_max_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
+                         FV_Solution& f2, FV_Solution& f3, int nf, int dim, int side){
+    int ngh = nGH_rt[dim];
+    int nvar = U.n_var;
+    int Nx = (dim==_x_ ? ngh : U.Nx);
+    int Ny = (dim==_y_ ? ngh : U.Ny);
+    int Nz = (dim==_z_ ? ngh : U.Nz);
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        for(int var=0; var<nvar; var++){
+        double mval=-1e300;
+        if(nf>0){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f0.Nx-3*ngh+l:ngh+l);
+            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f0.Vector(FV_INDICES)); }
+        if(nf>1){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f1.Nx-3*ngh+l:ngh+l);
+            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f1.Vector(FV_INDICES)); }
+        if(nf>2){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f2.Nx-3*ngh+l:ngh+l);
+            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f2.Vector(FV_INDICES)); }
+        if(nf>3){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f3.Nx-3*ngh+l:ngh+l);
+            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f3.Vector(FV_INDICES)); }
+        int Nid[3];
+        if(dim==_x_) fv_indices(Nid,k,j,i,(side==0?i:U.Nx-ngh+i),dim);
+        else if(dim==_y_) fv_indices(Nid,k,j,i,(side==0?j:U.Ny-ngh+j),dim);
+        else fv_indices(Nid,k,j,i,(side==0?k:U.Nz-ngh+k),dim);
+        U.Vector(FV_INDICES) = mval;
+        }
+    });
+}
+
+template<typename Block>
+void forest_exchange_fv_max(BlockForest& forest, std::vector<Block>& blocks,
+                            FV_Solution Block::*member, int dim){
+    if(!cfg.active[dim]) return;
+    int nb = forest.Nblocks();
+    for(int side=0; side<2; side++){
+        const auto& sj = forest.same_jb[dim][side];
+        if(!sj.empty()){
+            for(int ib=0; ib<nb; ib++)
+                fv_copy_slab(blocks[ib].*member, blocks[sj[ib]].*member, dim, side, nGH_rt[dim]);
+            continue;
+        }
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.same_ib.size(); k++)
+            fv_copy_slab(blocks[g.same_ib[k]].*member, blocks[g.same_jb[k]].*member,
+                         dim, side, nGH_rt[dim]);
+        for(size_t k=0; k<g.co_ib.size(); k++)
+            fv_inject_coarser(blocks[g.co_ib[k]].*member, blocks[g.co_jb[k]].*member,
+                              dim, side, g.co_sub[k]);
+        for(size_t k=0; k<g.fi_ib.size(); k++){
+            FV_Solution &U = blocks[g.fi_ib[k]].*member;
+            FV_Solution &f0 = blocks[g.fi_jb[k][0]].*member;
+            FV_Solution f1=f0,f2=f0,f3=f0;
+            int nf = (int)g.fi_jb[k].size();
+            if(nf>1) f1 = blocks[g.fi_jb[k][1]].*member;
+            if(nf>2) f2 = blocks[g.fi_jb[k][2]].*member;
+            if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
+            fv_max_finer(U, f0, f1, f2, f3, nf, dim, side);
+        }
+    }
+}
+
 template void forest_exchange_fp<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void forest_exchange_fp<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void forest_exchange_sd<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                             SD_Solution Hydro_ader::*, int, bool);
+template void forest_exchange_sd<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                           SD_Solution MHD_ader::*, int, bool);
+template void forest_sync_face_B<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                           SD_Solution MHD_ader::*, int);
 template void correct_coarse_fine_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void correct_coarse_fine_emf<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void correct_coarse_fine_emf<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
@@ -454,3 +683,7 @@ template void forest_exchange_fv_same<Hydro_ader>(BlockForest&, std::vector<Hydr
                                                   FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_same<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
                                                 FV_Solution MHD_ader::*, int);
+template void forest_exchange_fv_max<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                                 FV_Solution Hydro_ader::*, int);
+template void forest_exchange_fv_max<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                               FV_Solution MHD_ader::*, int);

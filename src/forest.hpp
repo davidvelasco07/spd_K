@@ -128,7 +128,15 @@ void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
 template<typename Block>
 void forest_exchange_fp(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
+void forest_exchange_sd(BlockForest&, std::vector<Block>&,
+                        SD_Solution Block::*, int dim, bool cf_prolong=true);
+template<typename Block>
+void forest_sync_face_B(BlockForest&, std::vector<Block>&,
+                        SD_Solution Block::*, int dim);
+template<typename Block>
 void correct_coarse_fine_flux(BlockForest&, std::vector<Block>&, int dim);
+template<typename Block>
+void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
@@ -137,5 +145,8 @@ void forest_exchange_fv(BlockForest&, std::vector<Block>&,
 template<typename Block>
 void forest_exchange_fv_same(BlockForest&, std::vector<Block>&,
                              FV_Solution Block::*, int dim);
+template<typename Block>
+void forest_exchange_fv_max(BlockForest&, std::vector<Block>&,
+                            FV_Solution Block::*, int dim);
 
 #endif

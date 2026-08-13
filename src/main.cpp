@@ -349,8 +349,9 @@ int main(int argc, char** argv){
         }
         else if(system_name == "mhd"){
             if(use_mesh){
-                if(cfg.amr_max_level>0){
-                    if(Master) cout<<"ERROR: mixed-level AMR for MHD is not implemented yet"<<endl;
+                if(cfg.amr_max_level>0 && az){
+                    if(Master) cout<<"ERROR: mixed-level AMR for 3D MHD is not implemented yet"
+                                     <<" (Stage 4 supports true-2D static refinement)"<<endl;
                     exit(1);
                 }
                 double lim[3][2] = {
@@ -390,6 +391,8 @@ int main(int argc, char** argv){
         amr_RS_sp[0] = amr_RS_sp[1] = Matrix();
         amr_RS_cv[0] = amr_RS_cv[1] = Matrix();
         amr_RF = Matrix();
+        amr_P_fp = Matrix();
+        amr_RF_fp = Matrix();
     }
     Kokkos::finalize();
     #ifdef MPI
