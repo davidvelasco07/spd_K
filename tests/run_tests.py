@@ -24,12 +24,15 @@ plus command-line overrides. Checks per configuration:
                    chaotic amplification, so a tight tolerance is portable)
   hydro_smr_2d   : static centre patch; the mesh must stay mixed-level
   hydro_amr_2d   : dynamic AMR on a pulse; the mesh must become mixed-level
+  hydro_implosion_2d : reflective-wall implosion, mass conserved
+  mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
 
 Every configuration is additionally gated on all dumps being finite, before
 any tolerance is applied.
 
 Usage:
-  tests/run_tests.py [--build-dir DIR] [--skip-unit] [--regen-goldens]
+  tests/run_tests.py [--build-dir DIR] [--skip-unit] [--skip-golden]
+                     [--regen-goldens] [--only SUBSTR]
 """
 import argparse
 import glob
@@ -42,10 +45,14 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import spdk_io  # shared reader module
+from spdk_io import NGH, nGH
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN_DIR = os.path.join(ROOT, "tests", "goldens")
 
-N, P, NGH, nGH = 8, 3, 1, 2
+N, P = 8, 3
 n = P + 1
 
 CONFIGS = {
@@ -169,6 +176,16 @@ CONFIGS = {
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
     },
+    "hydro_implosion_2d": {
+        # reflective BCs: the flux-form update must conserve to round-off
+        # (zero mass flux through the mirrored walls)
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
     "induction_fv_3d": {
         "input": "inputs/induction_loop.athinput",
         "overrides": [],
@@ -218,6 +235,59 @@ CONFIGS = {
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.1,
     },
+    "mhd_orszag_tang_2d": {
+        # quasi-2D OT vortex with the MOOD cascade active: shocks form by
+        # t=0.15, the |B| NAD + face/edge cascade must keep the run stable,
+        # conservative, and divergence-free
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=4", "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 3,
+        "checks": ["mass_strict", "divb", "golden"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+        "golden_name": "mhd_ot",
+        "golden_rtol": 1e-6,
+    },
+    "mhd_field_loop_2d": {
+        # smooth weak-field loop advection (high order everywhere): tests the
+        # SD MHD + CT path without the fallback
+        "input": "inputs/field_loop.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=4",
+                      "time/tlim=0.1", "output/dt=0.1"],
+        "ndim": 3,
+        "checks": ["mass_strict", "divb", "golden"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.1,
+        "golden_name": "mhd_loop",
+        "golden_rtol": 1e-6,
+    },
+    "mhd_orszag_tang_true2d": {
+        # true 2D (mesh/nx3=1): CT degenerates to the Ez edge family, Bz is a
+        # cell-centered conserved variable; MOOD cascade active through the
+        # early shocks. Conservation and divB = dBx/dx + dBy/dy at round-off.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 2,
+        "checks": ["mass_strict", "divb", "golden"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+        "golden_name": "mhd_ot_2d",
+        "golden_rtol": 1e-6,
+    },
+    "mhd_field_loop_true2d": {
+        # true 2D field-loop advection without the fallback: pure SD + Ez CT
+        "input": "inputs/field_loop.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
+                      "time/tlim=0.1", "output/dt=0.1"],
+        "ndim": 2,
+        "checks": ["mass_strict", "divb", "golden"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.1,
+        "golden_name": "mhd_loop_2d",
+        "golden_rtol": 1e-6,
+    },
 }
 
 
@@ -236,7 +306,7 @@ def run(build_dir, outdir, cfg):
     env = dict(os.environ, SPD_OUTPUT_DIR=outdir)
     cmd = [os.path.join(build_dir, "spd_K"), "-i",
            os.path.join(ROOT, cfg["input"])] + cfg["overrides"]
-    sh(cmd, env=env)
+    return sh(cmd, env=env).stdout
 
 
 def n_from_field(field):
@@ -364,28 +434,37 @@ def check_finite(outdir, cfg):
 
 
 def check_mass(outdir, cfg, limit):
-    """Mass drift from the solver's own block-by-block integral (mass.txt).
-
-    Integrating the dumped field instead is only valid on a single-level mesh:
-    the mixed-level dump interpolates coarse blocks up onto the finest grid,
-    and interpolation does not preserve an integral, so it reports drift for a
-    perfectly conservative run.
-    """
+    """Mass drift: prefer mass.txt (AMR/mesh exact integral); else field dumps."""
     path = os.path.join(outdir, "mass.txt")
-    if not os.path.exists(path):
-        return False, "no mass.txt written"
-    m = [float(tok[1]) for tok in
-         (line.split() for line in open(path)) if len(tok) == 2]
-    if len(m) < 2:
-        return False, f"mass.txt has {len(m)} entries, need at least 2"
-    if not all(math.isfinite(x) for x in m):
-        return False, f"non-finite mass: {m}"
-    if m[0] == 0.0:
-        return False, "reference mass is zero"
+    if os.path.exists(path):
+        m = [float(tok[1]) for tok in
+             (line.split() for line in open(path)) if len(tok) == 2]
+        if len(m) < 2:
+            return False, f"mass.txt has {len(m)} entries, need at least 2"
+        if not all(math.isfinite(x) for x in m):
+            return False, f"non-finite mass: {m}"
+        if m[0] == 0.0:
+            return False, "reference mass is zero"
+    else:
+        grid = spdk_io.Grid(outdir)
+        m = [spdk_io.total_mass(grid, i) for i in spdk_io.output_indices(outdir)]
+        if len(m) < 2:
+            return False, f"need >=2 outputs for mass check, got {len(m)}"
     drift = max(abs(x - m[0]) / abs(m[0]) for x in m)
     if not math.isfinite(drift):
         return False, f"non-finite mass drift (masses {m})"
     return drift < limit, f"mass drift = {drift:.3e} (limit {limit:.1e})"
+
+
+def check_divb(stdout, limit=1e-11):
+    """max|divB| diagnostics printed by the MHD module at every output."""
+    vals = [float(v) for v in re.findall(r"max\|divB\| = ([-\d.e+]+(?:inf)?)",
+                                         stdout)]
+    if not vals:
+        return False, "no divB diagnostics in run output"
+    worst = max(vals)
+    ok = np.isfinite(worst) and worst < limit
+    return ok, f"max|divB| over run = {worst:.3e} (limit {limit:.1e})"
 
 
 def check_mixed_levels(outdir, cfg):
@@ -444,7 +523,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", default=os.path.join(ROOT, "build-511"))
     ap.add_argument("--skip-unit", action="store_true")
+    ap.add_argument("--skip-golden", action="store_true",
+                    help="skip golden bit-comparison checks (machine/compiler "
+                         "specific; recommended in CI on a different toolchain)")
     ap.add_argument("--regen-goldens", action="store_true")
+    ap.add_argument("--only", default=None,
+                    help="substring filter: run only matching config names")
     args = ap.parse_args()
 
     failures = 0
@@ -459,9 +543,11 @@ def main():
         failures += 0 if ok else 1
 
     for name, cfg in CONFIGS.items():
+        if args.only and args.only not in name:
+            continue
         outdir = os.path.join(args.build_dir, "test_out", name)
         try:
-            run(args.build_dir, outdir, cfg)
+            stdout = run(args.build_dir, outdir, cfg)
         except RuntimeError as e:
             print(f"[FAIL] {name}: {e}")
             failures += 1
@@ -477,7 +563,12 @@ def main():
                 ok, msg = check_mass(outdir, cfg, 1e-12)
             elif chk == "mixed_levels":
                 ok, msg = check_mixed_levels(outdir, cfg)
+            elif chk == "divb":
+                ok, msg = check_divb(stdout)
             elif chk == "golden":
+                if args.skip_golden and not args.regen_goldens:
+                    print(f"[SKIP] {name}: golden (skipped)")
+                    continue
                 ok, msg = check_golden(outdir, cfg, args.regen_goldens)
             elif chk == "golden_active":
                 ok, msg = check_golden(outdir, cfg, False, active_only=True)

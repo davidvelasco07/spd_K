@@ -5,6 +5,27 @@ int choose(int dim, int i, int j, int k){
     return (dim==_x_ ? i : (dim==_y_ ?  j : k));
 }
 
+//Gravity source term S for one conservative variable at one solution point.
+//Momentum equations gain rho*g_i, the energy equation gains (rho v).g. Added
+//to dU/dt as +S (see the callers, which subtract it from the flux
+//divergence). U is the ADER solution-point state; t_id selects the slice.
+//NOTE: U is passed by const reference on purpose. SD_Solution holds a
+//std::string label, so a by-value copy inside device code would invoke
+//std::string's copy constructor on the GPU (invalid) and silently drop the
+//gravity source. A reference is inlined without copying the struct.
+KOKKOS_INLINE_FUNCTION
+double gravity_source(const SD_Solution& U, int var, int t_id,
+                      int k, int j, int i, int kk, int jj, int ii,
+                      double gx, double gy, double gz){
+    if(var==_vx_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gx;
+    if(var==_vy_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gy;
+    if(var==_vz_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gz;
+    if(var==_p_)  return U.Vector(t_id,_vx_,k,j,i,kk,jj,ii)*gx
+                       + U.Vector(t_id,_vy_,k,j,i,kk,jj,ii)*gy
+                       + U.Vector(t_id,_vz_,k,j,i,kk,jj,ii)*gz;
+    return 0.0;
+}
+
 KOKKOS_INLINE_FUNCTION
 void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, int l, int ll, int dim){
     //Returns the indeces according to the dimension
@@ -95,93 +116,6 @@ void transform_a_to_b(
     }
 }
 
-//Stage-2 GPU version of the full tensor-product transform: a single kernel
-//with one team per (element, var, t_id). The element's point values are
-//staged in team scratch memory, then swept once per active dimension with a
-//team barrier between sweeps, and written back once. Compared with the
-//kernel-per-sweep version this avoids two full round trips of the array
-//through global memory plus the extra kernel launches. Arithmetic is the
-//same sequence of 1d contractions, so results are bit-identical.
-//On host backends TeamPolicy resolves to team_size 1 and the barriers are
-//no-ops, so the same code runs everywhere.
-//Requires U_a and U_b to have identical point counts (square matrices).
-void transform_a_to_b_team(
-    SD_Solution U_a,
-    SD_Solution U_b,
-    Matrix a_to_b
-    ){
-    int Nx = U_b.Nx;
-    int Ny = U_b.Ny;
-    int Nz = U_b.Nz;
-    int nx = U_b.nx;
-    int ny = U_b.ny;
-    int nz = U_b.nz;
-    int n_pts = nx*ny*nz;
-    int nvar = U_a.n_var;
-    int nader = U_a.n_ader;
-    int dims[3];
-    int nd=0;
-    if(cfg.active[_x_]) dims[nd++]=_x_;
-    if(cfg.active[_y_]) dims[nd++]=_y_;
-    if(cfg.active[_z_]) dims[nd++]=_z_;
-    int d0 = nd>0 ? dims[0] : 0;
-    int d1 = nd>1 ? dims[1] : 0;
-    int d2 = nd>2 ? dims[2] : 0;
-    int league = Nz*Ny*Nx*nvar*nader;
-    using team_policy = Kokkos::TeamPolicy<>;
-    using member_t = team_policy::member_type;
-    size_t scratch_bytes = 2*size_t(n_pts)*sizeof(double);
-    Kokkos::parallel_for("transform_a_to_b_team",
-        team_policy(league, Kokkos::AUTO)
-            .set_scratch_size(0, Kokkos::PerTeam(scratch_bytes)),
-        KOKKOS_LAMBDA(const member_t& team){
-            int r = team.league_rank();
-            int t_id = r % nader; r /= nader;
-            int var  = r % nvar;  r /= nvar;
-            int i    = r % Nx;    r /= Nx;
-            int j    = r % Ny;
-            int k    = r / Ny;
-            double* buf0 = (double*)team.team_scratch(0).get_shmem(n_pts*sizeof(double));
-            double* buf1 = (double*)team.team_scratch(0).get_shmem(n_pts*sizeof(double));
-            //Stage the element in scratch
-            Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                int ii = idx % nx;
-                int jj = (idx/nx) % ny;
-                int kk = idx/(nx*ny);
-                buf0[idx] = U_a.Vector(t_id,var,k,j,i,kk,jj,ii);
-            });
-            team.team_barrier();
-            double* in = buf0;
-            double* out = buf1;
-            for(int s=0; s<nd; s++){
-                int dim = (s==0 ? d0 : (s==1 ? d1 : d2));
-                Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                    int ii = idx % nx;
-                    int jj = (idx/nx) % ny;
-                    int kk = idx/(nx*ny);
-                    int id = (dim==_x_ ? ii : (dim==_y_ ? jj : kk));
-                    int q  = (dim==_x_ ? nx : (dim==_y_ ? ny : nz));
-                    double u=0;
-                    for(int ll=0; ll<q; ll++){
-                        int i2 = (dim==_x_ ? ll : ii);
-                        int j2 = (dim==_y_ ? ll : jj);
-                        int k2 = (dim==_z_ ? ll : kk);
-                        u += in[i2 + nx*(j2 + ny*k2)]*a_to_b(id,ll);
-                    }
-                    out[idx] = u;
-                });
-                team.team_barrier();
-                double* tmp = in; in = out; out = tmp;
-            }
-            //Single write back to global memory
-            Kokkos::parallel_for(Kokkos::TeamThreadRange(team,n_pts),[&](int idx){
-                int ii = idx % nx;
-                int jj = (idx/nx) % ny;
-                int kk = idx/(nx*ny);
-                U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = in[idx];
-            });
-        });
-}
 
 void transform_a_to_b_1d(
     SD_Solution U_a,
@@ -352,6 +286,10 @@ void update_prediction(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    //Gravity source: added to dU/dt at every space-time node using the
+    //current (previous Picard iteration) ADER state U_ader.
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt[10];
@@ -367,6 +305,13 @@ void update_prediction(
                 if(ay) dudt[t_id] += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/dy;
                 if(az) dudt[t_id] += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/dz;
             }
+            //dudt holds the flux divergence div(F); the update below does
+            //U_ader = u_old - integral(dudt), so gravity enters as
+            //dudt -= S with S = (rho*g, rho*v.g) to give +S in dU/dt.
+            if(grav){
+                double S = gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+                dudt[t_id] -= S;
+            }
         }
         for(t_id=0; t_id<nader; t_id++){
             du=0;
@@ -381,6 +326,7 @@ void update_prediction(
 
 void update_solution(
     SD_Solution U,
+    SD_Solution U_ader,
     SD_Solution F_x,
     SD_Solution F_y,
     SD_Solution F_z,
@@ -403,6 +349,8 @@ void update_solution(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt;
@@ -415,6 +363,9 @@ void update_solution(
                 if(ay) dudt += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*da_to_b(jj,ll)/dy;
                 if(az) dudt += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*da_to_b(kk,ll)/dz;
             }
+            //Gravity: subtract S from div(F) so the U -= du below adds +S*dt
+            if(grav)
+                dudt -= gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
             du += dudt*w(t_id)*dt;
         }
         U.Vector(0,var,k,j,i,kk,jj,ii) -= du;
@@ -558,6 +509,8 @@ void fv_update_solution(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     GHOST_LOCALS;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
@@ -578,6 +531,9 @@ void fv_update_solution(
             h = faces_z(K+1)-faces_z(K);
             F += (F_z.Vector(var,K+1,J,I)-F_z.Vector(var,K,J,I))/h;
         }
+        //Gravity source from the current subcell average (U_cv slice 0)
+        if(grav)
+            F -= gravity_source(U_cv,var,0,k,j,i,kk,jj,ii,gx,gy,gz);
         u_new = U_old.Vector(var,K,J,I) - w(t_id)*dt*F;
         U_new.Vector(var,K,J,I) = u_new;
         if(update)

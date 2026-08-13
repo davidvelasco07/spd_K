@@ -1,0 +1,59 @@
+<amr>
+adapt_interval = 0
+criterion = lohner
+max_level = 1
+
+<fallback>
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+blending = true
+tolerance = 1.0000000000000001e-05
+
+<hydro>
+gamma = 1.4
+
+<job>
+fallback = false
+system = hydro
+
+<mesh>
+nx1 = 16
+nx2 = 16
+nx3 = 1
+p = 3
+x1_bc = periodic
+x1len = 1
+x2_bc = periodic
+x2len = 1
+x3_bc = periodic
+x3len = 1
+
+<meshblock>
+nx1 = 4
+nx2 = 4
+nx3 = 1
+
+<output>
+dt = 0.05
+
+<problem>
+problem = sine_wave
+
+<refinement1>
+level = 1
+x1max = 0.625
+x1min = 0.375
+x2max = 0.625
+x2min = 0.375
+x3max = 1
+x3min = 0
+
+<time>
+cfl = 0.4
+integrator = rk3
+tlim = 0.1
+
+<build>
+layout = LayoutRight
+

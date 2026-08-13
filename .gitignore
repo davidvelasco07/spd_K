@@ -16,3 +16,15 @@ regress/
 valid511/
 xval/
 rtcheck/
+docs/_build/
+
+# python caches
+__pycache__/
+*.pyc
+
+# benchmark / scratch run artifacts
+bench_*/
+bench_out/
+bench_*.jsonl
+bench_*.log
+run_*/

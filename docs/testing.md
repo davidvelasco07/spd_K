@@ -1,0 +1,80 @@
+# Testing
+
+## Unit tests
+
+Transform kernel correctness (cv ↔ sp sweeps, face integrals):
+
+```bash
+./build/spd_K_test
+```
+
+## Regression suite
+
+```bash
+python tests/run_tests.py --build-dir build
+```
+
+Checks include L1 error vs the analytic sine wave, mass conservation to
+round-off, golden-file comparison, implosion mass conservation with
+reflective BCs, and the MHD cases (Orszag-Tang with the MOOD cascade and
+field-loop advection, each both on the 3D z-invariant slab and in true 2D
+with `mesh/nx3 = 1`) with `max|divB|` verified at round-off over the run.
+
+Options:
+
+- `--skip-unit` — skip `spd_K_test`
+- `--skip-golden` — skip golden bit-comparison checks (machine/compiler
+  specific; used in CI, which runs on a different toolchain)
+- `--regen-goldens` — refresh reference output files
+- `--only SUBSTR` — run only the configs whose name contains `SUBSTR`
+
+Golden files are exact byte references generated on a specific machine, so they
+are only meaningful on the same compiler/toolchain. CI therefore runs the
+portable checks (analytic accuracy, mass conservation, shock/fallback behavior)
+and skips the golden comparison.
+
+## Visual suite
+
+Generates PNG panels and `docs/gallery.md` for browser review and Sphinx:
+
+```bash
+python tests/visual_suite.py --build-dir build
+```
+
+| Flag | Effect |
+|---|---|
+| `--only PATTERN` | Run cases matching a glob (`--only implosion`) |
+| `--fast` | Coarse grid, short runs; skips knob section |
+| `--skip-run` | Re-render plots from existing `build/visual_out/` |
+
+Output: `docs/gallery/*.png` and `docs/gallery.md`.
+
+## Performance benchmark
+
+```bash
+python tests/benchmark.py --binary build/spd_K
+```
+
+Prints zone-cycles/s for RK3 sine-wave sweeps (outputs disabled via
+`output/dt=-1`).
+
+## Building the documentation locally
+
+```bash
+pip install -r docs/requirements.txt
+make -C docs html
+# open docs/_build/html/index.html
+```
+
+The site is also published to GitHub Pages on push to `main` (see
+`.github/workflows/docs.yml`).
+
+## Continuous integration
+
+Two GitHub Actions workflows run on every pull request to `main`:
+
+- **`ci`** (`.github/workflows/ci.yml`) — configures a CPU (SERIAL) build,
+  compiles `spd_K` and `spd_K_test`, then runs the unit tests and the portable
+  regression checks (`run_tests.py --skip-golden`).
+- **`docs`** (`.github/workflows/docs.yml`) — builds the Sphinx site (build-only
+  on PRs; deploys to Pages on push to `main`).

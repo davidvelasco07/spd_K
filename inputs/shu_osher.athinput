@@ -1,0 +1,28 @@
+# 1D Shu-Osher shock/entropy-wave interaction (Shu & Osher 1989)
+# Mach-3 shock at x = 0.2 running into rho = 1 + amp*sin(5 pi (x-1));
+# defined on the box coordinate x in [0,2] (physical x-1 in [-1,1]).
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 64
+nx2   = 1
+nx3   = 1
+x1len = 2.0
+x1_bc = gradfree
+
+<time>
+tlim = 0.47
+cfl  = 0.8
+
+<output>
+dt   = 0.235
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = shu_osher
+# amp = 0.2   # amplitude of the density sine wave

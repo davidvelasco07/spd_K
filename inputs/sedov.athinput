@@ -1,0 +1,26 @@
+# 2D/3D Sedov-Taylor point explosion: total energy gamma-1 deposited in a
+# sphere of radius r at the box center, cold ambient gas
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 16
+nx2  = 16
+nx3  = 1
+
+<time>
+tlim = 0.05
+cfl  = 0.8
+
+<output>
+dt   = 0.025
+
+<hydro>
+gamma = 1.6666666666667
+
+<problem>
+problem = sedov
+# radius = 0.1   # radius of the energy deposit
+# d0 = 1.0       # uniform density

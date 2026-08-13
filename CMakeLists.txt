@@ -46,6 +46,7 @@ add_executable(${PROJECT_NAME}
     src/boundary.cpp
     src/hydro.cpp
     src/induction.cpp
+    src/mhd.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
     src/amr.cpp
@@ -74,6 +75,7 @@ add_executable(spd_K_test
     src/boundary.cpp
     src/hydro.cpp
     src/induction.cpp
+    src/mhd.cpp
     src/trouble_detection.cpp
     src/muscl.cpp
     src/amr.cpp
@@ -88,6 +90,9 @@ target_link_libraries(spd_K_test ${MPI_CXX_LIBRARIES} Kokkos::kokkos)
 if(HDF5_FOUND)
   target_link_libraries(spd_K_test ${HDF5_LIBRARIES})
 endif()
+
+add_executable(bench_layout tests/bench_layout.cpp)
+target_link_libraries(bench_layout Kokkos::kokkos)
 
 enable_testing()
 add_test(NAME transforms_unit COMMAND spd_K_test)

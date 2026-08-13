@@ -1,18 +1,20 @@
 using namespace std;
 
-struct Hydro_ader{
-    int n_output;
-    int n_step;
+struct Hydro_ader : public PhysicsModule{
     int n_ader;
     int nvar;
-    int n_stages;     //RK stages (1 for ADER)
+    int n_stages;     //RK stages (1 for ADER); also needed by Hydro_mesh
     double rk_a[3];   //per-stage convex weights of the SSP combination
-
-    double t;
-    double dt;
-    double Dt;
     double nu;
     double beta;
+    bool viscosity;   //viscous terms active (enabled at runtime when nu>0)
+
+    //Stored so the task methods (which receive only Driver*) can reach the
+    //comm handle and per-direction geometry.
+    CommHelper comm_;
+    dimension Xdim_;
+    dimension Ydim_;
+    dimension Zdim_;
 
     Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
@@ -85,7 +87,7 @@ struct Hydro_ader{
         double _nu,
         double _beta,
         bool standalone=true //false when driven as one block of a mesh
-    ){
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim) {
         //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
         nvar = NVAR;
         n_output = 0;
@@ -93,6 +95,7 @@ struct Hydro_ader{
         t=0;
         nu = _nu;
         beta = _beta;
+        viscosity = nu > 0.0;
         Kokkos::resize(xx,p+1);
         Kokkos::resize(wx,p+1);
         {
@@ -232,13 +235,80 @@ struct Hydro_ader{
         transform_cv_to_sp(W_cv,W_sp);
         compute_conservatives(W_sp,U_sp);
 
-        Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
+        Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
         if(standalone){
             if(Master)
                 cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
-            Write_outputs(X_dim,Y_dim,Z_dim);
+            if(cfg.outputs)
+                Write_outputs();
         }
     }
+
+    /////////////////////////////////////////////////////////////////////
+    // Tasklist interface (PhysicsModule): the monolithic ADER_step/RK_step
+    // are broken into task methods registered into the driver's phases. The
+    // per-stage chain is CopyCons -> Advance -> Combine; Advance folds the
+    // ADER Picard predictor (degenerating to a single flux solve under RK).
+    /////////////////////////////////////////////////////////////////////
+    void AssembleTasks(Driver* d) override {
+        TaskID none(0);
+        auto bti = d->tl_map["before_timeintegrator"];
+        auto stg = d->tl_map["stagen"];
+        auto ati = d->tl_map["after_timeintegrator"];
+        //SSP-RK saves the step-start state once per cycle for the convex combine
+        if(cfg.integrator==_integrator_rk_)
+            bti->AddTask(&Hydro_ader::TaskSaveState, this, none);
+        TaskID copy = stg->AddTask(&Hydro_ader::TaskCopyCons, this, none);
+        TaskID adv  = stg->AddTask(&Hydro_ader::TaskAdvance,  this, copy);
+        stg->AddTask(&Hydro_ader::TaskCombine, this, adv);
+        //cons->prim + control-volume averages (consumed by outputs and the CFL)
+        ati->AddTask(&Hydro_ader::TaskConsToPrim, this, none);
+    }
+
+    TaskStatus TaskSaveState(Driver* d, int stage){
+        Kokkos::deep_copy(U0_sp.Vector,U_sp.Vector);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskCopyCons(Driver* d, int stage){
+        copy_ader(U_sp,U_ader_sp);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskAdvance(Driver* d, int stage){
+        //ADER: Picard predictor over the p+1 temporal slices (the final slice
+        //leaves the fluxes ready for the corrector). RK: n_ader==1, a single
+        //forward-Euler flux solve.
+        for(int ader=0; ader<n_ader; ader++){
+            Solve_fluxes(comm_,Xdim_,Ydim_,Zdim_);
+            if(ader<n_ader-1)
+                Update_prediction(Xdim_.h,Ydim_.h,Zdim_.h);
+        }
+        if(cfg.fallback)
+            FV_Update_solution(comm_,Xdim_,Ydim_,Zdim_);
+        else
+            Update_solution(Xdim_.h,Ydim_.h,Zdim_.h);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskCombine(Driver* d, int stage){
+        //SSP convex combination U <- a*U0 + (1-a)*U (RK only; stage is 1-based)
+        if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0)
+            combine_solution(U_sp,U0_sp,d->rk_a[stage-1]);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskConsToPrim(Driver* d, int stage){
+        compute_primitives(U_sp,W_sp);
+        transform_sp_to_cv(W_sp,W_cv);
+        return TaskStatus::complete;
+    }
+
+    double ComputeDt() override {
+        return compute_dt(W_cv,Xdim_.h,Ydim_.h,Zdim_.h,nu);
+    }
+
+    void WriteOutputs() override { Write_outputs(); }
 
     void time_evolution(
         CommHelper comm,
@@ -260,7 +330,7 @@ struct Hydro_ader{
             transform_sp_to_cv(W_sp,W_cv);
             t+=dt;
             n_step++;
-            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
+            dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
 
             //A diverged state gives a NaN dt, which makes t NaN and turns
             //t<t_end false, so the run would exit reporting success while
@@ -277,7 +347,7 @@ struct Hydro_ader{
             if(Master) cout<<".";
             if(t>=t_output){
                 t_output=t+dt_output;
-                Write_outputs(X_dim,Y_dim,Z_dim);
+                Write_outputs();
             }
             if(t+dt>t_output){
                 dt=t_output-t;
@@ -297,14 +367,14 @@ struct Hydro_ader{
 
     void Solve_fluxes(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
         Fluxes_pre();
-        Boundaries(comm);
+        apply_boundaries(comm);
         Riemann_Solver();
 
-        #ifdef VISCOSITY
-        Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
-        Boundaries(comm);
-        Rusanov_Solver();
-        #endif
+        if(viscosity){
+            Viscosity(X_dim.h,Y_dim.h,Z_dim.h);
+            apply_boundaries(comm);
+            Rusanov_Solver();
+        }
     }
 
     void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
@@ -347,7 +417,7 @@ struct Hydro_ader{
         #ifdef REF_TRANSFORMS
         transform_a_to_b_ref(U_cv, U_sp, cv_to_sp, cv_to_sp, cv_to_sp);
         #else
-        transform_a_to_b_team(U_cv, U_sp, cv_to_sp);
+        transform_a_to_b(U_cv, U_sp, T_sweep, cv_to_sp);
         #endif
     }
 
@@ -355,7 +425,7 @@ struct Hydro_ader{
         #ifdef REF_TRANSFORMS
         transform_a_to_b_ref(U_sp, U_cv, sp_to_cv, sp_to_cv, sp_to_cv);
         #else
-        transform_a_to_b_team(U_sp, U_cv, sp_to_cv);
+        transform_a_to_b(U_sp, U_cv, T_sweep, sp_to_cv);
         #endif
     }
 
@@ -379,7 +449,7 @@ struct Hydro_ader{
             compute_fluxes(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_);
     }
 
-    void Boundaries(CommHelper comm){
+    void apply_boundaries(CommHelper comm){
         //Communications are done sequentially in different directions
         //to ensure that corners are properly communicated
         if(cfg.active[_x_])
@@ -392,11 +462,11 @@ struct Hydro_ader{
 
     void Riemann_Solver(){
         if(cfg.active[_x_])
-            sd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_,_x_);
+            sd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_vx_,_vy_,_vz_,_x_,viscosity);
         if(cfg.active[_y_])
-            sd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_vy_,_vz_,_vx_,_y_);
+            sd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_vy_,_vz_,_vx_,_y_,viscosity);
         if(cfg.active[_z_])
-            sd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_,_z_);
+            sd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_vz_,_vx_,_vy_,_z_,viscosity);
     }
 
     void Viscosity(double dx, double dy, double dz){
@@ -430,19 +500,19 @@ struct Hydro_ader{
     }
 
     void Update_solution(double dx, double dy, double dz){
-        update_solution(U_sp,
+        update_solution(U_sp,U_ader_sp,
             F_ader_fp_x,F_ader_fp_y,F_ader_fp_z,
             dfp_to_sp,wt,dx,dy,dz,dt);
     }
 
-    void Write_outputs(dimension X_dim, dimension Y_dim, dimension Z_dim){
+    void Write_outputs(){
         if(Master)
             cout<<endl<<"OUTPUT "<<n_output<<endl;
         if(Master){
             std::ofstream f(output_folder()+"mass.txt",
                             n_output==0 ? std::ios::trunc : std::ios::app);
             f<<std::setprecision(17)<<t<<" "
-             <<fv_mass(W_cv,X_dim,Y_dim,Z_dim)<<endl;
+             <<fv_mass(W_cv,Xdim_,Ydim_,Zdim_)<<endl;
         }
         if(cfg.fallback)
             Write(troubles,n_output);
@@ -620,18 +690,18 @@ struct Hydro_ader{
             #ifdef DEBUG_MASS
             printf("  ader %d U_new after SD-flux update : %.15e\n", ader, fv_mass_cells(U_new,X_dim,Y_dim,Z_dim));
             #endif
-            FV_Boundaries(comm,U_old);
-            FV_Boundaries(comm,U_new);
+            apply_fv_boundaries(comm,U_old);
+            apply_fv_boundaries(comm,U_new);
             FV_detect(X_dim,Y_dim,Z_dim);
             //Ghost flags must be periodic images so that the blending
             //stencils near the domain boundary see the same data as their
             //periodic partners
-            if(!cfg.muscl_only) FV_Boundaries(comm,troubles);
+            if(!cfg.muscl_only) apply_fv_boundaries(comm,troubles);
             FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical
             //blended fluxes (exact conservation)
-            if(!cfg.muscl_only) FV_Boundaries(comm,theta);
+            if(!cfg.muscl_only) apply_fv_boundaries(comm,theta);
             #ifdef DEBUG_MASS
             if(t==0 && ader==0) Write(F_x,899);
             #endif
@@ -656,7 +726,7 @@ struct Hydro_ader{
         #endif
     }
 
-    void FV_Boundaries(CommHelper comm, FV_Solution U){
+    void apply_fv_boundaries(CommHelper comm, FV_Solution U){
         //Communications are done sequentially in different directions
         //to ensure that corners are properly communicated
         if(cfg.active[_x_])

@@ -107,6 +107,14 @@ void rotational_a_to_b(
     int pz = B.nz;
     int q = choose(dim, px, py, pz);
     int nader = B.n_ader;
+    //B_dim = d(A_dim2)/d(dim1) - d(A_dim1)/d(dim2) with (dim1,dim2) the cyclic
+    //transverse pair. Inactive derivative directions are skipped (their A
+    //arrays are degenerate size-1 views), matching the Python
+    //_init_B_from_vector_potential guards.
+    int dim1 = choose(dim ,_y_,_z_,_x_);
+    int dim2 = choose(dim1,_y_,_z_,_x_);
+    bool a1 = cfg.active[dim1];
+    bool a2 = cfg.active[dim2];
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         double d1a2=0;
@@ -114,24 +122,21 @@ void rotational_a_to_b(
         for(int ll=0; ll<q; ll++){
             if(dim==0){
                 //Bx = dyAz - dzAy
-                d1a2 += A2.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
-                d2a1 += A1.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
+                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
+                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
             }
             else if(dim==1){
                 //By = dzAx - dxAz
-                d1a2 += A2.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
-                d2a1 += A1.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
+                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
+                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
             }
             else if(dim==2){
                 //Bz = dxAy - dyAx
-                d1a2 += A2.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
-                d2a1 += A1.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
-            }
-            else{
-                ///////Error
+                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
+                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
             }
         }
-        B.Vector(t_id,0,k,j,i,kk,jj,ii) = d1a2/d1 - d2a1/d2;
+        B.Vector(t_id,0,k,j,i,kk,jj,ii) = (a1 ? d1a2/d1 : 0.0) - (a2 ? d2a1/d2 : 0.0);
         }
     });
 }
@@ -383,7 +388,15 @@ void update_B_solution(
     int pz = B.nz;
     int nader = E_1.n_ader;
     int q = choose(dim, px, py, pz);
-    //cout<<dim<<" "<<q<<endl;
+    //dB_dim/dt = dE_dim1/d(dim2) - dE_dim2/d(dim1) with (dim1,dim2) the cyclic
+    //transverse pair. An E family only exists when both of its transverse
+    //directions are active (Python: Edims = {z} for 2D), so each term is
+    //guarded by its family's validity (in 2D only Ez survives: Bx picks up
+    //-dEz/dy and By picks up +dEz/dx).
+    int dim1 = choose(dim ,_y_,_z_,_x_);
+    int dim2 = choose(dim1,_y_,_z_,_x_);
+    bool e1 = cfg.active[dim2] && cfg.active[dim];   //E_dim1 family valid
+    bool e2 = cfg.active[dim1] && cfg.active[dim];   //E_dim2 family valid
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double dBdt;
         double dB=0;
@@ -393,24 +406,36 @@ void update_B_solution(
             for(int ll=0; ll<q; ll++){
                 if(dim==0){
                     //dBxdt = dEydz - dEzdy
-                    E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii);
-                    dBdt += E*dfp_to_sp(kk,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii);
-                    dBdt -= E*dfp_to_sp(jj,ll)/d1;
+                    if(e1){
+                        E = E_1.Vector(t_id,0,k,j,i,ll,jj,ii);
+                        dBdt += E*dfp_to_sp(kk,ll)/d2;
+                    }
+                    if(e2){
+                        E = E_2.Vector(t_id,0,k,j,i,kk,ll,ii);
+                        dBdt -= E*dfp_to_sp(jj,ll)/d1;
+                    }
                 }
                 else if(dim==1){
                     //dBydt = dEzdx - dExdz
-                    E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll);
-                    dBdt += E*dfp_to_sp(ii,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii);
-                    dBdt -= E*dfp_to_sp(kk,ll)/d1; 
+                    if(e1){
+                        E = E_1.Vector(t_id,0,k,j,i,kk,jj,ll);
+                        dBdt += E*dfp_to_sp(ii,ll)/d2;
+                    }
+                    if(e2){
+                        E = E_2.Vector(t_id,0,k,j,i,ll,jj,ii);
+                        dBdt -= E*dfp_to_sp(kk,ll)/d1;
+                    }
                 }
                 else{
                     //dBzdt = dExdy - dEydx
-                    E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii);
-                    dBdt += E*dfp_to_sp(jj,ll)/d2;
-                    E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll);
-                    dBdt -= E*dfp_to_sp(ii,ll)/d1;
+                    if(e1){
+                        E = E_1.Vector(t_id,0,k,j,i,kk,ll,ii);
+                        dBdt += E*dfp_to_sp(jj,ll)/d2;
+                    }
+                    if(e2){
+                        E = E_2.Vector(t_id,0,k,j,i,kk,jj,ll);
+                        dBdt -= E*dfp_to_sp(ii,ll)/d1;
+                    }
                 }
             }
             dB += dBdt*w(t_id)*dt;
@@ -434,6 +459,9 @@ void compute_B2_cv(
     int py = B2.ny;
     int pz = B2.nz;
     int q = B_x.nx;
+    //Inactive z: no face-staggered Bz and no z quadrature (the sp_to_cv factor
+    //along z degenerates to the identity), mirroring the Python compute_B2.
+    bool az = cfg.active[_z_];
     //cout<<q<<":"<<Nx<<","<<Ny<<","<<Nz<<","<<px<<","<<py<<","<<pz<<endl;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int ll;
@@ -444,18 +472,25 @@ void compute_B2_cv(
         double bz=0;
         for(nn=0; nn<pz; nn++)
             for(mm=0; mm<py; mm++)
-                for(ll=0; ll<q; ll++)
-                    bx += B_x.Vector(0,0,k,j,i,nn,mm,ll)*sp_to_cv(kk,nn)*sp_to_cv(jj,mm)*fp_to_cv(ii,ll);
+                for(ll=0; ll<q; ll++){
+                    double s = B_x.Vector(0,0,k,j,i,nn,mm,ll)*sp_to_cv(jj,mm)*fp_to_cv(ii,ll);
+                    if(az) s *= sp_to_cv(kk,nn);
+                    bx += s;
+                }
 
         for(nn=0; nn<pz; nn++)
             for(mm=0; mm<q; mm++)
-                for(ll=0; ll<px; ll++)
-                    by += B_y.Vector(0,0,k,j,i,nn,mm,ll)*sp_to_cv(kk,nn)*fp_to_cv(jj,mm)*sp_to_cv(ii,ll);     
+                for(ll=0; ll<px; ll++){
+                    double s = B_y.Vector(0,0,k,j,i,nn,mm,ll)*fp_to_cv(jj,mm)*sp_to_cv(ii,ll);
+                    if(az) s *= sp_to_cv(kk,nn);
+                    by += s;
+                }
 
-        for(nn=0; nn<q; nn++)
-            for(mm=0; mm<py; mm++)
-                for(ll=0; ll<px; ll++)
-                    bz += B_z.Vector(0,0,k,j,i,nn,mm,ll)*fp_to_cv(kk,nn)*sp_to_cv(jj,mm)*sp_to_cv(ii,ll);
+        if(az)
+            for(nn=0; nn<q; nn++)
+                for(mm=0; mm<py; mm++)
+                    for(ll=0; ll<px; ll++)
+                        bz += B_z.Vector(0,0,k,j,i,nn,mm,ll)*fp_to_cv(kk,nn)*sp_to_cv(jj,mm)*sp_to_cv(ii,ll);
         
         B2.Vector(0,0,k,j,i,kk,jj,ii) = bx;
         B2.Vector(0,1,k,j,i,kk,jj,ii) = by;
@@ -481,6 +516,11 @@ void compute_B_cv_from_cf(
     int qx = px;
     int qy = py;
     int qz = pz;
+    //Inactive directions carry no face-staggered field (2D: Bz lives as a
+    //cell-centered conserved variable instead); their row is left at 0 and
+    //consumers (mhd_set_candidate_B, mhd_floor_cv) fall back to the state's
+    //own row.
+    bool az = cfg.active[_z_];
     GHOST_LOCALS;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int ll;
@@ -490,7 +530,7 @@ void compute_B_cv_from_cf(
         for(ll=0; ll<q; ll++){
             bx += B_x.Vector(0,0,k,j,i,kk,jj,ll)*fp_to_cv(ii,ll);
             by += B_y.Vector(0,0,k,j,i,kk,ll,ii)*fp_to_cv(jj,ll); 
-            bz += B_z.Vector(0,0,k,j,i,ll,jj,ii)*fp_to_cv(kk,ll);  
+            if(az) bz += B_z.Vector(0,0,k,j,i,ll,jj,ii)*fp_to_cv(kk,ll);
         }        
         B.Vector(0,K,J,I) = bx;
         B.Vector(1,K,J,I) = by;
@@ -629,6 +669,10 @@ void edge_integral(
     int Ni = E.Nx;
     int Nj = E.Ny;
     int Nk = E.Nz;
+    //When the edge direction itself is inactive (2D: the Ez family, edges
+    //reduce to x-y corner points) there is nothing to integrate along the
+    //edge: take the point value with weight 1.
+    bool adim = cfg.active[dim];
     GHOST_LOCALS;
     //cout<<dim<<" "<<Nx<<" "<<Ny<<" "<<Nz<<" "<<px<<py<<pz<<endl;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
@@ -640,9 +684,7 @@ void edge_integral(
         for(int ll=0; ll<q; ll++){
             indices_n(nid,kk,jj,ii,ll,dim);
             s = E_ep.Vector(t_id,0,k,j,i,NODE);
-            #ifdef _2D_
-            s *= sp_to_cv(id,ll);
-            #endif
+            if(adim) s *= sp_to_cv(id,ll);
             e += s;
         }
         //We iterate over N+1 elements
@@ -682,6 +724,9 @@ void fv_update_B_solution(
     int Nk = B_new.Nz;
     int dim1 = choose(dim ,_y_,_z_,_x_);
     int dim2 = choose(dim1,_y_,_z_,_x_);
+    //Same E-family validity guards as update_B_solution (2D: only Ez exists)
+    bool e1 = cfg.active[dim2] && cfg.active[dim];   //E_dim1 family valid
+    bool e2 = cfg.active[dim1] && cfg.active[dim];   //E_dim2 family valid
     GHOST_LOCALS;
     //cout<<dim<<" "<<q<<endl;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
@@ -699,16 +744,18 @@ void fv_update_B_solution(
             //dBxdt = dEydz - dEzdy
             //dBydt = dEzdx - dExdz
             //dBzdt = dExdy - dEydx
-            ep = E_1.Vector(0,K+(dim2==_z_),J+(dim2==_y_),I+(dim2==_x_));
-            id = choose(dim2, I, J, K);
-            h = (faces_2(id+1)-faces_2(id));
-            dBdt = (ep-E_1.Vector(0,K,J,I))/h;
-
-            ep = E_2.Vector(0,K+(dim1==_z_),J+(dim1==_y_),I+(dim1==_x_));
-            id = choose(dim1, I, J, K);
-            h = (faces_1(id+1)-faces_1(id));
-            dBdt-= (ep-E_2.Vector(0,K,J,I))/h;
-
+            if(e1){
+                ep = E_1.Vector(0,K+(dim2==_z_),J+(dim2==_y_),I+(dim2==_x_));
+                id = choose(dim2, I, J, K);
+                h = (faces_2(id+1)-faces_2(id));
+                dBdt = (ep-E_1.Vector(0,K,J,I))/h;
+            }
+            if(e2){
+                ep = E_2.Vector(0,K+(dim1==_z_),J+(dim1==_y_),I+(dim1==_x_));
+                id = choose(dim1, I, J, K);
+                h = (faces_1(id+1)-faces_1(id));
+                dBdt-= (ep-E_2.Vector(0,K,J,I))/h;
+            }
             b_new = b_old - dBdt*w(t_id)*dt;
             //Need if condition to only allow left threads to write at 
             //element interfaces

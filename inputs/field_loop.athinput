@@ -1,0 +1,29 @@
+# Field-loop advection (Gardiner & Stone 2005), true 2D in the x-y plane.
+# A weak magnetic loop (beta ~ 2e6) is advected diagonally; the loop must
+# stay circular and div(B) must remain at round-off.
+<job>
+system   = mhd
+fallback = false
+
+<mesh>
+p    = 3
+nx1  = 32
+nx2  = 32
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x3len = 1.0
+
+<time>
+tlim       = 0.5
+cfl        = 0.4
+integrator = rk3
+
+<hydro>
+gamma = 1.6666666666667
+
+<problem>
+problem = field_loop
+
+<output>
+dt = 0.1

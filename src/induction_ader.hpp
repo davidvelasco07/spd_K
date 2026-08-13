@@ -1,18 +1,17 @@
 using namespace std;
 
-struct Induction_ader{
+struct Induction_ader : public PhysicsModule{
 
-    int n_output;
-    int n_step;
     int n_ader;
     int nvar;
-    int n_stages;     //RK stages (1 for ADER)
-    double rk_a[3];   //per-stage convex weights of the SSP combination
-
-    double t;
-    double dt;
-    double Dt;
     double nu;
+
+    //Stored so the task methods (which receive only Driver*) can reach the
+    //comm handle and per-direction geometry.
+    CommHelper comm_;
+    dimension Xdim_;
+    dimension Ydim_;
+    dimension Zdim_;
 
     Vector xt;   //temporal nodes/weights: GL (p+1) for ADER, {1} for RK stages
     Vector wt;
@@ -102,7 +101,7 @@ struct Induction_ader{
         double* x_sp,
         double* x_fp,
         double _nu
-    ){
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim) {
         if(cfg.ndim != 3){
             if(Master)
                 cout<<"ERROR: the induction solver currently requires 3 active dimensions"<<endl;
@@ -119,7 +118,6 @@ struct Induction_ader{
         //SSP-RK stage is a single forward-Euler slice (weight 1)
         if(cfg.integrator==_integrator_rk_){
             n_ader = 1;
-            n_stages = ssp_rk_coefficients(cfg.rk_order,rk_a);
             Kokkos::resize(xt,1);
             Kokkos::resize(wt,1);
             Kokkos::deep_copy(xt,0.0);
@@ -127,7 +125,6 @@ struct Induction_ader{
         }
         else{
             n_ader = p+1;
-            n_stages = 1;
             Kokkos::resize(xt,p+1);
             Kokkos::resize(wt,p+1);
             gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
@@ -267,96 +264,79 @@ struct Induction_ader{
             cout<<"dx = "<<X_dim.h<<" dt_nu = "<<Dt<<" dt_v = "<<dt<<endl;
         Dt = min(dt,Dt);
         cout<<Dt<<endl;
-        Write_outputs();
+        if(cfg.outputs)
+            Write_outputs();
     }
 
-    void time_evolution(
-        CommHelper comm,
-        double t_end,
-        double dt_output,
-        dimension X_dim,
-        dimension Y_dim,
-        dimension Z_dim){
+    /////////////////////////////////////////////////////////////////////
+    // Tasklist interface (PhysicsModule). Per-stage chain: CopyCons ->
+    // Advance -> Combine (see hydro_ader.hpp). Induction advances the three
+    // face-staggered B fields via constrained transport; there is no
+    // cons->prim stage (dt is a fixed kinematic CFL, B2_cv only at output).
+    /////////////////////////////////////////////////////////////////////
+    void AssembleTasks(Driver* d) override {
+        TaskID none(0);
+        auto bti = d->tl_map["before_timeintegrator"];
+        auto stg = d->tl_map["stagen"];
+        if(cfg.integrator==_integrator_rk_)
+            bti->AddTask(&Induction_ader::TaskSaveState, this, none);
+        TaskID copy = stg->AddTask(&Induction_ader::TaskCopyCons, this, none);
+        TaskID adv  = stg->AddTask(&Induction_ader::TaskAdvance,  this, copy);
+        stg->AddTask(&Induction_ader::TaskCombine, this, adv);
+    }
 
-        dt=Dt;
-        double t_output=dt_output;
+    TaskStatus TaskSaveState(Driver* d, int stage){
+        Kokkos::deep_copy(B0x_fp_x.Vector,Bx_fp_x.Vector);
+        Kokkos::deep_copy(B0y_fp_y.Vector,By_fp_y.Vector);
+        Kokkos::deep_copy(B0z_fp_z.Vector,Bz_fp_z.Vector);
+        return TaskStatus::complete;
+    }
 
-        while(t<t_end){
-            if(cfg.integrator==_integrator_rk_)
-                RK_step(comm,X_dim,Y_dim,Z_dim);
-            else
-                ADER_step(comm,X_dim,Y_dim,Z_dim);
-            t+=dt;
-            n_step++;
-            dt=Dt;
-            //Outputs
-            if(Master)cout<<".";
-            if(t>=t_output){
-                t_output=t+dt_output;
-                Write_outputs();
-            }
-            if(t+dt>t_output){
-                dt=t_output-t;
-            }
+    TaskStatus TaskCopyCons(Driver* d, int stage){
+        copy_ader(Bx_fp_x,Bx_ader_fp_x);
+        copy_ader(By_fp_y,By_ader_fp_y);
+        copy_ader(Bz_fp_z,Bz_ader_fp_z);
+        return TaskStatus::complete;
+    }
+
+    TaskStatus TaskAdvance(Driver* d, int stage){
+        for(int ader=0; ader<n_ader; ader++){
+            Solve_E(comm_,Xdim_,Ydim_,Zdim_);
+            if(ader<n_ader-1)
+                Update_prediction(Xdim_.h,Ydim_.h,Zdim_.h);
         }
-        cout<<endl;
+        if(cfg.fallback)
+            FV_Update_solution(comm_,Xdim_,Ydim_,Zdim_);
+        else
+            Update_solution(Xdim_.h,Ydim_.h,Zdim_.h);
+        return TaskStatus::complete;
     }
+
+    TaskStatus TaskCombine(Driver* d, int stage){
+        if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0){
+            combine_solution(Bx_fp_x,B0x_fp_x,d->rk_a[stage-1]);
+            combine_solution(By_fp_y,B0y_fp_y,d->rk_a[stage-1]);
+            combine_solution(Bz_fp_z,B0z_fp_z,d->rk_a[stage-1]);
+        }
+        return TaskStatus::complete;
+    }
+
+    double ComputeDt() override { return Dt; }
+
+    void WriteOutputs() override { Write_outputs(); }
 
     //One evaluation of the edge-E spatial operator on the n_ader slices:
     //electric field at edge points, halo exchange and Riemann solve
     //(plus Ohmic terms when enabled)
     void Solve_E(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
         ElectricField(X_dim,Y_dim,Z_dim);
-        Boundaries(comm);
+        apply_boundaries(comm);
         Riemann_Solver();
         #ifdef OHMIC_DIFFUSION
         Ohmic_Diffusion(X_dim.h,Y_dim.h,Z_dim.h);
-        Boundaries(comm);
+        apply_boundaries(comm);
         Ohmic_Riemann_Solver();
         #endif
-    }
-
-    void ADER_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
-        ////Initialize ADER time slices
-        copy_ader(Bx_fp_x,Bx_ader_fp_x);
-        copy_ader(By_fp_y,By_ader_fp_y);
-        copy_ader(Bz_fp_z,Bz_ader_fp_z);
-
-        //Picard iteration
-        for(int ader=0;ader<n_ader;ader++){
-            Solve_E(comm,X_dim,Y_dim,Z_dim);
-            if(ader<n_ader-1)
-                Update_prediction(X_dim.h,Y_dim.h,Z_dim.h);
-        }
-        if(cfg.fallback)
-            FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
-        else
-            Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-    }
-
-    //SSP-RK step (Shu-Osher form), see Hydro_ader::RK_step: forward-Euler
-    //stages followed by convex combinations with the step-start face fields.
-    //The combination acts on the face-staggered representation, which is
-    //linear in B, so the divergence-free constraint is preserved.
-    void RK_step(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
-        Kokkos::deep_copy(B0x_fp_x.Vector,Bx_fp_x.Vector);
-        Kokkos::deep_copy(B0y_fp_y.Vector,By_fp_y.Vector);
-        Kokkos::deep_copy(B0z_fp_z.Vector,Bz_fp_z.Vector);
-        for(int s=0;s<n_stages;s++){
-            copy_ader(Bx_fp_x,Bx_ader_fp_x);
-            copy_ader(By_fp_y,By_ader_fp_y);
-            copy_ader(Bz_fp_z,Bz_ader_fp_z);
-            Solve_E(comm,X_dim,Y_dim,Z_dim);
-            if(cfg.fallback)
-                FV_Update_solution(comm,X_dim,Y_dim,Z_dim);
-            else
-                Update_solution(X_dim.h,Y_dim.h,Z_dim.h);
-            if(rk_a[s]>0){
-                combine_solution(Bx_fp_x,B0x_fp_x,rk_a[s]);
-                combine_solution(By_fp_y,B0y_fp_y,rk_a[s]);
-                combine_solution(Bz_fp_z,B0z_fp_z,rk_a[s]);
-            }
-        }
     }
 
     void ElectricField(dimension X_dim, dimension Y_dim, dimension Z_dim){
@@ -395,7 +375,7 @@ struct Induction_ader{
             _x_);
     }
 
-    void Boundaries(CommHelper comm){
+    void apply_boundaries(CommHelper comm){
         // Remember: The arrays for Ex,Ey,Ez at edge-points (ep)
         // contain the variables E3,B1,B2,v1,v2 
         // that need to be communicated to solve
@@ -513,7 +493,7 @@ struct Induction_ader{
         for(int ader=0;ader<n_ader;ader++){
             Integrate_edges(ader);
             FV_update_solution(ader, X_dim.fv_faces, Y_dim.fv_faces, Z_dim.fv_faces, 1);
-            FV_Boundaries(comm);
+            apply_fv_boundaries(comm);
             detect_troubles(
                 B_new,
                 B_old,
@@ -590,7 +570,7 @@ struct Induction_ader{
         #endif
     }
 
-    void FV_Boundaries(CommHelper comm){
+    void apply_fv_boundaries(CommHelper comm){
         //Communications are done sequentially in different directions
         //to ensure that corners zare properly communicated
         //B_old contains the control volume averages for Bx,By,Bz

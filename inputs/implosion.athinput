@@ -1,0 +1,34 @@
+# 2D Liska-Wendroff implosion (Liska & Wendroff 2003, sec 4.7):
+# low-density, low-pressure corner triangle below x + y = 0.15 in a
+# [0,0.3]^2 box with reflective walls. The shock implodes onto the origin
+# and a jet forms along the diagonal; preserving the x<->y symmetry of the
+# jet to t = 2.5 is the hard part of this test.
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 32
+nx3   = 1
+x1len = 0.3
+x2len = 0.3
+x1_bc = reflective
+x2_bc = reflective
+
+<time>
+tlim = 2.5
+cfl  = 0.8
+
+<output>
+dt   = 0.5
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = implosion
+# radius = 0.15  # position of the diagonal x + y = radius
+# d0 = 1.0       # outer density      d1 = 0.125  # corner density
+# p0 = 1.0       # outer pressure     p1 = 0.14   # corner pressure

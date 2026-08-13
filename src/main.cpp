@@ -5,19 +5,67 @@
 #include <regex>
 
 int bc_id(const string &name){
-    if(name == "periodic") return _periodic_;
-    if(name == "gradfree") return _gradfree_;
+    if(name == "periodic")   return _periodic_;
+    if(name == "gradfree")   return _gradfree_;
+    if(name == "reflective") return _reflective_;
     cout<<"ERROR: unknown boundary type '"<<name<<"'"<<endl;
     exit(1);
 }
 
 int problem_id(const string &name){
-    if(name == "sine_wave")       return _ic_sine_wave_;
-    if(name == "sedov")           return _ic_sedov_;
-    if(name == "spherical_blast") return _ic_spherical_blast_;
-    if(name == "kelvin_helmholtz")return _ic_kelvin_helmholtz_;
+    if(name == "sine_wave")        return _ic_sine_wave_;
+    if(name == "sedov")            return _ic_sedov_;
+    if(name == "spherical_blast")  return _ic_spherical_blast_;
+    if(name == "square")           return _ic_square_;
+    if(name == "sod_shock_tube")   return _ic_sod_;
+    if(name == "shu_osher")        return _ic_shu_osher_;
+    if(name == "kelvin_helmholtz") return _ic_kelvin_helmholtz_;
+    if(name == "implosion")        return _ic_implosion_;
+    if(name == "rti")              return _ic_rti_;
+    if(name == "orszag_tang")      return _ic_orszag_tang_;
+    if(name == "field_loop")       return _ic_field_loop_;
+    if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
+}
+
+//Per-problem defaults for the <problem> block; any field can be overridden
+//from the input file (e.g. problem/amp=0.2). Fields a problem does not use
+//are ignored by its initial_condition() branch.
+void problem_defaults(int problem, ProblemParams &pp){
+    switch(problem){
+        case _ic_sine_wave_:        //amp, v1..v3 (advection velocity), p0
+            pp = {0.125, 1.0,1.0,0.0, 1.0,0.0, 1.0,0.0, 0.0,0.0, 0};
+            break;
+        case _ic_square_:           //d0 (background), d1 (top-hat), v1..v3, p0
+            pp = {0.0, 1.0,1.0,0.0, 1.0,2.0, 1.0,0.0, 0.25,0.0, 0};
+            break;
+        case _ic_sod_:              //d0/p0 left, d1/p1 right, radius = interface
+            pp = {0.0, 0.0,0.0,0.0, 1.0,0.125, 1.0,0.1, 0.5,0.0, 0};
+            break;
+        case _ic_shu_osher_:        //standard values are hardcoded; amp = sine amplitude
+            pp = {0.2, 0.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.0,0.0, 0};
+            break;
+        case _ic_kelvin_helmholtz_: //d0/d1 layers, v1 shear, amp+sigma perturbation, p0
+            pp = {0.1, 0.5,0.0,0.0, 1.0,2.0, 2.5,0.0, 0.0,0.05/sqrt(2.0), 0};
+            break;
+        case _ic_implosion_:        //d0/p0 outside, d1/p1 corner, radius = diagonal
+            pp = {0.0, 0.0,0.0,0.0, 1.0,0.125, 1.0,0.14, 0.15,0.0, 0};
+            break;
+        case _ic_sedov_:            //radius of the energy deposit
+            pp = {0.0, 0.0,0.0,0.0, 1.0,0.0, 0.0,0.0, 0.1,0.0, 0};
+            break;
+        case _ic_spherical_blast_:  //d0, p0 inside, p1 outside, radius
+            pp = {0.0, 0.0,0.0,0.0, 1.0,0.0, 10.0,0.1, 0.1,0.0, 0};
+            break;
+        case _ic_rti_:              //d0 heavy (lower), d1 light (upper), p0 ref,
+                                    //radius = interface yc, amp = perturbation
+            pp = {0.025, 0.0,0.0,0.0, 2.0,1.0, 1.0,0.0, 0.5,0.0, 0};
+            break;
+        case _ic_user_:             //free-form: defaults for the sample Gaussian pulse
+            pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.5,0.1, 0};
+            break;
+    }
 }
 
 //"ader" or "rkN" (N = 1, 2, 3); sets cfg.integrator and cfg.rk_order
@@ -100,6 +148,12 @@ int main(int argc, char** argv){
 
         cfg.cfl      = pin.GetOrAddReal("time","cfl",0.8);
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
+        //Constant gravitational acceleration (source term); default 0 leaves
+        //the homogeneous Euler equations untouched. Set e.g. hydro/g2 for a
+        //vertical field (Rayleigh-Taylor).
+        cfg.g[_x_]   = pin.GetOrAddReal("hydro","g1",0.0);
+        cfg.g[_y_]   = pin.GetOrAddReal("hydro","g2",0.0);
+        cfg.g[_z_]   = pin.GetOrAddReal("hydro","g3",0.0);
         cfg.fallback = pin.GetOrAddBoolean("job","fallback",true);
         cfg.nad_tolerance = pin.GetOrAddReal("fallback","tolerance",1e-5);
         cfg.nad_delta = pin.GetOrAddString("fallback","NAD","relative")=="delta";
@@ -117,7 +171,30 @@ int main(int argc, char** argv){
             cout<<"ERROR: unknown scheme '"<<scheme<<"' (expected sd or muscl)"<<endl;
             exit(1);
         }
+        cfg.max_revs  = pin.GetOrAddInteger("fallback","max_revs",3);
+        cfg.pad_min_rho = pin.GetOrAddReal("fallback","min_rho",1e-10);
+        cfg.pad_min_P   = pin.GetOrAddReal("fallback","min_P",1e-10);
+        cfg.floor_cons  = pin.GetOrAddString("hydro","floors","ramses")=="athenak";
+        cfg.dfloor      = pin.GetOrAddReal("hydro","dfloor",1e-10);
+        cfg.pfloor      = pin.GetOrAddReal("hydro","pfloor",-1.0);
         cfg.problem  = problem_id(pin.GetOrAddString("problem","problem","sine_wave"));
+        problem_defaults(cfg.problem, cfg.pp);
+        cfg.pp.amp    = pin.GetOrAddReal("problem","amp",cfg.pp.amp);
+        cfg.pp.v1     = pin.GetOrAddReal("problem","v1",cfg.pp.v1);
+        cfg.pp.v2     = pin.GetOrAddReal("problem","v2",cfg.pp.v2);
+        cfg.pp.v3     = pin.GetOrAddReal("problem","v3",cfg.pp.v3);
+        cfg.pp.d0     = pin.GetOrAddReal("problem","d0",cfg.pp.d0);
+        cfg.pp.d1     = pin.GetOrAddReal("problem","d1",cfg.pp.d1);
+        cfg.pp.p0     = pin.GetOrAddReal("problem","p0",cfg.pp.p0);
+        cfg.pp.p1     = pin.GetOrAddReal("problem","p1",cfg.pp.p1);
+        cfg.pp.radius = pin.GetOrAddReal("problem","radius",cfg.pp.radius);
+        cfg.pp.sigma  = pin.GetOrAddReal("problem","sigma",cfg.pp.sigma);
+        cfg.pp.dir    = pin.GetOrAddInteger("problem","dir",cfg.pp.dir);
+        //Domain center in physical coordinates, so ICs (e.g. spherical_blast)
+        //stay centered in rectangular boxes (x[ilj]len != 1).
+        cfg.pp.cx     = 0.5*boxlen_x;
+        cfg.pp.cy     = 0.5*boxlen_y;
+        cfg.pp.cz     = 0.5*boxlen_z;
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
@@ -131,7 +208,12 @@ int main(int argc, char** argv){
         else cfg.amr_criterion = 0;
 
         double tlim      = pin.GetOrAddReal("time","tlim",0.1);
-        double dt_output = pin.GetOrAddReal("output","dt",tlim);
+        //Outputs are opt-in (athenak-style): files are only written when the
+        //input file (or an override) provides <output> dt with a positive
+        //value. Perf runs can disable them with output/dt=-1.
+        cfg.outputs = pin.DoesParameterExist("output","dt")
+                      && pin.GetReal("output","dt") > 0.0;
+        double dt_output = cfg.outputs ? pin.GetReal("output","dt") : tlim;
         select_integrator(pin.GetOrAddString("time","integrator","ader"));
         string system_name = pin.GetOrAddString("job","system","hydro");
 
@@ -176,10 +258,8 @@ int main(int argc, char** argv){
                 if(Master) cout<<"ERROR: meshblocks/AMR are not yet supported with MPI"<<endl;
                 exit(1);
             }
-            if(system_name!="hydro"){
-                if(Master) cout<<"ERROR: meshblocks/AMR are only supported for the hydro system"<<endl;
-                exit(1);
-            }
+            //Meshblocks are allowed for any system; MHD mesh comes later.
+            //For now only Hydro_mesh is wired below.
             if(cfg.amr_max_level>0 && cfg.integrator==_integrator_ader_){
                 if(Master) cout<<"ERROR: ADER is not supported with mixed-level AMR (use rk2/rk3)"<<endl;
                 exit(1);
@@ -191,19 +271,18 @@ int main(int argc, char** argv){
                 <<", p = "<<p<<", N = ("<<Nx<<","<<Ny<<","<<Nz<<")"
                 <<", integrator = "
                 <<(cfg.integrator==_integrator_ader_ ? "ader" : "rk"+to_string(cfg.rk_order))
+                <<", outputs = "<<(cfg.outputs ? "on" : "off")
                 <<endl;
-            //Echo the effective parameters for provenance
-            std::ofstream dump(output_folder()+"parameters.txt");
-            pin.Dump(dump);
-            //Binary dumps inherit the Kokkos view layout, which differs
-            //between CUDA (LayoutLeft) and host (LayoutRight) builds, so
-            //record it: otherwise post-processing has to guess and silently
-            //scrambles the field when it guesses wrong.
-            dump<<"<build>"<<endl;
-            dump<<"layout = "
-                <<(std::is_same<Layout,Kokkos::LayoutLeft>::value
-                   ? "LayoutLeft" : "LayoutRight")<<endl;
-            dump<<endl;
+            if(cfg.outputs || use_mesh){
+                //Echo the effective parameters for provenance
+                std::ofstream dump(output_folder()+"parameters.txt");
+                pin.Dump(dump);
+                dump<<"<build>"<<endl;
+                dump<<"layout = "
+                    <<(std::is_same<Layout,Kokkos::LayoutLeft>::value
+                       ? "LayoutLeft" : "LayoutRight")<<endl;
+                dump<<endl;
+            }
         }
 
         double *x = malloc_host<double>(p);
@@ -221,17 +300,27 @@ int main(int argc, char** argv){
         dimension X_dim(_x_,NX,Nx,ax ? p:0,comm.x*Nx,boxlen_x,x_fp,ax);
         dimension Y_dim(_y_,NY,Ny,ay ? p:0,comm.y*Ny,boxlen_y,x_fp,ay);
         dimension Z_dim(_z_,NZ,Nz,az ? p:0,comm.z*Nz,boxlen_z,x_fp,az);
-        Write_dimensions(X_dim,Y_dim,Z_dim);
+        if(cfg.outputs)
+            Write_dimensions(X_dim,Y_dim,Z_dim);
         Kokkos::Timer timer;
 
         if(system_name == "induction"){
             double eta = pin.GetOrAddReal("induction","nu",0.0025);
             Induction_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,eta);
-            system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+            Driver driver(&system);
+            driver.Execute(tlim,dt_output);
         }
         else if(system_name == "hydro"){
-            double nu   = pin.GetOrAddReal("hydro","nu",0.00001);
-            double beta = pin.GetOrAddReal("hydro","beta",-2./3*pin.GetReal("hydro","nu"));
+            //Viscosity is opt-in at runtime (athenak-style): set hydro/nu>0 in
+            //the input file to switch on the viscous terms; the default nu=0
+            //runs the inviscid Euler equations.
+            double nu   = pin.GetOrAddReal("hydro","nu",0.0);
+            double beta = pin.GetOrAddReal("hydro","beta",-2./3*nu);
+            if(Master && nu>0.0)
+                cout<<"viscosity on: nu = "<<nu<<", beta = "<<beta<<endl;
+            if(Master && (cfg.g[_x_]||cfg.g[_y_]||cfg.g[_z_]))
+                cout<<"gravity on: g = ("<<cfg.g[_x_]<<", "<<cfg.g[_y_]
+                    <<", "<<cfg.g[_z_]<<")"<<endl;
             if(use_mesh){
                 double lim[3][2] = {
                     {0.0, boxlen_x},
@@ -254,8 +343,18 @@ int main(int argc, char** argv){
             }
             else{
                 Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
-                system.time_evolution(comm,tlim,dt_output,X_dim,Y_dim,Z_dim);
+                Driver driver(&system);
+                driver.Execute(tlim,dt_output);
             }
+        }
+        else if(system_name == "mhd"){
+            if(use_mesh){
+                if(Master) cout<<"ERROR: meshblocks/AMR for MHD are not implemented yet"<<endl;
+                exit(1);
+            }
+            MHD_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);
+            Driver driver(&system);
+            driver.Execute(tlim,dt_output);
         }
         else{
             if(Master) cout<<"ERROR: unknown system '"<<system_name<<"'"<<endl;

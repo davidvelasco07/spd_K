@@ -145,15 +145,16 @@ class SD_Solution{
         nz = ( z  ?  Zdim.n_fp : Zdim.n_sp);
 
         Kokkos::resize(Vector,n_ader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        #ifdef KOKKOS_ENABLE_CUDA
-        Kokkos::resize(Vector_h,n_ader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        #endif
         //cout<<name<<":"<<n_ader<<","<<nvar<<","<<Nz<<","<<Ny<<","<<Nx<<","<<nz<<","<<ny<<","<<nx<<endl;
         label=name;
     }
 
+    //The host mirror is allocated lazily on the first copy(): only arrays that
+    //are actually written to disk pay the host-memory cost of a mirror
     void copy(){
         #ifdef KOKKOS_ENABLE_CUDA
+        if(Vector_h.size() != Vector.size())
+            Vector_h = Kokkos::create_mirror_view(Vector);
         Kokkos::deep_copy (Vector_h, Vector);
         #endif
     }
