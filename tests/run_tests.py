@@ -276,6 +276,22 @@ CONFIGS = {
         "golden_name": "mhd_ot_2d",
         "golden_rtol": 1e-6,
     },
+    "mhd_orszag_tang_true2d_mb": {
+        # 2x2 uniform multiblock OT: same-level exchange of face B, edge EMF,
+        # and the MOOD cascade must reproduce the single-block golden in the
+        # active region (ghosts may differ) with round-off divB.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=8", "meshblock/nx2=8",
+                      "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["mass_strict", "divb", "golden_active"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+        "golden_name": "mhd_ot_2d",
+        "golden_rtol": 1e-6,
+    },
     "mhd_field_loop_true2d": {
         # true 2D field-loop advection without the fallback: pure SD + Ez CT
         "input": "inputs/field_loop.athinput",
@@ -315,7 +331,7 @@ def n_from_field(field):
     return int(m.group(1)) if m else N
 
 
-def shape_for(n_cells, ndim):
+def shape_for(n_cells, ndim, nvar=6):
     """Element/point shape of the SD output arrays for a given ndim and N."""
     Ne = lambda active, nc: nc + 2 * NGH if active else 1
     np_ = lambda active: n if active else 1
@@ -323,12 +339,12 @@ def shape_for(n_cells, ndim):
     nx_c = n_cells if a[0] else 1
     ny_c = n_cells if a[1] else 1
     nz_c = n_cells if a[2] else 1
-    return (1, 6, Ne(a[2], nz_c), Ne(a[1], ny_c), Ne(a[0], nx_c),
+    return (1, nvar, Ne(a[2], nz_c), Ne(a[1], ny_c), Ne(a[0], nx_c),
             np_(a[2]), np_(a[1]), np_(a[0]))
 
 
-def shape(ndim):
-    return shape_for(N, ndim)
+def shape(ndim, nvar=6):
+    return shape_for(N, ndim, nvar)
 
 
 def load_rho_cells(outdir, cfg):
@@ -510,7 +526,8 @@ def check_golden(outdir, cfg, regen, active_only=False):
         return False, f"golden size mismatch {a.size} vs {b.size}"
     if active_only:
         nc = n_from_field(cfg["field"])
-        shp = shape_for(nc, cfg["ndim"])
+        nvar = cfg.get("nvar", 6)
+        shp = shape_for(nc, cfg["ndim"], nvar)
         sl = tuple(slice(NGH, -NGH) if s > 1 else slice(None) for s in shp[2:5])
         s = (slice(None),) * 2 + sl
         a, b = a.reshape(shp)[s], b.reshape(shp)[s]

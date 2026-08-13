@@ -273,6 +273,24 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //Shared face-B identity: left-neighbour value wins at each block interface.
+    void Sync_face_B_mhd(){
+        if constexpr (!is_mhd) return;
+        if(nblocks<=1 && forest.max_level()==0) return;
+        auto sync_one = [&](SD_Solution Block::*member, int dim){
+            if(!cfg.active[dim]) return;
+            for(int b=0; b<nblocks; b++){
+                int L,R,tL,tR;
+                neighbors_uniform(b,dim,L,R,tL,tR);
+                sync_shared_face_sd(blocks[b].*member, blocks[L].*member,
+                                    blocks[R].*member, tL, tR, dim);
+            }
+        };
+        sync_one(&Block::Bx_fp_x, _x_);
+        sync_one(&Block::By_fp_y, _y_);
+        if(cfg.active[_z_]) sync_one(&Block::Bz_fp_z, _z_);
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
         for(int b=0;b<nblocks;b++) blocks[b].mood_begin();
@@ -288,6 +306,7 @@ struct Mesh : public PhysicsModule {
             Exchange_fv_field(&Block::cascade);
         }
         for(int b=0;b<nblocks;b++) blocks[b].mood_commit();
+        Sync_face_B_mhd();
     }
 
     void Advance_hydro(){
@@ -313,7 +332,10 @@ struct Mesh : public PhysicsModule {
         Exchange_E_mhd();
         for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver();
         if(cfg.fallback) MHD_MOOD_update();
-        else for(int b=0;b<nblocks;b++) blocks[b].Update_CT();
+        else {
+            for(int b=0;b<nblocks;b++) blocks[b].Update_CT();
+            Sync_face_B_mhd();
+        }
     }
 
     /////////////////////////////////////////////////////////////////////
@@ -497,7 +519,18 @@ struct Mesh : public PhysicsModule {
     }
 
     void Write_outputs(){
-        if(Master) std::cout<<std::endl<<"OUTPUT "<<this->n_output<<std::endl;
+        if constexpr (is_mhd){
+            double divB = 0.0;
+            for(int b=0;b<nblocks;b++)
+                divB = std::max(divB,
+                    mhd_max_divB(blocks[b].Bx_fp_x, blocks[b].By_fp_y, blocks[b].Bz_fp_z,
+                                 blocks[b].dfp_to_sp, Xd[b].h, Yd[b].h, Zd[b].h));
+            if(Master)
+                std::cout<<std::endl<<"OUTPUT "<<this->n_output
+                         <<"  max|divB| = "<<divB<<std::endl;
+        } else if(Master){
+            std::cout<<std::endl<<"OUTPUT "<<this->n_output<<std::endl;
+        }
         if(Master){
             std::ofstream f(output_folder()+"mass.txt",
                             this->n_output==0 ? std::ios::trunc : std::ios::app);

@@ -80,6 +80,11 @@ extern void boundaries(CommHelper, FV_Boundaries, FV_Solution, int, int);
 //Block-to-block ghost exchange (multi-block, single rank)
 extern void block_boundary_sd(SD_Solution, SD_Solution, SD_Solution, int, int, int);
 extern void block_boundary_fv(FV_Solution, FV_Solution, FV_Solution, int, int, int);
+//Make the shared interface face of a face-staggered field identical on both
+//sides of a same-level block boundary (left's last-active right face is the
+//canonical value). No-op for _gradfree_ ends.
+extern void sync_shared_face_sd(SD_Solution U, SD_Solution UL, SD_Solution UR,
+                                int typeL, int typeR, int dim);
 
 //Finite Volume
 extern void face_integral_ref(SD_Solution, FV_Solution, Matrix, int, int);

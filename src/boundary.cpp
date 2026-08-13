@@ -160,6 +160,42 @@ void block_boundary_sd(
     });
 }
 
+//Face-staggered fields store the shared block-interface face in BOTH blocks'
+//active region (left's last-active right face == right's first-active left
+//face). Each block overwrites its left active face from the left neighbour so
+//a single left-to-right sweep makes the two copies bit-identical after
+//independent CT updates. Right-boundary / gradfree ends are left alone.
+void sync_shared_face_sd(
+    SD_Solution U,
+    SD_Solution UL,
+    SD_Solution UR,
+    int typeL,
+    int typeR,
+    int dim){
+    (void)UR; (void)typeR;
+    if(typeL == _gradfree_) return;
+    int Nx = dim==_x_ ? 1 : U.Nx;
+    int Ny = dim==_y_ ? 1 : U.Ny;
+    int Nz = dim==_z_ ? 1 : U.Nz;
+    int px = dim==_x_ ? 1 : U.nx;
+    int py = dim==_y_ ? 1 : U.ny;
+    int pz = dim==_z_ ? 1 : U.nz;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader = U.n_ader;
+    int nvar  = U.n_var;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int Nid[3];
+        int nid[3];
+        double v = value(UL,t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
+        indices(Nid,nid,k,j,i,kk,jj,ii,1,0,dim);
+        U.Vector(INDICES) = v;
+        }}
+    });
+}
+
 KOKKOS_INLINE_FUNCTION
 void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     //Returns the indeces according to the dimension
