@@ -28,3 +28,4 @@ bench_out/
 bench_*.jsonl
 bench_*.log
 run_*/
+.cache/
