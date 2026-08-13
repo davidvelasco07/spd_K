@@ -119,18 +119,23 @@ dimension block_dimension_x(const MeshBlock &b, int NB, int p, double *x_fp, boo
 dimension block_dimension_y(const MeshBlock &b, int NB, int p, double *x_fp, bool ay);
 dimension block_dimension_z(const MeshBlock &b, int NB, int p, double *x_fp, bool az);
 
-struct Hydro_ader;
 struct FV_Solution;
 
-void forest_exchange_fp(BlockForest&, std::vector<Hydro_ader>&, int dim);
-void correct_coarse_fine_flux(BlockForest&, std::vector<Hydro_ader>&, int dim);
-void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Hydro_ader>&, int dim);
 void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
                           int cface, int fface, int cx, int cy, int cz,
                           int Ncx, int Ncy, int Ncz, int nx, int ny, int nz);
-void forest_exchange_fv(BlockForest&, std::vector<Hydro_ader>&,
-                        FV_Solution Hydro_ader::*, int dim);
-void forest_exchange_fv_same(BlockForest&, std::vector<Hydro_ader>&,
-                             FV_Solution Hydro_ader::*, int dim);
+
+template<typename Block>
+void forest_exchange_fp(BlockForest&, std::vector<Block>&, int dim);
+template<typename Block>
+void correct_coarse_fine_flux(BlockForest&, std::vector<Block>&, int dim);
+template<typename Block>
+void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Block>&, int dim);
+template<typename Block>
+void forest_exchange_fv(BlockForest&, std::vector<Block>&,
+                        FV_Solution Block::*, int dim);
+template<typename Block>
+void forest_exchange_fv_same(BlockForest&, std::vector<Block>&,
+                             FV_Solution Block::*, int dim);
 
 #endif

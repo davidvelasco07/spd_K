@@ -23,8 +23,9 @@ using namespace H5;
 #include "induction_ader.hpp"
 #include "forest.hpp"
 #include "hydro_ader.hpp"
-#include "amr_criteria.hpp"
-#include "hydro_mesh.hpp"
 #include "mhd.hpp"
+#include "amr_criteria.hpp"
+#include "mesh.hpp"
+#include "hydro_mesh.hpp"
 
 using namespace std;

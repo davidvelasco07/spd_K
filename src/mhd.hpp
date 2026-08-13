@@ -162,6 +162,8 @@ struct MHD_ader : public PhysicsModule {
     // assembled E, overwritten in place at demoted edges)
     FV_Solution E0x,E1x,E2x, E0y,E1y,E2y, E0z,E1z,E2z;
 
+    bool standalone_ = true;
+
     MHD_ader(
         CommHelper comm,
         int p,
@@ -171,8 +173,9 @@ struct MHD_ader : public PhysicsModule {
         double* x,
         double* w,
         double* x_sp,
-        double* x_fp
-    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim) {
+        double* x_fp,
+        bool standalone=true //false when driven as one block of a mesh
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim), standalone_(standalone) {
         //Constrained transport needs at least the x-y plane: 3D runs evolve all
         //three face fields from three edge-EMF families; 2D (x-y, z inactive)
         //degenerates to the Ez family only, with Bz a cell-centered conserved
@@ -323,8 +326,10 @@ struct MHD_ader : public PhysicsModule {
         transform_sp_to_cv(W_sp,W_cv);
 
         Dt = mhd_compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
-        if(Master) cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
-        if(cfg.outputs) Write_outputs();
+        if(standalone_){
+            if(Master) cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
+            if(cfg.outputs) Write_outputs();
+        }
     }
 
     /////////////////////////////////////////////////////////////////////
@@ -367,16 +372,7 @@ struct MHD_ader : public PhysicsModule {
             //MUSCL / first-order (single-valued -> conservation and divB=0 hold)
             MOOD_update(comm_);
         } else {
-            //Fluid update (all 8 rows; the active-direction B rows are
-            //overwritten by B_to_U; in 2D the Bz row IS the fluid update)
-            update_solution(U_sp,U_ader_sp,F_ader_fp_x,F_ader_fp_y,F_ader_fp_z,
-                            dfp_to_sp,wt,Xdim_.h,Ydim_.h,Zdim_.h,dt);
-            //Constrained-transport update of the face B field (the invalid
-            //E-family terms are skipped inside; 2D keeps only the Ez terms)
-            update_B_solution(Bx_fp_x,Ey_ep_zx,Ez_ep_xy,dfp_to_sp,wt,Ydim_.h,Zdim_.h,dt,_x_);
-            update_B_solution(By_fp_y,Ez_ep_xy,Ex_ep_yz,dfp_to_sp,wt,Zdim_.h,Xdim_.h,dt,_y_);
-            if(cfg.active[_z_])
-                update_B_solution(Bz_fp_z,Ex_ep_yz,Ey_ep_zx,dfp_to_sp,wt,Xdim_.h,Ydim_.h,dt,_z_);
+            Update_CT();
         }
         return TaskStatus::complete;
     }
@@ -411,7 +407,9 @@ struct MHD_ader : public PhysicsModule {
     /////////////////////////////////////////////////////////////////////
     // Spatial operators
     /////////////////////////////////////////////////////////////////////
-    void Solve_faces(CommHelper comm){
+    //Split like Hydro_ader so a mesh driver can substitute block-to-block
+    //exchanges for the single-block halo (standalone_=false skips BC).
+    void Fluxes_pre(){
         bool az=cfg.active[_z_];
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_x,sp_to_fp,_x_);
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_y,sp_to_fp,_y_);
@@ -419,15 +417,29 @@ struct MHD_ader : public PhysicsModule {
         mhd_compute_fluxes(U_ader_fp_x,F_ader_fp_x,_x_);
         mhd_compute_fluxes(U_ader_fp_y,F_ader_fp_y,_y_);
         if(az) mhd_compute_fluxes(U_ader_fp_z,F_ader_fp_z,_z_);
+    }
+
+    void apply_fp_boundaries(CommHelper comm){
+        bool az=cfg.active[_z_];
         boundaries(comm,BC_fp_x,U_ader_fp_x);
         boundaries(comm,BC_fp_y,U_ader_fp_y);
         if(az) boundaries(comm,BC_fp_z,U_ader_fp_z);
+    }
+
+    void Riemann_Solver(){
+        bool az=cfg.active[_z_];
         mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_);
         mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_);
         if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_);
     }
 
-    void Solve_E(CommHelper comm){
+    void Solve_faces(CommHelper comm){
+        Fluxes_pre();
+        if(standalone_) apply_fp_boundaries(comm);
+        Riemann_Solver();
+    }
+
+    void Compute_E(){
         bool az=cfg.active[_z_];
         //Edge EMF from the face B field + fluid velocity (from W_sp). In 2D
         //only the Ez family exists (edges reduce to x-y corner points); the
@@ -437,7 +449,10 @@ struct MHD_ader : public PhysicsModule {
             mhd_compute_E(Ey_ep_zx,W_sp,Bz_fp_z,Bx_fp_x,U_sp,sp_to_fp,_y_);
             mhd_compute_E(Ex_ep_yz,W_sp,By_fp_y,Bz_fp_z,U_sp,sp_to_fp,_x_);
         }
-        apply_E_boundaries(comm);
+    }
+
+    void E_Riemann_Solver(){
+        bool az=cfg.active[_z_];
         //Edge Riemann (LLF-E); v_index 3/4 per the induction/Python convention
         if(az) mhd_E_riemann_solver(Ey_ep_zx,_x_,4);
         mhd_E_riemann_solver(Ez_ep_xy,_x_,3);
@@ -447,6 +462,12 @@ struct MHD_ader : public PhysicsModule {
             mhd_E_riemann_solver(Ex_ep_yz,_z_,4);
             mhd_E_riemann_solver(Ey_ep_zx,_z_,3);
         }
+    }
+
+    void Solve_E(CommHelper comm){
+        Compute_E();
+        if(standalone_) apply_E_boundaries(comm);
+        E_Riemann_Solver();
     }
 
     void apply_E_boundaries(CommHelper comm){
@@ -459,6 +480,16 @@ struct MHD_ader : public PhysicsModule {
             boundaries(comm,BC_Ex_ep_z,Ex_ep_yz);
             boundaries(comm,BC_Ey_ep_z,Ey_ep_zx);
         }
+    }
+
+    //Fluid + constrained-transport face-B update (no MOOD).
+    void Update_CT(){
+        update_solution(U_sp,U_ader_sp,F_ader_fp_x,F_ader_fp_y,F_ader_fp_z,
+                        dfp_to_sp,wt,Xdim_.h,Ydim_.h,Zdim_.h,dt);
+        update_B_solution(Bx_fp_x,Ey_ep_zx,Ez_ep_xy,dfp_to_sp,wt,Ydim_.h,Zdim_.h,dt,_x_);
+        update_B_solution(By_fp_y,Ez_ep_xy,Ex_ep_yz,dfp_to_sp,wt,Zdim_.h,Xdim_.h,dt,_y_);
+        if(cfg.active[_z_])
+            update_B_solution(Bz_fp_z,Ex_ep_yz,Ey_ep_zx,dfp_to_sp,wt,Xdim_.h,Ydim_.h,dt,_z_);
     }
 
     void transform_cv_to_sp(SD_Solution U_cv_, SD_Solution U_sp_){
@@ -483,11 +514,13 @@ struct MHD_ader : public PhysicsModule {
     // preserved at every level.
     /////////////////////////////////////////////////////////////////////
     void mood_halo_U(CommHelper comm, FV_Solution U){
+        if(!standalone_) return; //mesh fills ghosts via block_boundary_fv
         boundaries(comm,BCu_x,U,_center_,0);
         boundaries(comm,BCu_y,U,_center_,0);
         if(cfg.active[_z_]) boundaries(comm,BCu_z,U,_center_,0);
     }
     void mood_halo_scalar(CommHelper comm, FV_Solution S){
+        if(!standalone_) return;
         boundaries(comm,BCs_x,S,_center_,0);
         boundaries(comm,BCs_y,S,_center_,0);
         if(cfg.active[_z_]) boundaries(comm,BCs_z,S,_center_,0);
@@ -531,15 +564,25 @@ struct MHD_ader : public PhysicsModule {
     }
 
     void MOOD_update(CommHelper comm){
-        //--- cell-averaged conservative fluid state (B rows = CT cell average) ---
-        transform_sp_to_cv(U_sp,U_cv);
+        mood_begin();
+        mood_halo_U(comm,U_old_fv);
+        mood_after_U_halo();
+        for(int rev=0; rev<cfg.max_revs; rev++){
+            int demoted = mood_revision();
+            #ifdef MPI
+            int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
+            #endif
+            if(demoted==0) break;
+            mood_halo_scalar(comm,cascade);   // neighbour demotions feed the pooling
+        }
+        mood_commit();
+    }
 
-        //--- FV-face copy of the stage face field + its cell average -------------
+    //Mesh-callable MOOD phases (halos filled by the mesh between calls).
+    void mood_begin(){
+        transform_sp_to_cv(U_sp,U_cv);
         mood_reset_face_B();
         compute_B_cv_from_cf(B_old_cv,Bxf,Byf,Bzf,fp_to_cv);
-
-        //--- level 0 (high order): SD Riemann flux/edge-E on the FV lattice ------
-        //U_ader_fp_* are dead after the Riemann solve; reuse them as sweep scratch
         bool az=cfg.active[_z_];
         face_integral(F_ader_fp_x,F0_x,U_ader_fp_x,sp_to_cv,0,_x_);
         face_integral(F_ader_fp_y,F0_y,U_ader_fp_y,sp_to_cv,0,_y_);
@@ -549,24 +592,16 @@ struct MHD_ader : public PhysicsModule {
             edge_integral(Ey_ep_zx,E0y,sp_to_cv,0,_y_);
         }
         edge_integral(Ez_ep_xy,E0z,sp_to_cv,0,_z_);
-
-        //--- ghosted FV primitive field for the low-order levels -----------------
-        // U_old_fv = cell-averaged conservative state (a level-0 update with
-        // commit=0 fills U_old_fv from U_cv); replace its B rows with the CT
-        // cell average, halo, then convert to primitives.
         fv_update_solution(U_new_fv,U_old_fv,U_cv,
                            F0_x,Xdim_.fv_faces,F0_y,Ydim_.fv_faces,F0_z,Zdim_.fv_faces,
                            wt,0,dt,0);
         mhd_set_candidate_B(U_old_fv,B_old_cv);
-        mood_halo_U(comm,U_old_fv);
-        mhd_compute_primitives(U_old_fv,W_fv);
-        //Old-state detection band (rho, p, |B|) is fixed for all revisions; build
-        //it once from the haloed old state (ghosts feed the NAD neighbourhood).
-        mhd_detection_vars(U_old_fv,det_old);
+    }
 
-        //--- low-order levels (same ghosted W for the fluxes and the edge E) -----
+    void mood_after_U_halo(){
+        mhd_compute_primitives(U_old_fv,W_fv);
+        mhd_detection_vars(U_old_fv,det_old);
         for(int dim=0; dim<3; dim++){
-            //Flux sweep only along active directions
             if(cfg.active[dim]){
                 FV_Solution &F1=(dim==_x_?F1_x:(dim==_y_?F1_y:F1_z));
                 FV_Solution &F2=(dim==_x_?F2_x:(dim==_y_?F2_y:F2_z));
@@ -575,8 +610,6 @@ struct MHD_ader : public PhysicsModule {
                 mhd_fv_fluxes(W_fv,F2,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
                               Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
             }
-            //An E family needs both of its transverse directions active
-            //(2D: only Ez, whose corner reconstruction runs in the x-y plane)
             int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
             int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
             if(cfg.active[d1] && cfg.active[d2]){
@@ -588,34 +621,26 @@ struct MHD_ader : public PhysicsModule {
                                  Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
             }
         }
-
-        //--- cascade loop (fallback/max_revs detection/revision sweeps) ----------
         Kokkos::deep_copy(cascade.Vector,0.0);
-        for(int rev=0; rev<cfg.max_revs; rev++){
-            mood_assemble();
-            mood_fluid_update(false);      // candidate fluid cell averages
-            mood_ct_update();              // candidate CT cell averages (B_new_cv)
-            mhd_set_candidate_B(U_new_fv,B_new_cv);
-            //Detection: |B| NAD (candidate vs fixed old band) + magnetic PAD
-            mhd_detection_vars(U_new_fv,det_new);
-            mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance);
-            mhd_PAD(U_new_fv,troubles);
-            int demoted = mhd_update_cascade(troubles,cascade,2);
-            #ifdef MPI
-            int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
-            #endif
-            if(demoted==0) break;
-            mood_halo_scalar(comm,cascade);   // neighbour demotions feed the pooling
-        }
+    }
 
-        //--- final commit -------------------------------------------------------
+    //One cascade revision; returns demoted count (caller may MPI-reduce).
+    int mood_revision(){
         mood_assemble();
-        mood_fluid_update(true);           // commit U_cv
-        mood_ct_update();                  // commit the FV-face field into Bxf/Byf/Bzf
-        //AthenaK floor semantics: repair the committed cell averages (density
-        //and total energy vs the committed CT field) before going back to
-        //solution points. Cell-average granularity keeps the SD polynomial
-        //smooth; pointwise repair at solution points blows up (see mhd.cpp).
+        mood_fluid_update(false);
+        mood_ct_update();
+        mhd_set_candidate_B(U_new_fv,B_new_cv);
+        mhd_detection_vars(U_new_fv,det_new);
+        mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance);
+        mhd_PAD(U_new_fv,troubles);
+        return mhd_update_cascade(troubles,cascade,2);
+    }
+
+    void mood_commit(){
+        bool az=cfg.active[_z_];
+        mood_assemble();
+        mood_fluid_update(true);
+        mood_ct_update();
         if(cfg.floor_cons) mhd_floor_cv(U_cv,B_new_cv);
         transform_cv_to_sp(U_cv,U_sp);
         transform_a_to_b_2d(Bxf,Bx_fp_x,TB_x,cv_to_sp,_x_);

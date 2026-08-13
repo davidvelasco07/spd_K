@@ -31,16 +31,35 @@ static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
     return s;
 }
 
-static SD_Solution& block_fp(Hydro_ader& blk, int dim){
+template<typename Block>
+static SD_Solution& block_fp(Block& blk, int dim){
     return dim==_x_ ? blk.U_ader_fp_x
          : dim==_y_ ? blk.U_ader_fp_y
                     : blk.U_ader_fp_z;
 }
 
-static SD_Solution& block_Ffp(Hydro_ader& blk, int dim){
+template<typename Block>
+static SD_Solution& block_Ffp(Block& blk, int dim){
     return dim==_x_ ? blk.F_ader_fp_x
          : dim==_y_ ? blk.F_ader_fp_y
                     : blk.F_ader_fp_z;
+}
+
+template<typename Block>
+static FV_Solution& block_Ffv(Block& blk, int dim);
+
+template<>
+FV_Solution& block_Ffv<Hydro_ader>(Hydro_ader& blk, int dim){
+    return dim==_x_ ? blk.F_x
+         : dim==_y_ ? blk.F_y
+                    : blk.F_z;
+}
+
+template<>
+FV_Solution& block_Ffv<MHD_ader>(MHD_ader& blk, int dim){
+    return dim==_x_ ? blk.F0_x
+         : dim==_y_ ? blk.F0_y
+                    : blk.F0_z;
 }
 
 static void copy_face_to_ghost(SD_Solution U, SD_Solution& src, int dim, int side){
@@ -124,7 +143,8 @@ static void set_interface_flux(SD_Solution U, SD_Solution& src, int dim, int sid
     });
 }
 
-void forest_exchange_fp(BlockForest& forest, std::vector<Hydro_ader>& blocks, int dim){
+template<typename Block>
+void forest_exchange_fp(BlockForest& forest, std::vector<Block>& blocks, int dim){
     if(!cfg.active[dim]) return;
     int nb = forest.Nblocks();
 
@@ -166,7 +186,8 @@ void forest_exchange_fp(BlockForest& forest, std::vector<Hydro_ader>& blocks, in
     }
 }
 
-void correct_coarse_fine_flux(BlockForest& forest, std::vector<Hydro_ader>& blocks, int dim){
+template<typename Block>
+void correct_coarse_fine_flux(BlockForest& forest, std::vector<Block>& blocks, int dim){
     if(forest.max_level()==0 || !cfg.active[dim]) return;
     for(int side=0; side<2; side++){
         const FaceGroups& g = forest.face_groups[dim][side];
@@ -182,12 +203,6 @@ void correct_coarse_fine_flux(BlockForest& forest, std::vector<Hydro_ader>& bloc
             set_interface_flux(coarse, ghost, dim, side);
         }
     }
-}
-
-static FV_Solution& block_Ffv(Hydro_ader& blk, int dim){
-    return dim==_x_ ? blk.F_x
-         : dim==_y_ ? blk.F_y
-                    : blk.F_z;
 }
 
 //Restrict one fine neighbour's boundary-face fluxes onto the part of the
@@ -255,14 +270,15 @@ void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
 //already reconciled in correct_coarse_fine_flux, but the fallback blends
 //MUSCL fluxes in afterwards and the two sides blend differently, so the
 //balance has to be restored on the final flux.
-void correct_coarse_fine_fv_flux(BlockForest& forest, std::vector<Hydro_ader>& blocks, int dim){
+template<typename Block>
+void correct_coarse_fine_fv_flux(BlockForest& forest, std::vector<Block>& blocks, int dim){
     if(forest.max_level()==0 || !cfg.active[dim]) return;
     GHOST_LOCALS;
     for(int side=0; side<2; side++){
         const FaceGroups& g = forest.face_groups[dim][side];
         for(size_t q=0; q<g.fi_ib.size(); q++){
             int ib = g.fi_ib[q];
-            FV_Solution C = block_Ffv(blocks[ib], dim);
+            FV_Solution C = block_Ffv<Block>(blocks[ib], dim);
             SD_Solution S = blocks[ib].W_cv;
             int nx=S.nx, ny=S.ny, nz=S.nz;
             int Ncx=(S.Nx-2*NGHx)*nx, Ncy=(S.Ny-2*NGHy)*ny, Ncz=(S.Nz-2*NGHz)*nz;
@@ -282,7 +298,7 @@ void correct_coarse_fine_fv_flux(BlockForest& forest, std::vector<Hydro_ader>& b
                     if(d==_x_) cx=v; else if(d==_y_) cy=v; else cz=v;
                     bit++;
                 }
-                restrict_face_fv_sub(C, block_Ffv(blocks[g.fi_jb[q][sub]], dim),
+                restrict_face_fv_sub(C, block_Ffv<Block>(blocks[g.fi_jb[q][sub]], dim),
                                      dim, cface, fface, cx, cy, cz,
                                      Ncx, Ncy, Ncz, nx, ny, nz);
             }
@@ -372,8 +388,9 @@ static void fv_restrict_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
 //Same-level copies only. Run after every direction has been exchanged, this
 //fills each transverse ghost corner from the neighbour that actually owns it,
 //which the coarse-fine operators deliberately skip.
-void forest_exchange_fv_same(BlockForest& forest, std::vector<Hydro_ader>& blocks,
-                             FV_Solution Hydro_ader::*member, int dim){
+template<typename Block>
+void forest_exchange_fv_same(BlockForest& forest, std::vector<Block>& blocks,
+                             FV_Solution Block::*member, int dim){
     if(!cfg.active[dim]) return;
     int nb = forest.Nblocks();
     for(int side=0; side<2; side++){
@@ -391,8 +408,9 @@ void forest_exchange_fv_same(BlockForest& forest, std::vector<Hydro_ader>& block
     }
 }
 
-void forest_exchange_fv(BlockForest& forest, std::vector<Hydro_ader>& blocks,
-                        FV_Solution Hydro_ader::*member, int dim){
+template<typename Block>
+void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
+                        FV_Solution Block::*member, int dim){
     if(!cfg.active[dim]) return;
     int nb = forest.Nblocks();
     for(int side=0; side<2; side++){
@@ -421,3 +439,18 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Hydro_ader>& blocks,
         }
     }
 }
+
+template void forest_exchange_fp<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void forest_exchange_fp<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void correct_coarse_fine_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void correct_coarse_fine_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void correct_coarse_fine_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void correct_coarse_fine_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                             FV_Solution Hydro_ader::*, int);
+template void forest_exchange_fv<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                           FV_Solution MHD_ader::*, int);
+template void forest_exchange_fv_same<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                                  FV_Solution Hydro_ader::*, int);
+template void forest_exchange_fv_same<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                                FV_Solution MHD_ader::*, int);

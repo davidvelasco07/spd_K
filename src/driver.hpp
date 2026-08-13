@@ -15,10 +15,11 @@
 //   stagen                : the fluid/field update for the stage
 //   after_stagen          : end of each stage (reserved)
 //   after_timeintegrator  : once per cycle, after the stage loop (e.g. cons->prim)
+//   after_cycle           : once per cycle, after t/n_step advance and before ComputeDt
+//                           (AMR adapt registers here)
 //
 // A self-gravity multigrid Solve (your ongoing work) slots in between before_stagen
-// and stagen without touching the fluid task graph; AMR (later) stays post-cycle,
-// outside the stage lists.
+// and stagen without touching the fluid task graph; AMR stays in after_cycle.
 //========================================================================================
 
 #include <map>
@@ -76,7 +77,7 @@ class Driver {
       n_stages = 1;
     }
     const char *phases[] = {"before_timeintegrator", "before_stagen", "stagen",
-                            "after_stagen", "after_timeintegrator"};
+                            "after_stagen", "after_timeintegrator", "after_cycle"};
     for (auto name : phases)
       tl_map[name] = std::make_shared<TaskList>();
     pmod->AssembleTasks(this);
@@ -119,6 +120,7 @@ class Driver {
 
       pmod->t += pmod->dt;
       pmod->n_step++;
+      ExecuteTaskList("after_cycle", 1);
       pmod->dt = pmod->ComputeDt();
 
       if (Master) std::cout << ".";

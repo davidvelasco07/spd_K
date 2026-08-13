@@ -258,8 +258,8 @@ int main(int argc, char** argv){
                 if(Master) cout<<"ERROR: meshblocks/AMR are not yet supported with MPI"<<endl;
                 exit(1);
             }
-            //Meshblocks are allowed for any system; MHD mesh comes later.
-            //For now only Hydro_mesh is wired below.
+            //Meshblocks are allowed for hydro and MHD (uniform multiblock).
+            //Mixed-level AMR for MHD is rejected inside Mesh<MHD_ader>.
             if(cfg.amr_max_level>0 && cfg.integrator==_integrator_ader_){
                 if(Master) cout<<"ERROR: ADER is not supported with mixed-level AMR (use rk2/rk3)"<<endl;
                 exit(1);
@@ -336,10 +336,10 @@ int main(int argc, char** argv){
                     forest.refine_to_levels(refinements);
                     forest.enforce_2to1_balance();
                 }
-                Hydro_mesh mesh(std::move(forest), comm, p, X_dim, Y_dim, Z_dim,
-                                NBx, NBy, NBz, x, w, x_sp, x_fp, nu, beta);
-                mesh.time_evolution(comm, tlim, dt_output, p, x, w, x_sp, x_fp, nu, beta,
-                                    X_dim, Y_dim, Z_dim);
+                Mesh<Hydro_ader> mesh(std::move(forest), comm, p, X_dim, Y_dim, Z_dim,
+                                      NBx, NBy, NBz, x, w, x_sp, x_fp, nu, beta);
+                Driver driver(&mesh);
+                driver.Execute(tlim, dt_output);
             }
             else{
                 Hydro_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp,nu,beta);
@@ -349,12 +349,34 @@ int main(int argc, char** argv){
         }
         else if(system_name == "mhd"){
             if(use_mesh){
-                if(Master) cout<<"ERROR: meshblocks/AMR for MHD are not implemented yet"<<endl;
-                exit(1);
+                if(cfg.amr_max_level>0){
+                    if(Master) cout<<"ERROR: mixed-level AMR for MHD is not implemented yet"<<endl;
+                    exit(1);
+                }
+                double lim[3][2] = {
+                    {0.0, boxlen_x},
+                    {0.0, boxlen_y},
+                    {0.0, boxlen_z}
+                };
+                int bc3[3] = {cfg.bc[_x_], cfg.bc[_y_], cfg.bc[_z_]};
+                BlockForest forest = BlockForest::uniform_grid(
+                    cfg.ndim, ax, ay, az, NBx, NBy, NBz, nbx, nby, nbz, lim, bc3);
+                if(!refinements.empty()){
+                    for(auto& r : refinements)
+                        r.level = min(r.level, cfg.amr_max_level);
+                    forest.refine_to_levels(refinements);
+                    forest.enforce_2to1_balance();
+                }
+                Mesh<MHD_ader> mesh(std::move(forest), comm, p, X_dim, Y_dim, Z_dim,
+                                    NBx, NBy, NBz, x, w, x_sp, x_fp);
+                Driver driver(&mesh);
+                driver.Execute(tlim, dt_output);
             }
-            MHD_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);
-            Driver driver(&system);
-            driver.Execute(tlim,dt_output);
+            else{
+                MHD_ader system(comm,p,X_dim,Y_dim,Z_dim,x,w,x_sp,x_fp);
+                Driver driver(&system);
+                driver.Execute(tlim,dt_output);
+            }
         }
         else{
             if(Master) cout<<"ERROR: unknown system '"<<system_name<<"'"<<endl;
