@@ -45,6 +45,8 @@ extern void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solutio
                                     SD_Solution BxF, SD_Solution ByF, SD_Solution BzF,
                                     Matrix P, Matrix sp_to_cv, Matrix cv_to_sp,
                                     int cx, int cy, int cz);
+//Zero per-element FV/SD divergence of face-constant B (2D) by adjusting +x faces.
+extern void project_face_B_divfree_2d(SD_Solution Bx, SD_Solution By);
 extern void gather_block(SD_Solution, SD_Solution, int, int, int);
 extern void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 

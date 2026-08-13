@@ -1,5 +1,6 @@
 #include "spd_k.hpp"
 #include "amr_criteria.hpp"
+#include <type_traits>
 
 double lohner_score(SD_Solution W, int var){
     W.copy();
@@ -114,7 +115,69 @@ double shear_score(SD_Solution W){
     return g;
 }
 
-double trouble_fraction(Hydro_ader& blk){
+//Löhner second-difference indicator on |B| = sqrt(Bx^2+By^2+Bz^2). Tracks OT
+//structure from t=0 (uniform density/pressure); hydro falls back to density.
+double bfield_lohner_score(SD_Solution W){
+    W.copy();
+    int t = 0;
+    #ifdef KOKKOS_ENABLE_CUDA
+    auto& A = W.Vector_h;
+    #else
+    auto& A = W.Vector;
+    #endif
+    auto mag = [&](int k, int j, int i, int kk, int jj, int ii){
+        double bx = A(t,_mbx_,k,j,i,kk,jj,ii);
+        double by = A(t,_mby_,k,j,i,kk,jj,ii);
+        double bz = A(t,_mbz_,k,j,i,kk,jj,ii);
+        return std::sqrt(bx*bx + by*by + bz*bz);
+    };
+    double g2 = 0.0;
+    for(int dim=0; dim<3; dim++){
+        if(!cfg.active[dim]) continue;
+        if((dim==_x_ ? W.Nx : (dim==_y_ ? W.Ny : W.Nz)) < 3) continue;
+        for(int k=NGHz; k<W.Nz-NGHz; k++)
+        for(int j=NGHy; j<W.Ny-NGHy; j++)
+        for(int i=NGHx; i<W.Nx-NGHx; i++)
+        for(int kk=0; kk<W.nz; kk++)
+        for(int jj=0; jj<W.ny; jj++)
+        for(int ii=0; ii<W.nx; ii++){
+            double v0,v1,v2;
+            if(dim==_x_){
+                if(i-1<NGHx || i+1>=W.Nx-NGHx) continue;
+                v0=mag(k,j,i-1,kk,jj,ii);
+                v1=mag(k,j,i,kk,jj,ii);
+                v2=mag(k,j,i+1,kk,jj,ii);
+            } else if(dim==_y_){
+                if(j-1<NGHy || j+1>=W.Ny-NGHy) continue;
+                v0=mag(k,j-1,i,kk,jj,ii);
+                v1=mag(k,j,i,kk,jj,ii);
+                v2=mag(k,j+1,i,kk,jj,ii);
+            } else {
+                if(k-1<NGHz || k+1>=W.Nz-NGHz) continue;
+                v0=mag(k-1,j,i,kk,jj,ii);
+                v1=mag(k,j,i,kk,jj,ii);
+                v2=mag(k+1,j,i,kk,jj,ii);
+            }
+            g2 = std::max(g2, std::abs(v0 - 2.0*v1 + v2));
+        }
+    }
+    double den = 0.0;
+    int cnt = 0;
+    for(int k=NGHz; k<W.Nz-NGHz; k++)
+    for(int j=NGHy; j<W.Ny-NGHy; j++)
+    for(int i=NGHx; i<W.Nx-NGHx; i++)
+    for(int kk=0; kk<W.nz; kk++)
+    for(int jj=0; jj<W.ny; jj++)
+    for(int ii=0; ii<W.nx; ii++){
+        den += mag(k,j,i,kk,jj,ii);
+        cnt++;
+    }
+    den = den/std::max(cnt,1) + 1e-12;
+    return g2/den;
+}
+
+template<typename Block>
+static double trouble_fraction_impl(Block& blk){
     if(!cfg.fallback) return 0.0;
     blk.troubles.copy();
     #ifdef KOKKOS_ENABLE_CUDA
@@ -133,18 +196,33 @@ double trouble_fraction(Hydro_ader& blk){
     return s/std::max(cnt,1);
 }
 
-static bool refine_flag(int criterion, Hydro_ader& blk){
-    compute_primitives(blk.U_sp, blk.W_sp);
+double trouble_fraction(Hydro_ader& blk){ return trouble_fraction_impl(blk); }
+double trouble_fraction(MHD_ader& blk){ return trouble_fraction_impl(blk); }
+
+template<typename Block>
+static bool refine_flag(int criterion, Block& blk){
+    if constexpr (std::is_same_v<Block, Hydro_ader>)
+        compute_primitives(blk.U_sp, blk.W_sp);
+    else
+        mhd_compute_primitives(blk.U_sp, blk.W_sp);
     switch(criterion){
         case 1: return pressure_gradient_score(blk.W_sp) > 0.03;
         case 2: return trouble_fraction(blk) > 0.01;
         //Thresholds are the paper's: refine above 0.01, derefine below 0.005.
         case 3: return shear_score(blk.W_sp) > 0.01;
+        case 4:{
+            //Absolute floor; tag_blocks_impl applies a relative cut for MHD so
+            //spatially uniform OT structure still leaves a coarse rim.
+            if constexpr (std::is_same_v<Block, MHD_ader>)
+                return bfield_lohner_score(blk.W_sp) > 0.3;
+            return lohner_score(blk.W_sp, _d_) > 0.5;
+        }
         default: return lohner_score(blk.W_sp, _d_) > 0.5;
     }
 }
 
-static bool derefine_flag(int criterion, const std::vector<Hydro_ader*>& sibs){
+template<typename Block>
+static bool derefine_flag(int criterion, const std::vector<Block*>& sibs){
     switch(criterion){
         case 1:{
             double dP = 0.0;
@@ -161,6 +239,16 @@ static bool derefine_flag(int criterion, const std::vector<Hydro_ader*>& sibs){
             for(auto* b : sibs) g = std::max(g, shear_score(b->W_sp));
             return g < 0.005;
         }
+        case 4:{
+            if constexpr (std::is_same_v<Block, MHD_ader>){
+                double s = 0.0;
+                for(auto* b : sibs) s = std::max(s, bfield_lohner_score(b->W_sp));
+                return s < 0.05*0.25;
+            }
+            double s = 0.0;
+            for(auto* b : sibs) s = std::max(s, lohner_score(b->W_sp, _d_));
+            return s < 0.05*0.25;
+        }
         default:{
             double s = 0.0;
             for(auto* b : sibs) s = std::max(s, lohner_score(b->W_sp, _d_));
@@ -169,16 +257,45 @@ static bool derefine_flag(int criterion, const std::vector<Hydro_ader*>& sibs){
     }
 }
 
-void tag_blocks(BlockForest& forest, std::vector<Hydro_ader>& blocks,
-                std::vector<int>& to_refine,
-                std::vector<std::vector<int>>& to_derefine,
-                int max_level, int criterion){
+template<typename Block>
+static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
+                            std::vector<int>& to_refine,
+                            std::vector<std::vector<int>>& to_derefine,
+                            int max_level, int criterion){
     to_refine.clear();
     to_derefine.clear();
-    for(int ib=0; ib<forest.Nblocks(); ib++){
-        if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
-        if(refine_flag(criterion, blocks[ib]))
-            to_refine.push_back(ib);
+    //|B| Löhner on OT is nearly uniform across blocks; refine only the peak
+    //block(s) so 2:1 balance grows a compact fine patch with a coarse rim.
+    if constexpr (std::is_same_v<Block, MHD_ader>){
+        if(criterion==4){
+            std::vector<double> scores(forest.Nblocks(), 0.0);
+            for(int ib=0; ib<forest.Nblocks(); ib++){
+                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+                mhd_compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
+                scores[ib] = bfield_lohner_score(blocks[ib].W_sp);
+            }
+            double vmax = 0.0;
+            for(int ib=0; ib<forest.Nblocks(); ib++) vmax = std::max(vmax, scores[ib]);
+            //Only the peak block(s): 2:1 balance grows a compact patch and leaves
+            //a coarse rim (refining all above-mean blocks fills the domain).
+            for(int ib=0; ib<forest.Nblocks(); ib++){
+                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+                if(scores[ib] > 0.3 && scores[ib] >= vmax - 1e-15)
+                    to_refine.push_back(ib);
+            }
+        } else {
+            for(int ib=0; ib<forest.Nblocks(); ib++){
+                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+                if(refine_flag(criterion, blocks[ib]))
+                    to_refine.push_back(ib);
+            }
+        }
+    } else {
+        for(int ib=0; ib<forest.Nblocks(); ib++){
+            if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+            if(refine_flag(criterion, blocks[ib]))
+                to_refine.push_back(ib);
+        }
     }
     int n_sib = 1;
     for(int d=0; d<3; d++) if(forest.active[d]) n_sib *= 2;
@@ -191,9 +308,23 @@ void tag_blocks(BlockForest& forest, std::vector<Hydro_ader>& blocks,
     }
     for(auto& kv : groups){
         if((int)kv.second.size() != n_sib) continue;
-        std::vector<Hydro_ader*> sibs;
+        std::vector<Block*> sibs;
         for(int ib : kv.second) sibs.push_back(&blocks[ib]);
         if(derefine_flag(criterion, sibs))
             to_derefine.push_back(kv.second);
     }
+}
+
+void tag_blocks(BlockForest& forest, std::vector<Hydro_ader>& blocks,
+                std::vector<int>& to_refine,
+                std::vector<std::vector<int>>& to_derefine,
+                int max_level, int criterion){
+    tag_blocks_impl(forest, blocks, to_refine, to_derefine, max_level, criterion);
+}
+
+void tag_blocks(BlockForest& forest, std::vector<MHD_ader>& blocks,
+                std::vector<int>& to_refine,
+                std::vector<std::vector<int>>& to_derefine,
+                int max_level, int criterion){
+    tag_blocks_impl(forest, blocks, to_refine, to_derefine, max_level, criterion);
 }

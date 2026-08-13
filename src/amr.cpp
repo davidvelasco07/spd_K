@@ -490,66 +490,159 @@ static void fill_interior_face_B_2d(SD_Solution Bx, SD_Solution By,
     });
 }
 
-//Prolongate shared faces of one face-normal field from coarse parent onto fine
-//child: identity along the face normal (matching boundary flux-point on the
-//coinciding element face), transverse Lagrange P. Only writes fine faces that
-//sit on a coarse element face; interiors of each 2×2 are filled by Toth–Roe.
-static void prolongate_shared_face_B(SD_Solution C, SD_Solution F, Matrix P,
-                                     int face_dim, int cx, int cy, int cz){
+//Inject the coarse face average (constant) onto each fine face that lies on a
+//coarse element face. Full-face averages preserve the coarse FV divergence so
+//Toth–Roe then yields exact fine divB=0 (unlike half-face Lagrange + flatten).
+static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
+                                          int face_dim, int cx, int cy, int cz){
     int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
     int nx=F.nx, ny=F.ny, nz=F.nz;
-    int nader=F.n_ader, nvar=F.n_var;
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
-    bool tx = ax && face_dim!=_x_;
-    bool ty = ay && face_dim!=_y_;
-    bool tz = az && face_dim!=_z_;
     int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
-    int pn = (int)P.extent(1); // p+1, matches transverse SP/CV count
     GHOST_LOCALS;
-    Kokkos::parallel_for("prolongate_shared_face_B",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},
-                                               {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
-        bool on_shared = (face_dim==_x_) ? (ii==0 || ii==nx-1)
-                        : (face_dim==_y_) ? (jj==0 || jj==ny-1)
-                                          : (kk==0 || kk==nz-1);
-        if(!on_shared) return;
-        int gx = ax ? cx*NBx + (i-ghx) : 0;
-        int gy = ay ? cy*NBy + (j-ghy) : 0;
-        int gz = az ? cz*NBz + (k-ghz) : 0;
-        int cex = ax ? ghx+gx/2 : i;
-        int cey = ay ? ghy+gy/2 : j;
-        int cez = az ? ghz+gz/2 : k;
-        int sx = tx ? gx%2 : 0;
-        int sy = ty ? gy%2 : 0;
-        int sz = tz ? gz%2 : 0;
-        int cii = (face_dim==_x_) ? (ii==0 ? 0 : C.nx-1) : ii;
-        int cjj = (face_dim==_y_) ? (jj==0 ? 0 : C.ny-1) : jj;
-        int ckk = (face_dim==_z_) ? (kk==0 ? 0 : C.nz-1) : kk;
-        for(int t_id=0; t_id<nader; t_id++){
-        for(int var=0; var<nvar; var++){
-            double u=0;
-            int na = (face_dim==_x_ ? (ty?pn:1) : (face_dim==_y_ ? (tx?pn:1) : (tx?pn:1)));
-            int nb = (face_dim==_x_ ? (tz?pn:1) : (face_dim==_y_ ? (tz?pn:1) : (ty?pn:1)));
-            for(int a=0; a<na; a++){
-            for(int b=0; b<nb; b++){
-                int cll=cii, cmm=cjj, cnn=ckk;
-                double w=1.0;
-                if(face_dim==_x_){
-                    if(ty){ cmm=a; w*=P(sy*pn+jj,a); }
-                    if(tz){ cnn=b; w*=P(sz*pn+kk,b); }
-                } else if(face_dim==_y_){
-                    if(tx){ cll=a; w*=P(sx*pn+ii,a); }
-                    if(tz){ cnn=b; w*=P(sz*pn+kk,b); }
-                } else {
-                    if(tx){ cll=a; w*=P(sx*pn+ii,a); }
-                    if(ty){ cmm=b; w*=P(sy*pn+jj,b); }
+    (void)cz;
+    if(face_dim==_x_){
+        int nty=F.ny, ntyC=C.ny;
+        Kokkos::parallel_for("prolong_shared_Bx_const",
+            Kokkos::MDRangePolicy<Kokkos::Rank<4>>({NGHz,NGHy,NGHx,0},
+                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz}),
+            KOKKOS_LAMBDA(int k, int j, int i, int kk){
+                int gx = ax ? cx*NBx + (i-ghx) : 0;
+                int gy = ay ? cy*NBy + (j-ghy) : 0;
+                int gz = az ? cz*NBz + (k-ghz) : 0;
+                int cex = ax ? ghx+gx/2 : i;
+                int cey = ay ? ghy+gy/2 : j;
+                int cez = az ? ghz+gz/2 : k;
+                for(int side=0; side<2; side++){
+                    int ii = side ? nx-1 : 0;
+                    bool on_coarse = ax ? (side ? ((gx%2)==1) : ((gx%2)==0)) : true;
+                    if(!on_coarse) continue;
+                    int cii = side ? C.nx-1 : 0;
+                    double a=0;
+                    for(int jj=0; jj<ntyC; jj++)
+                        a += C.Vector(0,0,cez,cey,cex,kk,jj,cii);
+                    a /= ntyC;
+                    for(int jj=0; jj<nty; jj++)
+                        F.Vector(0,0,k,j,i,kk,jj,ii) = a;
                 }
-                u += w * C.Vector(t_id,var,cez,cey,cex,cnn,cmm,cll);
-            }}
-            F.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
-        }}
-    });
+            });
+    } else if(face_dim==_y_){
+        int ntx=F.nx, ntxC=C.nx;
+        Kokkos::parallel_for("prolong_shared_By_const",
+            Kokkos::MDRangePolicy<Kokkos::Rank<4>>({NGHz,NGHy,NGHx,0},
+                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz}),
+            KOKKOS_LAMBDA(int k, int j, int i, int kk){
+                int gx = ax ? cx*NBx + (i-ghx) : 0;
+                int gy = ay ? cy*NBy + (j-ghy) : 0;
+                int gz = az ? cz*NBz + (k-ghz) : 0;
+                int cex = ax ? ghx+gx/2 : i;
+                int cey = ay ? ghy+gy/2 : j;
+                int cez = az ? ghz+gz/2 : k;
+                for(int side=0; side<2; side++){
+                    int jj = side ? ny-1 : 0;
+                    bool on_coarse = ay ? (side ? ((gy%2)==1) : ((gy%2)==0)) : true;
+                    if(!on_coarse) continue;
+                    int cjj = side ? C.ny-1 : 0;
+                    double a=0;
+                    for(int ii=0; ii<ntxC; ii++)
+                        a += C.Vector(0,0,cez,cey,cex,kk,cjj,ii);
+                    a /= ntxC;
+                    for(int ii=0; ii<ntx; ii++)
+                        F.Vector(0,0,k,j,i,kk,jj,ii) = a;
+                }
+            });
+    }
+}
+
+//After element-face FPs are set (shared prolongate + Toth–Roe), fill the
+//interior normal-direction flux points by linear interpolation between the
+//two element faces in the reference coordinate ξ∈[0,1]. Face fluxes are
+//unchanged; for face-constant data the discrete dfp_to_sp divergence matches
+//the FV face divergence (zero after Toth–Roe).
+static void fill_interior_normal_fps(SD_Solution B, int face_dim){
+    int Nx=B.Nx, Ny=B.Ny, Nz=B.Nz;
+    int nx=B.nx, ny=B.ny, nz=B.nz;
+    Vector xfp = amr_x_fp;
+    int nfp = (int)xfp.extent(0);
+    GHOST_LOCALS;
+    if(face_dim==_x_){
+        if(nx < 3 || nfp < nx) return;
+        Kokkos::parallel_for("fill_interior_normal_fps_x",
+            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
+                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny}),
+            KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj){
+                double BL = B.Vector(0,0,k,j,i,kk,jj,0);
+                double BR = B.Vector(0,0,k,j,i,kk,jj,nx-1);
+                for(int ii=1; ii<nx-1; ii++){
+                    double xi = xfp(ii);
+                    B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*BL + xi*BR;
+                }
+            });
+    } else if(face_dim==_y_){
+        if(ny < 3 || nfp < ny) return;
+        Kokkos::parallel_for("fill_interior_normal_fps_y",
+            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
+                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,nx}),
+            KOKKOS_LAMBDA(int k, int j, int i, int kk, int ii){
+                double BB = B.Vector(0,0,k,j,i,kk,0,ii);
+                double BT = B.Vector(0,0,k,j,i,kk,ny-1,ii);
+                for(int jj=1; jj<ny-1; jj++){
+                    double xi = xfp(jj);
+                    B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*BB + xi*BT;
+                }
+            });
+    } else {
+        if(nz < 3 || nfp < nz) return;
+        Kokkos::parallel_for("fill_interior_normal_fps_z",
+            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
+                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,ny,nx}),
+            KOKKOS_LAMBDA(int k, int j, int i, int jj, int ii){
+                double B0 = B.Vector(0,0,k,j,i,0,jj,ii);
+                double B1 = B.Vector(0,0,k,j,i,nz-1,jj,ii);
+                for(int kk=1; kk<nz-1; kk++){
+                    double xi = xfp(kk);
+                    B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*B0 + xi*B1;
+                }
+            });
+    }
+}
+
+//Zero FV divergence on every element by adjusting the +x face, keeping other
+//faces fixed. Makes face-constant (+ linear-normal) data exactly SD-div-free
+//before cv_to_sp. Shared faces may disagree until Sync_face_B; call after
+//all children are prolongated and again after Sync if needed.
+void project_face_B_divfree_2d(SD_Solution Bx, SD_Solution By){
+    int Nx=Bx.Nx, Ny=Bx.Ny, Nz=Bx.Nz;
+    int nx=Bx.nx, ny=By.ny, nty=Bx.ny, ntx=By.nx, nz=Bx.nz;
+    Vector xfp = amr_x_fp;
+    GHOST_LOCALS;
+    Kokkos::parallel_for("project_face_B_divfree_2d",
+        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({NGHz,NGHy,NGHx},
+                                               {Nz-NGHz,Ny-NGHy,Nx-NGHx}),
+        KOKKOS_LAMBDA(int k, int j, int i){
+            for(int kk=0; kk<nz; kk++){
+                double bxL=0, bxR=0, byB=0, byT=0;
+                for(int jj=0; jj<nty; jj++){
+                    bxL += Bx.Vector(0,0,k,j,i,kk,jj,0);
+                    bxR += Bx.Vector(0,0,k,j,i,kk,jj,nx-1);
+                }
+                for(int ii=0; ii<ntx; ii++){
+                    byB += By.Vector(0,0,k,j,i,kk,0,ii);
+                    byT += By.Vector(0,0,k,j,i,kk,ny-1,ii);
+                }
+                bxL/=nty; bxR/=nty; byB/=ntx; byT/=ntx;
+                double d = (bxR - bxL) + (byT - byB);
+                double bxR_new = bxR - d;
+                for(int jj=0; jj<nty; jj++){
+                    Bx.Vector(0,0,k,j,i,kk,jj,nx-1) = bxR_new;
+                    double BL = Bx.Vector(0,0,k,j,i,kk,jj,0);
+                    for(int ii=1; ii<nx-1; ii++){
+                        double xi = xfp(ii);
+                        Bx.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*BL + xi*bxR_new;
+                    }
+                }
+            }
+        });
 }
 
 void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
@@ -573,10 +666,13 @@ void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
     transform_a_to_b_2d(ByC, ByCa, Ty, sp_to_cv, _y_);
     Kokkos::deep_copy(BxFa.Vector, 0.0);
     Kokkos::deep_copy(ByFa.Vector, 0.0);
-    prolongate_shared_face_B(BxCa, BxFa, P, _x_, cx, cy, 0);
-    prolongate_shared_face_B(ByCa, ByFa, P, _y_, cx, cy, 0);
+    prolongate_shared_face_B_const(BxCa, BxFa, _x_, cx, cy, 0);
+    prolongate_shared_face_B_const(ByCa, ByFa, _y_, cx, cy, 0);
     int NBx=BxF.Nx-2*NGHx, NBy=ByF.Ny-2*NGHy;
     fill_interior_face_B_2d(BxFa, ByFa, cx, cy, NBx, NBy);
+    project_face_B_divfree_2d(BxFa, ByFa);
+    fill_interior_normal_fps(BxFa, _x_);
+    fill_interior_normal_fps(ByFa, _y_);
     SD_Solution TxF = make_scratch_like(BxF, "TxF");
     SD_Solution TyF = make_scratch_like(ByF, "TyF");
     transform_a_to_b_2d(BxFa, BxF, TxF, cv_to_sp, _x_);
@@ -584,8 +680,16 @@ void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
     prolongate_block(BzC, BzF, P, cx, cy, 0);
 }
 
+
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
     int n = p+1;
+    int m = p+2;
+    amr_x_fp = Vector("amr_x_fp", m);
+    {
+        Vector_h xf = Kokkos::create_mirror_view(amr_x_fp);
+        for(int i=0;i<m;i++) xf(i) = x_fp[i];
+        Kokkos::deep_copy(amr_x_fp, xf);
+    }
     amr_P = Matrix("amr_P", 2*n, n);
     amr_R = Matrix("amr_R", n, 2*n);
     transfer_matrices(amr_P, amr_R, x_sp, p);
@@ -639,7 +743,6 @@ void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
     //midpoint once, totaling 2m-1 fine nodes. We keep the (2m) x m P shape by
     //repeating the midpoint row, and build R as an L2 overlap restrict onto
     //the coarse fp nodes (same construction as amr_RF).
-    int m = p+2;
     double* x_fine_fp = malloc_host<double>(2*m);
     for(int i=0;i<m;i++){
         x_fine_fp[i]   = 0.5*x_fp[i];

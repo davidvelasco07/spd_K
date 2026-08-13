@@ -72,7 +72,7 @@ struct RunConfig {
     ProblemParams pp;                    //initial-condition parameters
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
     int amr_max_level = 0;               //maximum refinement level
-    int amr_criterion = 0;               //0=Lohner, 1=pressure gradient, 2=trouble fraction
+    int amr_criterion = 0;               //0=Lohner, 1=pressure, 2=trouble, 3=shear, 4=bfield
 };
 extern RunConfig cfg;
 
@@ -87,6 +87,9 @@ extern Matrix amr_RF;
 //the staggered dim). Built from x_fp; size (p+2) instead of (p+1).
 extern Matrix amr_P_fp;
 extern Matrix amr_RF_fp;
+//Flux-point nodes in [0,1] (length p+2); used to fill interior normal FPs
+//after face-only Toth–Roe prolongation of face B.
+extern Vector amr_x_fp;
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 void set_runtime_dimensionality(bool ax, bool ay, bool az);

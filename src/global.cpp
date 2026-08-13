@@ -30,6 +30,7 @@ Matrix amr_P, amr_R;
 Matrix amr_RS_sp[2], amr_RS_cv[2];
 Matrix amr_RF;
 Matrix amr_P_fp, amr_RF_fp;
+Vector amr_x_fp;
 
 int ssp_rk_coefficients(int order, double* a){
     a[0]=0; a[1]=0; a[2]=0;

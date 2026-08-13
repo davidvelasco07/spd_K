@@ -205,6 +205,7 @@ int main(int argc, char** argv){
         if(crit=="pressure") cfg.amr_criterion = 1;
         else if(crit=="trouble") cfg.amr_criterion = 2;
         else if(crit=="shear") cfg.amr_criterion = 3;
+        else if(crit=="bfield") cfg.amr_criterion = 4;
         else cfg.amr_criterion = 0;
 
         double tlim      = pin.GetOrAddReal("time","tlim",0.1);
@@ -393,6 +394,7 @@ int main(int argc, char** argv){
         amr_RF = Matrix();
         amr_P_fp = Matrix();
         amr_RF_fp = Matrix();
+        amr_x_fp = Vector();
     }
     Kokkos::finalize();
     #ifdef MPI

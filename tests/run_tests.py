@@ -26,6 +26,8 @@ plus command-line overrides. Checks per configuration:
   hydro_amr_2d   : dynamic AMR on a pulse; the mesh must become mixed-level
   hydro_implosion_2d : reflective-wall implosion, mass conserved
   mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
+  mhd_*_smr_2d   : true-2D MHD static refinement (mixed levels + divB)
+  mhd_*_amr_2d   : true-2D MHD dynamic AMR (face-B transfer + mixed levels)
 
 Every configuration is additionally gated on all dumps being finite, before
 any tolerance is applied.
@@ -330,6 +332,22 @@ CONFIGS = {
                       "refinement1/level=1", "refinement1/x1min=0.375",
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
+    "mhd_orszag_tang_amr_2d": {
+        # Dynamic AMR on OT: |B| Löhner tags peak blocks; 2:1 balance grows a
+        # compact fine patch (mixed levels). Face-B prolongate + div-free
+        # projection keeps divB at round-off. Very short tlim without fallback
+        # (pure SD CT + regrid can diverge once shocks form).
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=2",
+                      "amr/criterion=bfield"],
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict", "divb"],
         "field": "W_cv_N32p3_1_0.dat",

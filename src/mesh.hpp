@@ -9,8 +9,9 @@
 #include "forest.hpp"
 #include "amr_criteria.hpp"
 
-//Block-forest mesh driver: uniform multiblock and (hydro) mixed-level AMR.
-//Derives from PhysicsModule and registers mesh-orchestrated tasks into Driver.
+//Block-forest mesh driver: uniform multiblock and mixed-level AMR (hydro +
+//true-2D MHD). Derives from PhysicsModule and registers mesh-orchestrated
+//tasks into Driver.
 template<typename Block>
 struct Mesh : public PhysicsModule {
     BlockForest forest;
@@ -501,13 +502,7 @@ struct Mesh : public PhysicsModule {
     TaskStatus TaskAdapt(Driver* d, int stage){
         if(cfg.adapt_interval<=0 || this->n_step%cfg.adapt_interval!=0)
             return TaskStatus::complete;
-        if constexpr (is_mhd){
-            if(Master)
-                std::cout<<std::endl<<"ERROR: dynamic AMR for MHD is not implemented yet"<<std::endl;
-            exit(1);
-        } else {
-            adapt();
-        }
+        adapt();
         return TaskStatus::complete;
     }
 
@@ -630,18 +625,84 @@ struct Mesh : public PhysicsModule {
         return m;
     }
 
+    //Per-block snapshot for adapt transfer. Hydro uses U only; MHD also packs
+    //face-staggered B so refine/derefine preserve the CT field (not re-inited
+    //from the vector potential in make_block).
+    struct BlockSnap {
+        SD_Solution U;
+        SD_Solution Bx, By, Bz;
+    };
+
+    BlockSnap make_empty_snap(int ib, const char* tag){
+        BlockSnap s;
+        s.U.init(std::string(tag)+"_U", blocks[ib].n_ader, blocks[ib].nvar,
+                 Zd[ib], Yd[ib], Xd[ib], 0, 0, 0);
+        if constexpr (is_mhd){
+            s.Bx.init(std::string(tag)+"_Bx", 1, 1, Zd[ib], Yd[ib], Xd[ib], 0, 0, 1);
+            s.By.init(std::string(tag)+"_By", 1, 1, Zd[ib], Yd[ib], Xd[ib], 0, 1, 0);
+            s.Bz.init(std::string(tag)+"_Bz", 1, 1, Zd[ib], Yd[ib], Xd[ib], 1, 0, 0);
+        }
+        return s;
+    }
+
+    void capture_block_snap(int ib, BlockSnap& s){
+        Kokkos::deep_copy(s.U.Vector, blocks[ib].U_sp.Vector);
+        if constexpr (is_mhd){
+            Kokkos::deep_copy(s.Bx.Vector, blocks[ib].Bx_fp_x.Vector);
+            Kokkos::deep_copy(s.By.Vector, blocks[ib].By_fp_y.Vector);
+            Kokkos::deep_copy(s.Bz.Vector, blocks[ib].Bz_fp_z.Vector);
+        }
+    }
+
+    void prolongate_snap(const BlockSnap& src, BlockSnap& dst,
+                         int cx, int cy, int cz, int ib_mat){
+        prolongate_block(src.U, dst.U, amr_P, cx, cy, cz);
+        if constexpr (is_mhd){
+            prolongate_block_face_B(src.Bx, src.By, src.Bz,
+                                    dst.Bx, dst.By, dst.Bz,
+                                    amr_P, blocks[ib_mat].sp_to_cv,
+                                    blocks[ib_mat].cv_to_sp, cx, cy, cz);
+        }
+    }
+
+    void restrict_snap_child(const BlockSnap& fine, BlockSnap& coarse,
+                             int cx, int cy, int cz){
+        restrict_block(fine.U, coarse.U, amr_RF, cx, cy, cz);
+        if constexpr (is_mhd){
+            restrict_block_face_B(fine.Bx, coarse.Bx, amr_RF, _x_, cx, cy, cz);
+            restrict_block_face_B(fine.By, coarse.By, amr_RF, _y_, cx, cy, cz);
+            restrict_block_face_B(fine.Bz, coarse.Bz, amr_RF, _z_, cx, cy, cz);
+        }
+    }
+
+    void install_snap(int ib, const BlockSnap& s){
+        Kokkos::deep_copy(blocks[ib].U_sp.Vector, s.U.Vector);
+        if constexpr (is_mhd){
+            Kokkos::deep_copy(blocks[ib].Bx_fp_x.Vector, s.Bx.Vector);
+            Kokkos::deep_copy(blocks[ib].By_fp_y.Vector, s.By.Vector);
+            Kokkos::deep_copy(blocks[ib].Bz_fp_z.Vector, s.Bz.Vector);
+        }
+    }
+
+    //After face B is in place (copied / prolongated / restricted), project onto
+    //cell-centered primitives and rebuild conservatives so total energy uses
+    //the transferred magnetic field. Face B is not re-inited from A.
     void finish_block_ic(int ib){
         if constexpr (is_hydro){
             compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
             blocks[ib].transform_sp_to_cv(blocks[ib].W_sp, blocks[ib].W_cv);
         } else {
             mhd_compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
+            mhd_B_to_U(blocks[ib].W_sp, blocks[ib].Bx_fp_x, blocks[ib].By_fp_y,
+                       blocks[ib].Bz_fp_z, blocks[ib].Tx_, blocks[ib].Ty_,
+                       blocks[ib].Tz_, blocks[ib].fp_to_sp);
+            mhd_compute_conservatives(blocks[ib].W_sp, blocks[ib].U_sp);
             blocks[ib].transform_sp_to_cv(blocks[ib].W_sp, blocks[ib].W_cv);
         }
     }
 
     void transfer_from_snapshot(std::map<BlockForest::BlockKey,int>& key_to_ib,
-                                std::vector<SD_Solution>& snap){
+                                std::vector<BlockSnap>& snap){
         auto find_ancestor = [&](BlockForest::BlockKey key,
                                  std::vector<std::array<int,3>>& chain)->int{
             BlockForest::BlockKey k = key;
@@ -660,22 +721,21 @@ struct Mesh : public PhysicsModule {
             BlockForest::BlockKey key = forest.block_key(ib);
             auto it = key_to_ib.find(key);
             if(it != key_to_ib.end()){
-                Kokkos::deep_copy(blocks[ib].U_sp.Vector, snap[it->second].Vector);
-                finish_block_ic(ib);
+                install_snap(ib, snap[it->second]);
                 continue;
             }
             std::vector<std::array<int,3>> chain;
             int pib = find_ancestor(key, chain);
             if(pib >= 0){
-                SD_Solution cur = snap[pib];
+                BlockSnap cur = snap[pib];
                 for(int s=(int)chain.size()-1; s>=1; s--){
-                    SD_Solution tmp("pro",1,blocks[ib].nvar,Zd[ib],Yd[ib],Xd[ib],0,0,0);
-                    prolongate_block(cur, tmp, amr_P, chain[s][0], chain[s][1], chain[s][2]);
+                    BlockSnap tmp = make_empty_snap(ib, "pro");
+                    prolongate_snap(cur, tmp, chain[s][0], chain[s][1], chain[s][2], ib);
                     cur = tmp;
                 }
-                prolongate_block(cur, blocks[ib].U_sp, amr_P,
-                                 chain[0][0], chain[0][1], chain[0][2]);
-                finish_block_ic(ib);
+                BlockSnap dst = make_empty_snap(ib, "pro_dst");
+                prolongate_snap(cur, dst, chain[0][0], chain[0][1], chain[0][2], ib);
+                install_snap(ib, dst);
                 continue;
             }
             int n_sib = 1;
@@ -692,13 +752,12 @@ struct Mesh : public PhysicsModule {
                 if(cit != key_to_ib.end()) sibs.push_back(cit->second);
             }
             if((int)sibs.size()==n_sib){
-                SD_Solution acc("acc",1,blocks[ib].nvar,Zd[ib],Yd[ib],Xd[ib],0,0,0);
+                BlockSnap acc = make_empty_snap(ib, "acc");
                 for(int s=0; s<n_sib; s++){
                     int cx=s&1, cy=(s>>1)&1, cz=(s>>2)&1;
-                    restrict_block(snap[sibs[s]], acc, amr_RF, cx, cy, cz);
+                    restrict_snap_child(snap[sibs[s]], acc, cx, cy, cz);
                 }
-                Kokkos::deep_copy(blocks[ib].U_sp.Vector, acc.Vector);
-                finish_block_ic(ib);
+                install_snap(ib, acc);
                 continue;
             }
             if(Master)
@@ -712,12 +771,18 @@ struct Mesh : public PhysicsModule {
     }
 
     void adapt(){
-        if constexpr (!is_hydro) return;
-        std::vector<SD_Solution> snap(nblocks);
+        if constexpr (is_mhd){
+            if(cfg.active[_z_]){
+                if(Master)
+                    std::cout<<std::endl<<"ERROR: dynamic AMR for 3D MHD is not implemented yet"
+                               <<" (face-B prolongate is 2D-only)"<<std::endl;
+                exit(1);
+            }
+        }
+        std::vector<BlockSnap> snap(nblocks);
         for(int ib=0; ib<nblocks; ib++){
-            snap[ib].init("snap", blocks[ib].n_ader, blocks[ib].nvar,
-                          Zd[ib], Yd[ib], Xd[ib], 0, 0, 0);
-            Kokkos::deep_copy(snap[ib].Vector, blocks[ib].U_sp.Vector);
+            snap[ib] = make_empty_snap(ib, "snap");
+            capture_block_snap(ib, snap[ib]);
         }
         auto key_to_ib = snapshot_keys();
 
@@ -735,6 +800,11 @@ struct Mesh : public PhysicsModule {
 
         build_block_solvers();
         transfer_from_snapshot(key_to_ib, snap);
+        if constexpr (is_mhd){
+            if(forest.max_level()==0) Sync_face_B_mhd();
+            else Exchange_face_B_mhd();
+        }
+        for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
         recompute_dt();
         if(forest.max_level() != old_M)
             init_W_glob(Xg, Yg, Zg, x_fp_);
