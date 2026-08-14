@@ -1,7 +1,10 @@
 #ifndef MESH_HPP_
 #define MESH_HPP_
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -381,15 +384,41 @@ struct Mesh : public PhysicsModule {
         return v;
     }
 
-    //Compare the forest result now in P against `other`, and print the first
-    //disagreeing (block, element, point) with both values.
+    //Compare the forest result now in P against `other`, and print where the
+    //two disagree.
+    //
+    //NaN is separated from an ordinary magnitude difference, because |a-b| is
+    //NaN whenever either side is NaN and a NaN compares false against both
+    //`==0` and `>worst`: it is counted as a difference while leaving the
+    //worst-value tracker at its initial -1 indices. That combination -- many
+    //differing entries, no worst entry -- means data that was never written,
+    //not arithmetic that came out wrong, so it is reported first, with the
+    //side that carries it and the receiving block named.
+    //SPD_XCHK_FROM=<step> delays reporting until that step, so a mixed-level
+    //comparison is not crowded out by the uniform steps before the first
+    //regrid (the report is capped at a few occurrences).
+    static int xchk_from(){
+        static int v = getenv("SPD_XCHK_FROM") ? atoi(getenv("SPD_XCHK_FROM")) : 0;
+        return v;
+    }
+
     void report_exchange_diff(SD_Solution P, SD_Vector other, int dim){
         static int reported = 0;
+        if(this->n_step < xchk_from()) return;
         auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.Vector);
         auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), other);
         double worst = 0.0;
-        long nbad = 0;
+        long nbad = 0, face_only = 0, corner = 0;
+        long nnan = 0, nan_forest = 0, nan_packed = 0, nan_both = 0;
+        long nan_face = 0, nan_corner = 0;
+        //Per-variable split. The last slot is the FV trouble-flag aggregate,
+        //which the SD path never writes, so it can carry uninitialized data
+        //without that meaning anything about the exchange.
+        constexpr int MAXV = 16;
+        long nan_var[MAXV] = {0}, bad_var[MAXV] = {0};
         int f[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+        int g[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+        const int gx=NGHx, gy=NGHy, gz=NGHz;
         for(size_t t=0; t<a.extent(0); t++)
         for(size_t v=0; v<a.extent(1); v++)
         for(size_t k=0; k<a.extent(2); k++)
@@ -398,48 +427,76 @@ struct Mesh : public PhysicsModule {
         for(size_t kk=0; kk<a.extent(5); kk++)
         for(size_t jj=0; jj<a.extent(6); jj++)
         for(size_t ii=0; ii<a.extent(7); ii++){
-            double d = std::abs(a(t,v,k,j,i,kk,jj,ii) - b(t,v,k,j,i,kk,jj,ii));
+            const double av = a(t,v,k,j,i,kk,jj,ii);
+            const double bv = b(t,v,k,j,i,kk,jj,ii);
+            //On the face proper (transverse indices all active) or only in the
+            //transverse ghost corners/edges?
+            bool tg = false;
+            if(dim!=_x_ && ((int)i<gx || (int)i>=P.Nx-gx)) tg = true;
+            if(dim!=_y_ && ((int)j<gy || (int)j>=P.Ny-gy)) tg = true;
+            if(dim!=_z_ && ((int)k<gz || (int)k>=P.Nz-gz)) tg = true;
+            const bool na = std::isnan(av), nb = std::isnan(bv);
+            if(na || nb){
+                nnan++;
+                if((int)v < MAXV) nan_var[v]++;
+                if(na && nb)   nan_both++;
+                else if(na)    nan_forest++;
+                else           nan_packed++;
+                if(tg) nan_corner++; else nan_face++;
+                if(g[0] < 0){
+                    g[0]=(int)t; g[1]=(int)v; g[2]=(int)k; g[3]=(int)j;
+                    g[4]=(int)i; g[5]=(int)kk; g[6]=(int)jj; g[7]=(int)ii;
+                }
+                continue;
+            }
+            const double d = std::abs(av - bv);
             if(d == 0.0) continue;
             nbad++;
+            if((int)v < MAXV) bad_var[v]++;
+            if(tg) corner++; else face_only++;
             if(d > worst){
                 worst = d;
                 f[0]=(int)t; f[1]=(int)v; f[2]=(int)k; f[3]=(int)j;
                 f[4]=(int)i; f[5]=(int)kk; f[6]=(int)jj; f[7]=(int)ii;
             }
         }
-        //Classify: is the disagreement on the face proper (transverse indices
-        //all active) or only in the transverse ghost corners/edges?
-        long face_only = 0, corner = 0;
-        {
-            int gx=NGHx, gy=NGHy, gz=NGHz;
-            for(size_t t=0; t<a.extent(0); t++)
-            for(size_t v=0; v<a.extent(1); v++)
-            for(size_t k=0; k<a.extent(2); k++)
-            for(size_t j=0; j<a.extent(3); j++)
-            for(size_t i=0; i<a.extent(4); i++)
-            for(size_t kk=0; kk<a.extent(5); kk++)
-            for(size_t jj=0; jj<a.extent(6); jj++)
-            for(size_t ii=0; ii<a.extent(7); ii++){
-                if(a(t,v,k,j,i,kk,jj,ii) == b(t,v,k,j,i,kk,jj,ii)) continue;
-                bool tg = false;
-                if(dim!=_x_ && ((int)i<gx || (int)i>=P.Nx-gx)) tg = true;
-                if(dim!=_y_ && ((int)j<gy || (int)j>=P.Ny-gy)) tg = true;
-                if(dim!=_z_ && ((int)k<gz || (int)k>=P.Nz-gz)) tg = true;
-                if(tg) corner++; else face_only++;
-            }
-        }
-        if(nbad && reported < 4 && Master){
+        if((nbad || nnan) && reported < 4 && Master){
             reported++;
-            std::cout<<std::endl<<"[xchk] dim="<<dim<<" step="<<this->n_step
-                <<"  differing entries = "<<nbad<<"  max|forest-packed| = "<<worst
-                <<"\n       worst at (t="<<f[0]<<",var="<<f[1]<<",k="<<f[2]
-                <<",j="<<f[3]<<",i="<<f[4]<<",kk="<<f[5]<<",jj="<<f[6]<<",ii="<<f[7]<<")"
-                <<"  forest="<<std::setprecision(17)<<a(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
-                <<"  packed="<<b(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
-                <<std::setprecision(6)
-                <<"\n       on-face entries = "<<face_only
-                <<"   transverse-ghost (corner/edge) entries = "<<corner
-                <<"\n       extents N=("<<P.Nz<<","<<P.Ny<<","<<P.Nx<<")"
+            std::cout<<std::endl<<"[xchk] dim="<<dim<<" step="<<this->n_step;
+            if(nnan){
+                //The leading axis is block*n_ader + t_id, so it names the
+                //receiving block directly.
+                const int nad = P.n_ader;
+                std::cout<<"\n       NaN entries = "<<nnan
+                    <<"  (forest-only="<<nan_forest<<" packed-only="<<nan_packed
+                    <<" both="<<nan_both<<")"
+                    <<"  on-face = "<<nan_face<<"  transverse-ghost = "<<nan_corner
+                    <<"\n       first NaN at (t="<<g[0]<<",var="<<g[1]<<",k="<<g[2]
+                    <<",j="<<g[3]<<",i="<<g[4]<<",kk="<<g[5]<<",jj="<<g[6]<<",ii="<<g[7]<<")"
+                    <<"  recv block = "<<(nad>0 ? g[0]/nad : -1)
+                    <<" t_id = "<<(nad>0 ? g[0]%nad : -1)
+                    <<"\n       first NaN values: forest="<<std::setprecision(17)
+                    <<a(g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7])
+                    <<"  packed="<<b(g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7])
+                    <<std::setprecision(6);
+            }
+            std::cout<<"\n       differing entries = "<<nbad
+                <<"  max|forest-packed| = "<<worst;
+            if(nbad)
+                std::cout<<"\n       worst at (t="<<f[0]<<",var="<<f[1]<<",k="<<f[2]
+                    <<",j="<<f[3]<<",i="<<f[4]<<",kk="<<f[5]<<",jj="<<f[6]<<",ii="<<f[7]<<")"
+                    <<"  forest="<<std::setprecision(17)
+                    <<a(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
+                    <<"  packed="<<b(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
+                    <<std::setprecision(6);
+            std::cout<<"\n       on-face entries = "<<face_only
+                <<"   transverse-ghost (corner/edge) entries = "<<corner;
+            const int nv = std::min((int)a.extent(1), MAXV);
+            std::cout<<"\n       per-var  NaN:";
+            for(int v=0; v<nv; v++) std::cout<<" ["<<v<<"]="<<nan_var[v];
+            std::cout<<"\n       per-var diff:";
+            for(int v=0; v<nv; v++) std::cout<<" ["<<v<<"]="<<bad_var[v];
+            std::cout<<"\n       extents N=("<<P.Nz<<","<<P.Ny<<","<<P.Nx<<")"
                 <<" n=("<<P.nz<<","<<P.ny<<","<<P.nx<<") NGH=("<<NGHz<<","<<NGHy<<","<<NGHx<<")"
                 <<std::endl;
         }
