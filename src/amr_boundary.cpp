@@ -1016,3 +1016,132 @@ void gather_fv_same(FV_Solution U, IntVector recv, IntVector send,
             U.Vector(sb+var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
     }, "gather_fv_same");
 }
+
+//Unpack a sub-face index into one transverse half per active direction. Device
+//copy of fv_sub_bits, which reads cfg on the host: the activity flags have to
+//ride into the kernel as plain ints.
+KOKKOS_INLINE_FUNCTION
+void fv_sub_bits_d(int sub, int dim, int actx, int acty, int actz,
+                   int& bx, int& by, int& bz){
+    bx = by = bz = 0;
+    int bit = 0;
+    for(int d=0; d<3; d++){
+        int act = (d==_x_?actx:(d==_y_?acty:actz));
+        if(d==dim || !act) continue;
+        int v = (sub>>bit)&1;
+        if(d==_x_) bx=v; else if(d==_y_) by=v; else bz=v;
+        bit++;
+    }
+}
+
+//COARSER: the receiver is fine and reads a coarse neighbour. Same mapping as
+//fv_inject_coarser -- two fine cells share one coarse cell along the normal,
+//and the transverse offset depends on which half of the neighbour this block
+//covers -- with the block folded into the leading axis. One transaction per
+//receiving face, so the whole ghost slab including the transverse corners is
+//written exactly once (those corners are a fallback that the same-level pass
+//overwrites wherever a same-level neighbour owns them).
+void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector subv,
+                       int ntr, int dim, int side, int ngh){
+    if(ntr <= 0) return;
+    const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int nvar = U.n_var;
+    const int Nx = (dim==_x_ ? ngh : U.Nx);
+    const int Ny = (dim==_y_ ? ngh : U.Ny);
+    const int Nz = (dim==_z_ ? ngh : U.Nz);
+    const int gx = nGH_rt[_x_], gy = nGH_rt[_y_], gz = nGH_rt[_z_];
+    const int ax = U.Nx-2*gx, ay = U.Ny-2*gy, az = U.Nz-2*gz;
+    //Blocks in a pack share extents, so the coarse neighbour's are these.
+    const int cxm = U.Nx-1, cym = U.Ny-1, czm = U.Nz-1;
+    const int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    fv_for_cells_b(ntr,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        int bx,by,bz; fv_sub_bits_d(subv(b),dim,actx,acty,actz,bx,by,bz);
+        //Transverse: fine active offset a maps to coarse active offset
+        //(b*Na + a)/2, b being the half of the coarse block this one covers.
+        const int ci = (dim==_x_) ? i : fv_clamp(gx + fv_fdiv2(bx*ax + (i-gx)), cxm);
+        const int cj = (dim==_y_) ? j : fv_clamp(gy + fv_fdiv2(by*ay + (j-gy)), cym);
+        const int ck = (dim==_z_) ? k : fv_clamp(gz + fv_fdiv2(bz*az + (k-gz)), czm);
+        const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        //Normal: the coarse cell holding this ghost, counted off the interface.
+        const int cl = (side==0) ? (N-ngh) - ((ngh-l)+1)/2
+                                 : (ngh-1) + ((l+2)/2);
+        const int rb = recv(b)*nvar, sb = send(b)*nvar;
+        int Nid[3], Nidc[3];
+        fv_indices(Nidc,ck,cj,ci,cl,dim);
+        fv_indices(Nid,k,j,i,(side==0?l:N-ngh+l),dim);
+        for(int var=0; var<nvar; var++)
+            U.Vector(rb+var,Nid[_z_],Nid[_y_],Nid[_x_]) =
+            U.Vector(sb+var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
+    }, "gather_fv_coarser");
+}
+
+//FINER: the receiver is coarse and each fine neighbour supplies one quadrant of
+//its ghost slab, volume-averaged over the 2^ndim fine cells each coarse ghost
+//covers. One transaction per fine neighbour, and the quadrants partition the
+//active transverse range, so every ghost there is written exactly once.
+//
+//take_max swaps the average for a maximum, which is what the MOOD cascade index
+//needs: a demotion on either side of a level jump must be seen by both.
+//
+//The quadrants extend over the transverse ghost cells on their own side, so
+//they still partition the whole slab and every ghost -- corners included -- is
+//written exactly once. That has to match how the per-block operator assigns
+//them: its `b = (2*(i-gx) >= Na)` test puts the low-side ghosts in half 0 and
+//the high-side ghosts in half 1. Leaving the corners out instead is not
+//harmless, because apply_blending reads a full box neighbourhood including the
+//diagonals: at two refinement levels that produced O(0.1) corner errors and the
+//run diverged.
+void gather_fv_finer(FV_Solution U, IntVector recv, IntVector send, IntVector subv,
+                     int ntr, int dim, int side, int ngh, bool take_max){
+    if(ntr <= 0) return;
+    const int nvar = U.n_var;
+    const int gx = nGH_rt[_x_], gy = nGH_rt[_y_], gz = nGH_rt[_z_];
+    const int ax = U.Nx-2*gx, ay = U.Ny-2*gy, az = U.Nz-2*gz;
+    const int hxm = U.Nx-1, hym = U.Ny-1, hzm = U.Nz-1;
+    const int Nf = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    const bool tx = actx && dim!=_x_, ty = acty && dim!=_y_, tz = actz && dim!=_z_;
+    //Half the full transverse extent, which is gx + ax/2 on either side.
+    const int Qx = (dim==_x_) ? ngh : (tx ? gx + ax/2 : 1);
+    const int Qy = (dim==_y_) ? ngh : (ty ? gy + ay/2 : 1);
+    const int Qz = (dim==_z_) ? ngh : (tz ? gz + az/2 : 1);
+    //Every direction contributes two fine cells except the inactive ones.
+    const int ox = actx ? 2 : 1, oy = acty ? 2 : 1, oz = actz ? 2 : 1;
+    fv_for_cells_b(ntr,Qz,Qy,Qx, KOKKOS_LAMBDA(int b,int kq,int jq,int iq){
+        int bx,by,bz; fv_sub_bits_d(subv(b),dim,actx,acty,actz,bx,by,bz);
+        //Receiver cell: half 0 owns [0, gx+ax/2), half 1 owns [gx+ax/2, Nx).
+        const int i = (dim==_x_) ? iq : (tx ? bx*(gx+ax/2) + iq : iq);
+        const int j = (dim==_y_) ? jq : (ty ? by*(gy+ay/2) + jq : jq);
+        const int k = (dim==_z_) ? kq : (tz ? bz*(gz+az/2) + kq : kq);
+        //Fine cell base, same mapping as the per-block operator: the active
+        //offset doubles inside the half that owns it. Negative offsets (low
+        //ghosts) are intended; fv_clamp below keeps the reads in range.
+        int fx = tx ? gx + 2*(i-gx) - bx*ax : i;
+        int fy = ty ? gy + 2*(j-gy) - by*ay : j;
+        int fz = tz ? gz + 2*(k-gz) - bz*az : k;
+        const int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        const int nbase = (side==0) ? (Nf-ngh) - 2*(ngh-l) : ngh + 2*l;
+        if(dim==_x_)      fx = nbase;
+        else if(dim==_y_) fy = nbase;
+        else              fz = nbase;
+        const int rb = recv(b)*nvar, sb = send(b)*nvar;
+        int Nid[3];
+        fv_indices(Nid,k,j,i,(side==0?l:Nf-ngh+l),dim);
+        for(int var=0; var<nvar; var++){
+            double acc = take_max ? -1e300 : 0.0;
+            int cnt = 0;
+            for(int dz=0; dz<oz; dz++)
+            for(int dy=0; dy<oy; dy++)
+            for(int dx=0; dx<ox; dx++){
+                const int px = fv_clamp(fx+dx, hxm);
+                const int py = fv_clamp(fy+dy, hym);
+                const int pz = fv_clamp(fz+dz, hzm);
+                const double v = U.Vector(sb+var,pz,py,px);
+                if(take_max) acc = max(acc, v); else acc += v;
+                cnt++;
+            }
+            U.Vector(rb+var,Nid[_z_],Nid[_y_],Nid[_x_]) =
+                take_max ? acc : acc/max(cnt,1);
+        }
+    }, "gather_fv_finer");
+}

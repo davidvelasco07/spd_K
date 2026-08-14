@@ -163,6 +163,7 @@ struct Mesh : public PhysicsModule {
         SD_Solution U_sp, W_sp, W_cv, U_cv, U_ader_sp, U0_sp, T_sweep;
         SD_Solution T_fp_x, T_fp_y, T_fp_z;
         FV_Solution U_old, U_new, W_old, W_new, theta;
+        FV_Solution flagged, cascade;
         FV_Solution F_x, F_y, F_z;
     } pv;
 
@@ -191,6 +192,8 @@ struct Mesh : public PhysicsModule {
         pv.W_old       = fv_pack_view(pack,"W_old");
         pv.W_new       = fv_pack_view(pack,"W_new");
         pv.theta       = fv_pack_view(pack,"theta");
+        pv.flagged     = fv_pack_view(pack,"flagged");
+        pv.cascade     = fv_pack_view(pack,"cascade");
     }
 
     void build_geometry_pack(){
@@ -502,6 +505,77 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //Same comparison for an FV field, which is (nvar, Nz, Ny, Nx): no ADER or
+    //sub-point axis, and the halo is a slab rather than a face layer, so
+    //"transverse ghost" here means a ghost cell of a direction other than the
+    //one being exchanged. NaN is separated from magnitude for the reason given
+    //on report_exchange_diff.
+    void report_fv_diff(FV_Solution P, FV_Vector other, int dim){
+        static int reported = 0;
+        if(this->n_step < xchk_from()) return;
+        auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.Vector);
+        auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), other);
+        double worst = 0.0;
+        long nbad = 0, slab_only = 0, corner = 0, nnan = 0;
+        int f[4] = {-1,-1,-1,-1};
+        constexpr int MAXV = 16;
+        long nan_var[MAXV] = {0}, bad_var[MAXV] = {0};
+        const int gx = nGH_rt[_x_], gy = nGH_rt[_y_], gz = nGH_rt[_z_];
+        for(size_t v=0; v<a.extent(0); v++)
+        for(size_t k=0; k<a.extent(1); k++)
+        for(size_t j=0; j<a.extent(2); j++)
+        for(size_t i=0; i<a.extent(3); i++){
+            const double av = a(v,k,j,i), bv = b(v,k,j,i);
+            bool tg = false;
+            if(dim!=_x_ && ((int)i<gx || (int)i>=P.Nx-gx)) tg = true;
+            if(dim!=_y_ && ((int)j<gy || (int)j>=P.Ny-gy)) tg = true;
+            if(dim!=_z_ && ((int)k<gz || (int)k>=P.Nz-gz)) tg = true;
+            //The leading axis is block*n_var + var, so the histogram has to be
+            //taken modulo n_var -- indexing it by the raw slot would only ever
+            //cover the first few blocks and read as "no variable differs".
+            const int var = (P.n_var>0) ? (int)v % P.n_var : 0;
+            if(std::isnan(av) || std::isnan(bv)){
+                nnan++;
+                if(var < MAXV) nan_var[var]++;
+                continue;
+            }
+            const double d = std::abs(av - bv);
+            if(d == 0.0) continue;
+            nbad++;
+            if(var < MAXV) bad_var[var]++;
+            if(tg) corner++; else slab_only++;
+            if(d > worst){
+                worst = d;
+                f[0]=(int)v; f[1]=(int)k; f[2]=(int)j; f[3]=(int)i;
+            }
+        }
+        if((nbad || nnan) && reported < 4 && Master){
+            reported++;
+            //The leading axis is block*n_var + var, so it names the block.
+            const int nv0 = P.n_var;
+            std::cout<<std::endl<<"[fvchk] dim="<<dim<<" step="<<this->n_step
+                <<"  NaN = "<<nnan<<"  differing entries = "<<nbad
+                <<"  max|forest-packed| = "<<worst;
+            if(nbad)
+                std::cout<<"\n        worst at (slot="<<f[0]<<",k="<<f[1]
+                    <<",j="<<f[2]<<",i="<<f[3]<<")"
+                    <<"  block = "<<(nv0>0 ? f[0]/nv0 : -1)
+                    <<" var = "<<(nv0>0 ? f[0]%nv0 : -1)
+                    <<"  forest="<<std::setprecision(17)<<a(f[0],f[1],f[2],f[3])
+                    <<"  packed="<<b(f[0],f[1],f[2],f[3])<<std::setprecision(6);
+            std::cout<<"\n        in-slab entries = "<<slab_only
+                <<"   transverse-ghost entries = "<<corner;
+            const int nv = std::min(nv0, MAXV);
+            std::cout<<"\n        per-var  NaN:";
+            for(int v=0; v<nv; v++) std::cout<<" ["<<v<<"]="<<nan_var[v];
+            std::cout<<"\n        per-var diff:";
+            for(int v=0; v<nv; v++) std::cout<<" ["<<v<<"]="<<bad_var[v];
+            std::cout<<"\n        extents N=("<<P.Nz<<","<<P.Ny<<","<<P.Nx<<")"
+                <<" nGH=("<<gz<<","<<gy<<","<<gx<<") n_var="<<nv0
+                <<std::endl;
+        }
+    }
+
     //All relations for one direction, as batched gathers over the
     //transaction tables. Physical boundaries stay a per-block call: there are
     //few of them and they need no neighbour.
@@ -560,7 +634,57 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //All relations for one direction of an FV field, as batched gathers over
+    //the same transaction tables the flux points use. Physical boundaries stay
+    //a per-block call: there are few of them and they need no neighbour.
+    void gather_all_fv(FV_Solution& P, FV_Solution Block::*member, int dim,
+                       bool take_max){
+        const int ngh = nGH_rt[dim];
+        for(int side=0; side<2; side++){
+            gather_fv_same(P, xt_[dim][side].recv, xt_[dim][side].send,
+                           xt_[dim][side].n, dim, side, ngh);
+            gather_fv_coarser(P, xtco_[dim][side].recv, xtco_[dim][side].send,
+                              xtco_[dim][side].sub, xtco_[dim][side].n, dim, side, ngh);
+            gather_fv_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                            xtfi_[dim][side].sub, xtfi_[dim][side].n, dim, side,
+                            ngh, take_max);
+            for(int ib : forest.face_groups[dim][side].bc_ib)
+                apply_domain_bc_fv(blocks[ib].*member, dim, side, ngh);
+        }
+    }
+
+    //SPD_EXCHANGE_CHECK=1 runs both FV implementations from the same pre-state
+    //and reports where they disagree, exactly as Exchange_fp does. The forest
+    //path is the reference.
+    void Exchange_fv_check(FV_Solution& P, FV_Solution Block::*member, int dim,
+                           bool take_max){
+        FV_Vector pre("fvchk_pre", P.Vector.layout());
+        FV_Vector packed("fvchk_pk", P.Vector.layout());
+        Kokkos::deep_copy(pre, P.Vector);
+        gather_all_fv(P, member, dim, take_max);
+        Kokkos::deep_copy(packed, P.Vector);
+        Kokkos::deep_copy(P.Vector, pre);
+        if(take_max) forest_exchange_fv_max(forest, blocks, member, dim);
+        else         forest_exchange_fv(forest, blocks, member, dim);
+        report_fv_diff(P, packed, dim);
+    }
+
     void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr){
+        //SPD_NEW_XCHG routes the FV halo through the transaction tables. It
+        //needs the whole-pack view, so a field without one still takes the
+        //forest path.
+        if(new_xchg() && packed){
+            for(int dim=0; dim<3; dim++){
+                if(!cfg.active[dim]) continue;
+                if(exchange_check()) Exchange_fv_check(*packed, member, dim, false);
+                else                 gather_all_fv(*packed, member, dim, false);
+            }
+            if(forest.max_level()>0)
+                for(int dim=0; dim<3; dim++)
+                    if(cfg.active[dim])
+                        forest_exchange_fv_same(forest, blocks, member, dim);
+            return;
+        }
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
             if(forest.max_level()>0 || no_pack()){
@@ -737,10 +861,10 @@ struct Mesh : public PhysicsModule {
             { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
             { Region r("FV_detect"); FV_detect_batched(); }
             if(!cfg.muscl_only){ Region r("Exchange_flagged");
-                                 Exchange_fv_field(&Block::flagged); }
+                                 Exchange_fv_field(&Block::flagged,&pv.flagged); }
             { Region r("FV_theta"); FV_theta_batched(); }
             if(!cfg.muscl_only){ Region r("Exchange_theta");
-                                 Exchange_fv_field(&Block::theta); }
+                                 Exchange_fv_field(&Block::theta,&pv.theta); }
             { Region r("FV_blend");
               for(int b=0;b<nblocks;b++)
                   blocks[b].FV_blend(ader,Xd[b],Yd[b],Zd[b]); }

@@ -106,6 +106,10 @@ extern void apply_domain_bc_fp(SD_Solution, int, int);
 extern void apply_domain_bc_fv(FV_Solution, int, int, int);
 extern void gather_fp_same(SD_Solution, IntVector, IntVector, int, int, int);
 extern void gather_fv_same(FV_Solution, IntVector, IntVector, int, int, int, int);
+extern void gather_fv_coarser(FV_Solution, IntVector, IntVector, IntVector,
+                              int, int, int, int);
+extern void gather_fv_finer(FV_Solution, IntVector, IntVector, IntVector,
+                            int, int, int, int, bool);
 extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
                               int, int, int, Matrix);
 extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,
