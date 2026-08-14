@@ -164,7 +164,8 @@ struct Mesh : public PhysicsModule {
         SD_Solution U_sp, W_sp, W_cv, U_cv, U_ader_sp, U0_sp, T_sweep;
         SD_Solution T_fp_x, T_fp_y, T_fp_z;
         FV_Solution U_old, U_new, W_old, W_new, theta;
-        FV_Solution flagged, cascade, troubles;
+        FV_Solution flagged, cascade, troubles, theta_tmp;
+        FV_Solution F1_x, F1_y, F1_z, F2_x, F2_y, F2_z;
         FV_Solution alpha_x, alpha_y, alpha_z;
         FV_Solution F_x, F_y, F_z;
     } pv;
@@ -200,6 +201,13 @@ struct Mesh : public PhysicsModule {
         pv.alpha_x     = fv_pack_view(pack,"alpha_x");
         pv.alpha_y     = fv_pack_view(pack,"alpha_y");
         pv.alpha_z     = fv_pack_view(pack,"alpha_z");
+        pv.theta_tmp   = fv_pack_view(pack,"theta_tmp");
+        pv.F1_x        = fv_pack_view(pack,"F1_x");
+        pv.F1_y        = fv_pack_view(pack,"F1_y");
+        pv.F1_z        = fv_pack_view(pack,"F1_z");
+        pv.F2_x        = fv_pack_view(pack,"F2_x");
+        pv.F2_y        = fv_pack_view(pack,"F2_y");
+        pv.F2_z        = fv_pack_view(pack,"F2_z");
     }
 
     void build_geometry_pack(){
@@ -726,10 +734,18 @@ struct Mesh : public PhysicsModule {
                 if(exchange_check()) Exchange_fv_check(*packed, member, dim, false);
                 else                 gather_all_fv(*packed, member, dim, false);
             }
+            //Corner pass: after every direction, refill each transverse ghost
+            //corner from the same-level neighbour that owns it. Batched, or it
+            //undoes the saving -- per block this ran after every exchange.
             if(forest.max_level()>0)
-                for(int dim=0; dim<3; dim++)
-                    if(cfg.active[dim])
-                        forest_exchange_fv_same(forest, blocks, member, dim);
+                for(int dim=0; dim<3; dim++){
+                    if(!cfg.active[dim]) continue;
+                    const int ngh = nGH_rt[dim];
+                    for(int side=0; side<2; side++)
+                        gather_fv_same(*packed, xt_[dim][side].recv,
+                                       xt_[dim][side].send, xt_[dim][side].n,
+                                       dim, side, ngh);
+                }
             return;
         }
         for(int dim=0; dim<3; dim++){
@@ -769,7 +785,26 @@ struct Mesh : public PhysicsModule {
         }
     }
 
-    void Exchange_fv_field_max(FV_Solution Block::*member){
+    void Exchange_fv_field_max(FV_Solution Block::*member, FV_Solution* packed=nullptr){
+        //The cascade halo runs once per revision, so this was the single
+        //largest source of launches in an AMR cascade run (41% of them).
+        if(new_xchg() && packed){
+            for(int dim=0; dim<3; dim++){
+                if(!cfg.active[dim]) continue;
+                if(exchange_check()) Exchange_fv_check(*packed, member, dim, true);
+                else                 gather_all_fv(*packed, member, dim, true);
+            }
+            if(forest.max_level()>0)
+                for(int dim=0; dim<3; dim++){
+                    if(!cfg.active[dim]) continue;
+                    const int ngh = nGH_rt[dim];
+                    for(int side=0; side<2; side++)
+                        gather_fv_same(*packed, xt_[dim][side].recv,
+                                       xt_[dim][side].send, xt_[dim][side].n,
+                                       dim, side, ngh);
+                }
+            return;
+        }
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
             if(forest.max_level()>0){
@@ -898,12 +933,34 @@ struct Mesh : public PhysicsModule {
             blocks[0].wt, ader, dt, 1);
     }
 
+    //Candidate update: same as the commit but it leaves U_cv alone.
+    void FV_candidate_batched(int ader){
+        fv_update_solution_b(pv.U_new, pv.U_old, pv.U_cv,
+            pv.F_x, fvx_p, pv.F_y, fvy_p, pv.F_z, fvz_p,
+            blocks[0].wt, ader, dt, 0);
+    }
+
+    //Pick each face's flux from the pooled cascade level, over the whole pack.
+    //This sits inside the revision loop, so per-block it was the launch that
+    //repeated most: three directions x max_revs x block count, every stage.
+    void cascade_assemble_pack(){
+        assign_face_flux_b(pv.F_x, pv.F1_x, pv.F2_x, pv.cascade, _x_);
+        if(cfg.active[_y_]) assign_face_flux_b(pv.F_y, pv.F1_y, pv.F2_y, pv.cascade, _y_);
+        if(cfg.active[_z_]) assign_face_flux_b(pv.F_z, pv.F1_z, pv.F2_z, pv.cascade, _z_);
+    }
+
     void FV_theta_batched(){
         if(cfg.muscl_only){
             Kokkos::deep_copy(pv.theta.Vector, 1.0);
             return;
         }
-        for(int b=0;b<nblocks;b++) blocks[b].FV_theta();
+        if(cfg.muscl_only){ Kokkos::deep_copy(pv.theta.Vector, 1.0); return; }
+        if(cfg.blending){
+            apply_blending_b(pv.flagged, pv.theta_tmp);
+            blending_ring_b(pv.theta_tmp, pv.theta);
+        }
+        else
+            theta_from_flagged_b(pv.flagged, pv.theta);
     }
 
     void FV_Update_solution_hydro(){
@@ -949,8 +1006,8 @@ struct Mesh : public PhysicsModule {
                   blocks[b].FV_cascade_levels(ader,Xd[b],Yd[b],Zd[b]); }
             for(int rev=0; rev<cfg.max_revs; rev++){
                 { Region r("FV_cascade_candidate");
-                  for(int b=0;b<nblocks;b++)
-                      blocks[b].FV_cascade_candidate(ader,Xd[b],Yd[b],Zd[b]); }
+                  cascade_assemble_pack();
+                  FV_candidate_batched(ader); }
                 //SED limits against a two-cell stencil of the candidate, so
                 //each revision needs its own U_new halo.
                 { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
@@ -963,10 +1020,9 @@ struct Mesh : public PhysicsModule {
                 int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
                 #endif
                 if(demoted==0) break;
-                { Region r("Exchange_cascade"); Exchange_fv_field_max(&Block::cascade); }
+                { Region r("Exchange_cascade"); Exchange_fv_field_max(&Block::cascade,&pv.cascade); }
             }
-            { Region r("FV_cascade_assemble");
-              for(int b=0;b<nblocks;b++) blocks[b].FV_cascade_assemble(); }
+            { Region r("FV_cascade_assemble"); cascade_assemble_pack(); }
             if(forest.max_level()>0){
                 Region r("correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)

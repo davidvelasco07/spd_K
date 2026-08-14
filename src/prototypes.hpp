@@ -166,6 +166,12 @@ extern int  update_cascade_b(FV_Solution, FV_Solution, int);
 extern void apply_blending(FV_Solution, FV_Solution);
 extern void blending_ring(FV_Solution, FV_Solution);
 extern void theta_from_flagged(FV_Solution, FV_Solution);
+//Whole-pack twins of the theta/assemble kernels.
+extern void apply_blending_b(FV_Solution, FV_Solution);
+extern void blending_ring_b(FV_Solution, FV_Solution);
+extern void theta_from_flagged_b(FV_Solution, FV_Solution);
+extern void assign_face_flux_b(FV_Solution, FV_Solution, FV_Solution,
+                               FV_Solution, int);
 //MOOD cascade, shared by hydro and MHD (see trouble_detection.cpp).
 extern int  update_cascade(FV_Solution flagged, FV_Solution cascade, int n_cascade);
 extern void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,

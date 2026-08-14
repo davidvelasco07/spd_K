@@ -263,33 +263,54 @@ void relax_NAD_b(FV_Solution troubles, FV_Solution flagged, FV_Solution alpha_x,
 //pass adds a 0.25 ring around every positive theta. The blended flux at a
 //face is then theta_face*F_MUSCL + (1-theta_face)*F_SD with
 //theta_face = max of the two adjacent cells (see fallback compute_fluxes).
-void apply_blending(FV_Solution flagged, FV_Solution theta){
-    int Nx = flagged.Nx;
-    int Ny = flagged.Ny;
-    int Nz = flagged.Nz;
-    bool ax = cfg.active[_x_];
-    bool ay = cfg.active[_y_];
-    bool az = cfg.active[_z_];
-    fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+KOKKOS_INLINE_FUNCTION
+void blend_cell(FV_Vector flagged, FV_Vector theta, int foff, int toff,
+                int k, int j, int i, bool ax, bool ay, bool az){
         const double w[4] = {1.0, 0.75, 0.5, 0.375};
         double th = 0;
         for(int dk=-(int)az; dk<=(int)az; dk++)
         for(int dj=-(int)ay; dj<=(int)ay; dj++)
         for(int di=-(int)ax; di<=(int)ax; di++){
             int n0 = (di!=0) + (dj!=0) + (dk!=0);
-            th = max(th, w[n0]*flagged.Vector(0,k+dk,j+dj,i+di));
+            th = max(th, w[n0]*flagged(foff,k+dk,j+dj,i+di));
         }
-        theta.Vector(0,k,j,i) = th;
+        theta(toff,k,j,i) = th;
+}
+
+void apply_blending(FV_Solution flagged, FV_Solution theta){
+    int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector fl=flagged.Vector, th=theta.Vector;
+    fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        blend_cell(fl,th,0,0,k,j,i,ax,ay,az);
+    });
+}
+
+void apply_blending_b(FV_Solution flagged, FV_Solution theta){
+    int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz, nb=flagged.nb;
+    int fnv=flagged.n_var, tnv=theta.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector fl=flagged.Vector, th=theta.Vector;
+    fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        blend_cell(fl,th,b*fnv,b*tnv,k,j,i,ax,ay,az);
     });
 }
 
 //theta = raw pooled flag (used when blending is disabled)
 void theta_from_flagged(FV_Solution flagged, FV_Solution theta){
-    int Nx = flagged.Nx;
-    int Ny = flagged.Ny;
-    int Nz = flagged.Nz;
+    int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz;
+    FV_Vector fl=flagged.Vector, th=theta.Vector;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        theta.Vector(0,k,j,i) = flagged.Vector(0,k,j,i);
+        th(0,k,j,i) = fl(0,k,j,i);
+    });
+}
+
+void theta_from_flagged_b(FV_Solution flagged, FV_Solution theta){
+    int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz, nb=flagged.nb;
+    int fnv=flagged.n_var, tnv=theta.n_var;
+    FV_Vector fl=flagged.Vector, th=theta.Vector;
+    fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        th(b*tnv,k,j,i) = fl(b*fnv,k,j,i);
     });
 }
 
@@ -341,38 +362,70 @@ int update_cascade_b(FV_Solution flagged, FV_Solution cascade, int n_cascade){
 
 //Pool the level over the two cells adjacent to each face and take that
 //level's flux, assembled in place into F0.
+KOKKOS_INLINE_FUNCTION
+void assign_face_cell(FV_Vector F0, FV_Vector F1, FV_Vector F2, FV_Vector cascade,
+                      int off, int coff, int k, int j, int i, int nvar, int dim){
+        int kL=k-(dim==_z_), jL=j-(dim==_y_), iL=i-(dim==_x_);
+        double c = max(cascade(coff,k,j,i), cascade(coff,kL,jL,iL));
+        if(c>=1){
+            for(int var=off;var<off+nvar;var++)
+                F0(var,k,j,i) = c>=2 ? F2(var,k,j,i) : F1(var,k,j,i);
+        }
+}
+
 void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
                       FV_Solution cascade, int dim){
     int Nx=cascade.Nx, Ny=cascade.Ny, Nz=cascade.Nz, nvar=F0.n_var;
+    FV_Vector f0=F0.Vector, f1=F1.Vector, f2=F2.Vector, ca=cascade.Vector;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
-        int kL=k-(dim==_z_), jL=j-(dim==_y_), iL=i-(dim==_x_);
-        double c = max(cascade.Vector(0,k,j,i), cascade.Vector(0,kL,jL,iL));
-        if(c>=1){
-            for(int var=0;var<nvar;var++)
-                F0.Vector(var,k,j,i) = c>=2 ? F2.Vector(var,k,j,i)
-                                            : F1.Vector(var,k,j,i);
-        }
+        assign_face_cell(f0,f1,f2,ca,0,0,k,j,i,nvar,dim);
+    });
+}
+
+//Same over a whole pack. This one sits inside the revision loop, so it is the
+//per-block launch that repeats most: three directions times max_revs times the
+//block count, every stage.
+void assign_face_flux_b(FV_Solution F0, FV_Solution F1, FV_Solution F2,
+                        FV_Solution cascade, int dim){
+    int Nx=cascade.Nx, Ny=cascade.Ny, Nz=cascade.Nz, nb=cascade.nb;
+    int nvar=F0.n_var, cnv=cascade.n_var;
+    FV_Vector f0=F0.Vector, f1=F1.Vector, f2=F2.Vector, ca=cascade.Vector;
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        assign_face_cell(f0,f1,f2,ca,b*nvar,b*cnv,k,j,i,nvar,dim);
     });
 }
 
 //Adds the 0.25 ring: theta_out = max(theta_in, 0.25*(any box neighbor of
 //theta_in positive)). Reads only theta_in, so the result matches the
 //reference's single-dilation semantics and is order-independent.
-void blending_ring(FV_Solution theta_in, FV_Solution theta_out){
-    int Nx = theta_in.Nx;
-    int Ny = theta_in.Ny;
-    int Nz = theta_in.Nz;
-    bool ax = cfg.active[_x_];
-    bool ay = cfg.active[_y_];
-    bool az = cfg.active[_z_];
-    fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        double th = theta_in.Vector(0,k,j,i);
+KOKKOS_INLINE_FUNCTION
+void ring_cell(FV_Vector ti, FV_Vector to, int off, int k, int j, int i,
+               bool ax, bool ay, bool az){
+        double th = ti(off,k,j,i);
         double ring = 0;
         for(int dk=-(int)az; dk<=(int)az; dk++)
         for(int dj=-(int)ay; dj<=(int)ay; dj++)
         for(int di=-(int)ax; di<=(int)ax; di++)
-            if(theta_in.Vector(0,k+dk,j+dj,i+di) > 0) ring = 0.25;
-        theta_out.Vector(0,k,j,i) = max(th, ring);
+            if(ti(off,k+dk,j+dj,i+di) > 0) ring = 0.25;
+        to(off,k,j,i) = max(th, ring);
+}
+
+void blending_ring(FV_Solution theta_in, FV_Solution theta_out){
+    int Nx=theta_in.Nx, Ny=theta_in.Ny, Nz=theta_in.Nz;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector ti=theta_in.Vector, to=theta_out.Vector;
+    fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        ring_cell(ti,to,0,k,j,i,ax,ay,az);
+    });
+}
+
+void blending_ring_b(FV_Solution theta_in, FV_Solution theta_out){
+    int Nx=theta_in.Nx, Ny=theta_in.Ny, Nz=theta_in.Nz, nb=theta_in.nb;
+    int nv=theta_in.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector ti=theta_in.Vector, to=theta_out.Vector;
+    fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        ring_cell(ti,to,b*nv,k,j,i,ax,ay,az);
     });
 }
 
