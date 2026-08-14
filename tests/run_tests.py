@@ -122,6 +122,65 @@ CONFIGS = {
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
     },
+    "hydro_cascade_2d": {
+        # MOOD cascade on a smooth wave. The detector still fires on ~0.6% of
+        # cells here (round-off-level NAD violations that survive SED), and a
+        # discrete cascade gives those cells no partial credit: the face takes
+        # the MUSCL flux outright, where the fractional blend would weight it.
+        # So the L1 error is about twice the blend/SD value (measured 4.36e-05
+        # against 2.16e-05) -- a property of the scheme, not a defect. The
+        # limit is set to catch a real regression, not to assert SD accuracy.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx3=1",
+                      "fallback/style=cascade"],
+        "ndim": 2,
+        "checks": ["analytic", "mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.1,
+        "l1_limit": 6.0e-5,
+    },
+    "hydro_cascade_blast_2d": {
+        # Real shock: cells demote to levels 1 and 2, and the assembled
+        # single-valued face flux must still conserve mass to round-off.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx3=1",
+                      "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02",
+                      "fallback/style=cascade"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "hydro_sod_1d": {
+        # gradfree outflow reference. Mass is not conserved by construction
+        # (it leaves through both ends), so this is a golden comparison only.
+        "input": "inputs/sod.athinput",
+        "overrides": [],
+        "ndim": 1,
+        "checks": ["golden"],
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.2,
+        "golden_name": "hydro_sod",
+        "golden_rtol": 1e-6,
+    },
+    "hydro_sod_1d_mb_forest": {
+        # Four blocks with SPD_NO_PACK=1, which forces the per-block forest
+        # exchange instead of the packed fast path. That is the only route
+        # that reaches apply_domain_bc_fv, and before it existed the FV ghost
+        # slab at the gradfree wall was never filled: this case diverged on
+        # step 1. The active region must match the single-block golden.
+        "input": "inputs/sod.athinput",
+        "overrides": ["meshblock/nx1=8"],
+        "env": {"SPD_NO_PACK": "1"},
+        "ndim": 1,
+        "checks": ["golden_active"],
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.2,
+        "golden_name": "hydro_sod",
+        "golden_rtol": 1e-6,
+    },
     "hydro_muscl_2d": {
         # job/scheme=muscl pins the fallback blend to 1 on every face, which is
         # a different path from the hydro_fv_* tests: those run SD and only
@@ -424,6 +483,10 @@ def run(build_dir, outdir, cfg):
     if os.path.isdir(outdir):
         shutil.rmtree(outdir)
     env = dict(os.environ, SPD_OUTPUT_DIR=outdir)
+    # "env" in a config selects a code path that no input-file option reaches,
+    # e.g. SPD_NO_PACK=1 to force the per-block forest exchange on a uniform
+    # mesh (which the packed fast path would otherwise handle).
+    env.update(cfg.get("env", {}))
     cmd = [os.path.join(build_dir, "spd_K"), "-i",
            os.path.join(ROOT, cfg["input"])] + cfg["overrides"]
     return sh(cmd, env=env).stdout

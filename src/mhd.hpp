@@ -78,12 +78,9 @@ extern void mhd_fv_fluxes(FV_Solution W, FV_Solution F,
 extern void mhd_four_state_E(FV_Solution E, FV_Solution W,
                              Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                              int dim, bool muscl);
-extern void mhd_assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
-                                 FV_Solution cascade, int dim);
 extern void mhd_assign_edge_E(FV_Solution E0, FV_Solution E1, FV_Solution E2,
                               FV_Solution cascade, int dim);
 extern void mhd_set_candidate_B(FV_Solution U_new, FV_Solution B_cand);
-extern int  mhd_update_cascade(FV_Solution troubles, FV_Solution cascade, int n_cascade);
 
 //========================================================================================
 //! \struct MHD_ader
@@ -581,9 +578,9 @@ struct MHD_ader : public PhysicsModule {
     // z flux sweep and the Ex/Ey edge families do not exist.
     void mood_assemble(){
         bool az=cfg.active[_z_];
-        mhd_assign_face_flux(F0_x,F1_x,F2_x,cascade,_x_);
-        mhd_assign_face_flux(F0_y,F1_y,F2_y,cascade,_y_);
-        if(az) mhd_assign_face_flux(F0_z,F1_z,F2_z,cascade,_z_);
+        assign_face_flux(F0_x,F1_x,F2_x,cascade,_x_);
+        assign_face_flux(F0_y,F1_y,F2_y,cascade,_y_);
+        if(az) assign_face_flux(F0_z,F1_z,F2_z,cascade,_z_);
         if(az){
             mhd_assign_edge_E(E0x,E1x,E2x,cascade,_x_);
             mhd_assign_edge_E(E0y,E1y,E2y,cascade,_y_);
@@ -678,7 +675,7 @@ struct MHD_ader : public PhysicsModule {
         mhd_detection_vars(U_new_fv,det_new);
         mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance);
         mhd_PAD(U_new_fv,troubles);
-        return mhd_update_cascade(troubles,cascade,2);
+        return update_cascade(troubles,cascade,2);
     }
 
     void mood_commit(){

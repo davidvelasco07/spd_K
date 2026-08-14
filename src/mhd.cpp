@@ -705,20 +705,6 @@ void mhd_four_state_E(FV_Solution E, FV_Solution W,
 // Assembles IN PLACE into the level-0 array F0 (memory: no separate assembled copy).
 // This is safe across revision sweeps because the cascade never decreases: a face whose
 // F0 slot was overwritten has pooled level >= 1 and is never read at level 0 again.
-void mhd_assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
-                          FV_Solution cascade, int dim){
-    int Nx=cascade.Nx, Ny=cascade.Ny, Nz=cascade.Nz, nvar=F0.n_var;
-    fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
-        int kL=k-(dim==_z_), jL=j-(dim==_y_), iL=i-(dim==_x_);
-        double c = max(cascade.Vector(0,k,j,i), cascade.Vector(0,kL,jL,iL));
-        if(c>=1){
-            for(int var=0;var<nvar;var++)
-                F0.Vector(var,k,j,i) = c>=2 ? F2.Vector(var,k,j,i)
-                                            : F1.Vector(var,k,j,i);
-        }
-    });
-}
-
 // Edge E level pooling: the edge of family `dim` at (K,J,I) is shared by the cells offset
 // by (o1,o2) in {-1,0} along the two transverse directions. Assembles IN PLACE into the
 // level-0 array E0 (see mhd_assign_face_flux: valid because the cascade never decreases,
@@ -758,17 +744,6 @@ void mhd_set_candidate_B(FV_Solution U_new, FV_Solution B_cand){
 
 // Demote still-troubled, revisable cells one cascade level; returns the number demoted.
 // Runs over the interior FV cells (the cascade ghosts are refreshed by a halo exchange).
-int mhd_update_cascade(FV_Solution troubles, FV_Solution cascade, int n_cascade){
-    int Nx=troubles.Nx, Ny=troubles.Ny, Nz=troubles.Nz;
-    double demoted = fv_sum_cells_ngh2(Nz,Ny,Nx,
-        KOKKOS_LAMBDA(int k,int j,int i,double& s){
-            double tr=troubles.Vector(0,k,j,i);
-            double c =cascade.Vector(0,k,j,i);
-            if(tr>0 && c<n_cascade){ cascade.Vector(0,k,j,i)=c+1; s+=1; }
-        });
-    return (int)demoted;
-}
-
 //----------------------------------------------------------------------------------------
 // CT-consistent divergence of the face-staggered field, evaluated at solution points:
 //   div B = dBx_fp/dx + dBy_fp/dy + dBz_fp/dz

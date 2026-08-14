@@ -59,9 +59,15 @@ struct Hydro_ader : public PhysicsModule{
     FV_Solution U_old;
     FV_Solution W_old;
     FV_Solution troubles;  //per-variable trouble flags, block-local
-    FV_Solution cascade;   //per-cell fallback level, the only flag data exchanged
+    FV_Solution flagged;   //per-cell pooled trouble flag, the only flag data exchanged
     FV_Solution theta;     //fractional blend factor per cell
     FV_Solution theta_tmp;
+    //MOOD cascade (cfg.mood_cascade only): monotonic per-cell level plus the
+    //per-level face fluxes it selects between. Level 0 is F_x/F_y/F_z, which
+    //the assembly overwrites in place.
+    FV_Solution cascade;
+    FV_Solution F1_x, F1_y, F1_z;
+    FV_Solution F2_x, F2_y, F2_z;
     FV_Solution F_x;
     FV_Solution alpha_x;
     FV_Boundaries BC_x;
@@ -221,7 +227,7 @@ struct Hydro_ader : public PhysicsModule{
             alloc(U_old,"U_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(W_old,"W_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(troubles,"troubles",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            alloc(cascade,"cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(flagged,"flagged",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(theta,"theta",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(theta_tmp,"theta_tmp",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(F_x,"F_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
@@ -236,6 +242,15 @@ struct Hydro_ader : public PhysicsModule{
             alloc(alpha_z,"alpha_z",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             BC_z.init(Z_dim,cfg.bc[_z_],nvar,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
             alloc(T_fp_z,"T_fp_z",1,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+            if(cfg.mood_cascade){
+                alloc(cascade,"cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
+                alloc(F1_x,"F1_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+                alloc(F2_x,"F2_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+                alloc(F1_y,"F1_y",nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+                alloc(F2_y,"F2_y",nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+                alloc(F1_z,"F1_z",nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+                alloc(F2_z,"F2_z",nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+            }
         }
 
         ////////////////////////
@@ -539,7 +554,8 @@ struct Hydro_ader : public PhysicsModule{
         }
         if(cfg.fallback){
             Write(troubles,n_output);
-            Write(cascade,n_output);
+            Write(flagged,n_output);
+            if(cfg.mood_cascade) Write(cascade,n_output);
         }
         Write(F_ader_fp_x,n_output);
         Write(W_cv,n_output++);
@@ -652,7 +668,7 @@ struct Hydro_ader : public PhysicsModule{
         //Following the reference implementation, only density and
         //pressure enter the NAD/SED checks (uniform or zero fields,
         //like transverse velocities, have no meaningful relative band)
-        detect_troubles(W_new,W_old,troubles,cascade,
+        detect_troubles(W_new,W_old,troubles,flagged,
             alpha_x,alpha_y,alpha_z,
             X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
     }
@@ -667,11 +683,11 @@ struct Hydro_ader : public PhysicsModule{
             return;
         }
         if(cfg.blending){
-            apply_blending(cascade,theta_tmp);
+            apply_blending(flagged,theta_tmp);
             blending_ring(theta_tmp,theta);
         }
         else
-            theta_from_cascade(cascade,theta);
+            theta_from_flagged(flagged,theta);
     }
 
     //Blend MUSCL fluxes into the troubled faces and redo the update.
@@ -704,7 +720,96 @@ struct Hydro_ader : public PhysicsModule{
         transform_cv_to_sp(U_cv,U_sp);
     }
 
+    //================================================================
+    // MOOD cascade fallback (cfg.mood_cascade)
+    //================================================================
+    // Instead of blending the MUSCL flux into troubled faces by a fractional
+    // weight, every cell carries a level and each face takes the flux of the
+    // more demoted of its two cells. The levels only rise, so the assembly
+    // overwrites the level-0 array in place and every face stays
+    // single-valued -- the property the conservative update needs.
+    //
+    // The two lower-level flux sets are built once per ader step from the
+    // halo'd old state; a revision then only re-assembles and re-tests.
+
+    //Candidate update: same as FV_commit but leaves U_cv alone.
+    void FV_candidate(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        fv_update_solution(U_new,U_old,U_cv,
+            F_x,X_dim.fv_faces,
+            F_y,Y_dim.fv_faces,
+            F_z,Z_dim.fv_faces,
+            wt,ader,dt,0);
+    }
+
+    //Requires ghosted U_old (W_old is derived from it).
+    void FV_cascade_levels(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        level_fluxes(W_old,
+            X_dim.fv_centers,X_dim.fv_faces,F1_x,
+            Y_dim.fv_centers,Y_dim.fv_faces,F1_y,
+            Z_dim.fv_centers,Z_dim.fv_faces,F1_z,
+            ader,wt,dt,true);
+        level_fluxes(W_old,
+            X_dim.fv_centers,X_dim.fv_faces,F2_x,
+            Y_dim.fv_centers,Y_dim.fv_faces,F2_y,
+            Z_dim.fv_centers,Z_dim.fv_faces,F2_z,
+            ader,wt,dt,false);
+        Kokkos::deep_copy(cascade.Vector,0.0);
+    }
+
+    void FV_cascade_assemble(){
+        assign_face_flux(F_x,F1_x,F2_x,cascade,_x_);
+        if(cfg.active[_y_]) assign_face_flux(F_y,F1_y,F2_y,cascade,_y_);
+        if(cfg.active[_z_]) assign_face_flux(F_z,F1_z,F2_z,cascade,_z_);
+    }
+
+    //A revision is split at the ghost exchange it needs, like the rest of the
+    //FV phases: assemble and form the candidate, then (after the candidate has
+    //been halo'd) re-detect and demote. The halo in the middle is not optional
+    //-- SED reads W_new across a two-cell stencil, so a revision that reused
+    //the previous candidate's ghosts would limit against stale data. MHD's
+    //MOOD needs only one U halo for the whole loop because it runs no SED.
+    void FV_cascade_candidate(int ader, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        FV_cascade_assemble();
+        FV_candidate(ader,X_dim,Y_dim,Z_dim);
+    }
+
+    //Requires ghosted U_new. Returns the number of cells demoted, so the
+    //caller can stop once a sweep changes nothing.
+    int FV_cascade_detect(dimension X_dim, dimension Y_dim, dimension Z_dim){
+        compute_primitives(U_new,W_new);
+        detect_troubles(W_new,W_old,troubles,flagged,
+            alpha_x,alpha_y,alpha_z,
+            X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
+        return update_cascade(flagged,cascade,2);
+    }
+
+    void FV_Update_solution_cascade(CommHelper comm, dimension X_dim, dimension Y_dim, dimension Z_dim){
+        FV_begin();
+        for(int ader=0;ader<n_ader;ader++){
+            FV_flux_update(ader,X_dim,Y_dim,Z_dim);
+            apply_fv_boundaries(comm,U_old);
+            compute_primitives(U_old,W_old);
+            FV_cascade_levels(ader,X_dim,Y_dim,Z_dim);
+            for(int rev=0; rev<cfg.max_revs; rev++){
+                FV_cascade_candidate(ader,X_dim,Y_dim,Z_dim);
+                apply_fv_boundaries(comm,U_new);
+                if(FV_cascade_detect(X_dim,Y_dim,Z_dim)==0) break;
+                //A demotion has to be visible from the other side of every
+                //face it touches, or the two sides would assemble different
+                //fluxes and the update would stop conserving.
+                apply_fv_boundaries(comm,cascade);
+            }
+            FV_cascade_assemble();
+            FV_commit(ader,X_dim,Y_dim,Z_dim);
+        }
+        FV_end();
+    }
+
     void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){
+        if(cfg.mood_cascade){
+            FV_Update_solution_cascade(comm,X_dim,Y_dim,Z_dim);
+            return;
+        }
         FV_begin();
         #ifdef DEBUG_MASS
         printf("step %d mass in : %.15e\n", n_step, fv_mass(U_cv,X_dim,Y_dim,Z_dim));
@@ -721,7 +826,7 @@ struct Hydro_ader : public PhysicsModule{
             //stencils near the domain boundary see the same data as their
             //periodic partners. Only the pooled level is read downstream, so
             //this is a one-component halo rather than the whole flag array.
-            if(!cfg.muscl_only) apply_fv_boundaries(comm,cascade);
+            if(!cfg.muscl_only) apply_fv_boundaries(comm,flagged);
             FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical

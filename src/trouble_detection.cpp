@@ -156,7 +156,7 @@ void smooth_extrema(FV_Solution U, FV_Solution alpha, Vector centers, Vector fac
 //was accepted, 1 where any limited variable was flagged. It is the only part
 //of the detection that anything downstream reads, and the only part that
 //needs a halo.
-void relax_NAD(FV_Solution troubles, FV_Solution cascade, FV_Solution alpha_x, FV_Solution alpha_y, FV_Solution alpha_z, int limit_mask, bool use_sed){
+void relax_NAD(FV_Solution troubles, FV_Solution flagged, FV_Solution alpha_x, FV_Solution alpha_y, FV_Solution alpha_z, int limit_mask, bool use_sed){
     int Nx = troubles.Nx;
     int Ny = troubles.Ny;
     int Nz = troubles.Nz;
@@ -185,7 +185,7 @@ void relax_NAD(FV_Solution troubles, FV_Solution cascade, FV_Solution alpha_x, F
         for(int var=0; var<nvar; var++)
             if((limit_mask>>var)&1)
                 trouble = max(trouble,troubles.Vector(var,k,j,i));
-        cascade.Vector(0,k,j,i) = trouble;
+        flagged.Vector(0,k,j,i) = trouble;
     });
 }
 
@@ -195,10 +195,10 @@ void relax_NAD(FV_Solution troubles, FV_Solution cascade, FV_Solution alpha_x, F
 //pass adds a 0.25 ring around every positive theta. The blended flux at a
 //face is then theta_face*F_MUSCL + (1-theta_face)*F_SD with
 //theta_face = max of the two adjacent cells (see fallback compute_fluxes).
-void apply_blending(FV_Solution cascade, FV_Solution theta){
-    int Nx = cascade.Nx;
-    int Ny = cascade.Ny;
-    int Nz = cascade.Nz;
+void apply_blending(FV_Solution flagged, FV_Solution theta){
+    int Nx = flagged.Nx;
+    int Ny = flagged.Ny;
+    int Nz = flagged.Nz;
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -209,19 +209,65 @@ void apply_blending(FV_Solution cascade, FV_Solution theta){
         for(int dj=-(int)ay; dj<=(int)ay; dj++)
         for(int di=-(int)ax; di<=(int)ax; di++){
             int n0 = (di!=0) + (dj!=0) + (dk!=0);
-            th = max(th, w[n0]*cascade.Vector(0,k+dk,j+dj,i+di));
+            th = max(th, w[n0]*flagged.Vector(0,k+dk,j+dj,i+di));
         }
         theta.Vector(0,k,j,i) = th;
     });
 }
 
-//theta = raw cascade level (used when blending is disabled)
-void theta_from_cascade(FV_Solution cascade, FV_Solution theta){
-    int Nx = cascade.Nx;
-    int Ny = cascade.Ny;
-    int Nz = cascade.Nz;
+//theta = raw pooled flag (used when blending is disabled)
+void theta_from_flagged(FV_Solution flagged, FV_Solution theta){
+    int Nx = flagged.Nx;
+    int Ny = flagged.Ny;
+    int Nz = flagged.Nz;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        theta.Vector(0,k,j,i) = cascade.Vector(0,k,j,i);
+        theta.Vector(0,k,j,i) = flagged.Vector(0,k,j,i);
+    });
+}
+
+//======================================================================
+// MOOD cascade
+//
+// The alternative to blending: instead of mixing the high-order and
+// fallback fluxes by a fractional weight, every cell carries an integer
+// level and each face takes the flux of the more demoted of the two cells
+// it separates. A cell's level only ever rises, so the assembly can
+// overwrite the level-0 array in place and a face's value is single-valued
+// from both sides -- which is what keeps the update conservative (and, for
+// MHD, the CT curl divergence-free).
+//
+// These two are system-neutral: they read the component count from the
+// array and know nothing about which variables it holds. Hydro and MHD
+// share them; MHD's edge-E assembly stays in mhd.cpp because the edge
+// lattice is specific to constrained transport.
+//======================================================================
+
+//Demote every flagged cell by one level, up to n_cascade. Returns the number
+//demoted, so the caller can stop revising once a sweep changes nothing.
+int update_cascade(FV_Solution flagged, FV_Solution cascade, int n_cascade){
+    int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz;
+    double demoted = fv_sum_cells_ngh2(Nz,Ny,Nx,
+        KOKKOS_LAMBDA(int k,int j,int i,double& s){
+            double tr=flagged.Vector(0,k,j,i);
+            double c =cascade.Vector(0,k,j,i);
+            if(tr>0 && c<n_cascade){ cascade.Vector(0,k,j,i)=c+1; s+=1; }
+        });
+    return (int)demoted;
+}
+
+//Pool the level over the two cells adjacent to each face and take that
+//level's flux, assembled in place into F0.
+void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
+                      FV_Solution cascade, int dim){
+    int Nx=cascade.Nx, Ny=cascade.Ny, Nz=cascade.Nz, nvar=F0.n_var;
+    fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
+        int kL=k-(dim==_z_), jL=j-(dim==_y_), iL=i-(dim==_x_);
+        double c = max(cascade.Vector(0,k,j,i), cascade.Vector(0,kL,jL,iL));
+        if(c>=1){
+            for(int var=0;var<nvar;var++)
+                F0.Vector(var,k,j,i) = c>=2 ? F2.Vector(var,k,j,i)
+                                            : F1.Vector(var,k,j,i);
+        }
     });
 }
 
@@ -246,7 +292,7 @@ void blending_ring(FV_Solution theta_in, FV_Solution theta_out){
     });
 }
 
-void PAD_criteria(FV_Solution W, FV_Solution cascade){
+void PAD_criteria(FV_Solution W, FV_Solution flagged){
     int Nx = W.Nx;
     int Ny = W.Ny;
     int Nz = W.Nz;
@@ -256,9 +302,9 @@ void PAD_criteria(FV_Solution W, FV_Solution cascade){
         density  = W.Vector(_d_,k,j,i);
         pressure = W.Vector(_p_,k,j,i);
         if(density<rho_min || density>rho_max)
-            cascade.Vector(0,k,j,i) = 1;
+            flagged.Vector(0,k,j,i) = 1;
         if(pressure<p_min || pressure>p_max)
-            cascade.Vector(0,k,j,i) = 1;
+            flagged.Vector(0,k,j,i) = 1;
     });
 }
 
@@ -266,7 +312,7 @@ void detect_troubles(
     FV_Solution W_new,
     FV_Solution W_old,
     FV_Solution troubles,
-    FV_Solution cascade,
+    FV_Solution flagged,
     FV_Solution alpha_x,
     FV_Solution alpha_y,
     FV_Solution alpha_z,
@@ -289,7 +335,7 @@ void detect_troubles(
         if(cfg.active[_z_])
             smooth_extrema(W_new, alpha_z, Z_dim.fv_centers, Z_dim.fv_faces, _z_, limit_mask);
     }
-    relax_NAD(troubles, cascade, alpha_x, alpha_y, alpha_z, limit_mask, use_sed);
+    relax_NAD(troubles, flagged, alpha_x, alpha_y, alpha_z, limit_mask, use_sed);
     if(PAD)
-        PAD_criteria(W_new, cascade);
+        PAD_criteria(W_new, flagged);
 }

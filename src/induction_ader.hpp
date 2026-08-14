@@ -86,7 +86,7 @@ struct Induction_ader : public PhysicsModule{
     FV_Boundaries BC_y;
     FV_Boundaries BC_z;
     FV_Solution troubles;  //per-B-component flags
-    FV_Solution cascade;   //per-cell pooled level
+    FV_Solution flagged;   //per-cell pooled trouble flag
     FV_Solution alpha_x;
     FV_Solution alpha_y;
     FV_Solution alpha_z;
@@ -268,9 +268,9 @@ struct Induction_ader : public PhysicsModule{
         By_new.init("By_new",1,Z_dim,Y_dim,X_dim,0,1,0);
         Bz_new.init("Bz_new",1,Z_dim,Y_dim,X_dim,1,0,0);
         B_new.init("B_new",4,Z_dim,Y_dim,X_dim,0,0,0);
-        //Three B-component flags; the pooled level lives in `cascade`.
+        //Three B-component flags; the pooled flag lives in `flagged`.
         troubles.init("troubles",3,Z_dim,Y_dim,X_dim,0,0,0);
-        cascade.init("cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
+        flagged.init("flagged",1,Z_dim,Y_dim,X_dim,0,0,0);
         alpha_x.init("alpha_x",4,Z_dim,Y_dim,X_dim,0,0,0);
         alpha_y.init("alpha_y",4,Z_dim,Y_dim,X_dim,0,0,0);
         alpha_z.init("alpha_z",4,Z_dim,Y_dim,X_dim,0,0,0);
@@ -480,7 +480,7 @@ struct Induction_ader : public PhysicsModule{
         compute_B2_cv(B2_cv,Bx_fp_x,By_fp_y,Bz_fp_z,fp_to_cv,sp_to_cv);
         if(cfg.fallback){
             Write(troubles,n_output);
-            Write(cascade,n_output);
+            Write(flagged,n_output);
         }
         Write(B2_cv,n_output++);
     }
@@ -534,7 +534,7 @@ struct Induction_ader : public PhysicsModule{
                 B_new,
                 B_old,
                 troubles,
-                cascade,
+                flagged,
                 #if X
                 alpha_x,
                 #endif

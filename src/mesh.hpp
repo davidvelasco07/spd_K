@@ -692,7 +692,7 @@ struct Mesh : public PhysicsModule {
         compute_primitives(pv.U_new, pv.W_new);
         for(int b=0;b<nblocks;b++)
             detect_troubles(blocks[b].W_new,blocks[b].W_old,blocks[b].troubles,
-                            blocks[b].cascade,
+                            blocks[b].flagged,
                             blocks[b].alpha_x,blocks[b].alpha_y,blocks[b].alpha_z,
                             Xd[b],Yd[b],Zd[b],1,(1<<_d_)|(1<<_p_));
     }
@@ -736,8 +736,8 @@ struct Mesh : public PhysicsModule {
             { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
             { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
             { Region r("FV_detect"); FV_detect_batched(); }
-            if(!cfg.muscl_only){ Region r("Exchange_cascade");
-                                 Exchange_fv_field(&Block::cascade); }
+            if(!cfg.muscl_only){ Region r("Exchange_flagged");
+                                 Exchange_fv_field(&Block::flagged); }
             { Region r("FV_theta"); FV_theta_batched(); }
             if(!cfg.muscl_only){ Region r("Exchange_theta");
                                  Exchange_fv_field(&Block::theta); }
@@ -755,8 +755,56 @@ struct Mesh : public PhysicsModule {
         { Region r("FV_end"); FV_end_batched(); }
     }
 
+    //Mesh-level MOOD cascade, the hydro counterpart of MHD_MOOD_update. The
+    //level fluxes are built once per ader step; a revision then re-assembles,
+    //re-tests, and stops as soon as no cell demotes. The cascade halo takes
+    //the max, so a demotion on either side of a level jump is seen by both
+    //(Exchange_fv_field_max), which is what keeps a coarse-fine face
+    //single-valued.
+    void FV_Update_solution_hydro_cascade(){
+        { Region r("FV_begin"); FV_begin_batched(); }
+        for(int ader=0;ader<n_ader;ader++){
+            { Region r("FV_flux_update"); FV_flux_update_batched(ader); }
+            { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
+            { Region r("FV_cascade_levels");
+              compute_primitives(pv.U_old, pv.W_old);
+              for(int b=0;b<nblocks;b++)
+                  blocks[b].FV_cascade_levels(ader,Xd[b],Yd[b],Zd[b]); }
+            for(int rev=0; rev<cfg.max_revs; rev++){
+                { Region r("FV_cascade_candidate");
+                  for(int b=0;b<nblocks;b++)
+                      blocks[b].FV_cascade_candidate(ader,Xd[b],Yd[b],Zd[b]); }
+                //SED limits against a two-cell stencil of the candidate, so
+                //each revision needs its own U_new halo.
+                { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+                int demoted = 0;
+                { Region r("FV_cascade_detect");
+                  for(int b=0;b<nblocks;b++)
+                      demoted += blocks[b].FV_cascade_detect(Xd[b],Yd[b],Zd[b]); }
+                #ifdef MPI
+                int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
+                #endif
+                if(demoted==0) break;
+                { Region r("Exchange_cascade"); Exchange_fv_field_max(&Block::cascade); }
+            }
+            { Region r("FV_cascade_assemble");
+              for(int b=0;b<nblocks;b++) blocks[b].FV_cascade_assemble(); }
+            if(forest.max_level()>0){
+                Region r("correct_cf_fv_flux");
+                for(int dim=0; dim<3; dim++)
+                    if(cfg.active[dim])
+                        correct_coarse_fine_fv_flux(forest, blocks, dim);
+            }
+            { Region r("FV_commit"); FV_commit_batched(ader); }
+        }
+        { Region r("FV_end"); FV_end_batched(); }
+    }
+
     void Update_solution_hydro(){
-        if(cfg.fallback) FV_Update_solution_hydro();
+        if(cfg.fallback){
+            if(cfg.mood_cascade) FV_Update_solution_hydro_cascade();
+            else                 FV_Update_solution_hydro();
+        }
         else for(int b=0;b<nblocks;b++)
             blocks[b].Update_solution(Xd[b].h,Yd[b].h,Zd[b].h);
     }

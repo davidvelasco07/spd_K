@@ -52,6 +52,11 @@ struct RunConfig {
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
     bool muscl_only = false;             //take every face from the MUSCL fallback (theta=1)
+    bool mood_cascade = false;           //fallback style: false = fractional theta blend
+                                         //(matches the Python reference), true = discrete
+                                         //MOOD cascade levels as the MHD module uses.
+                                         //The blend is the default so reference parity
+                                         //and the existing goldens are unaffected.
     int max_revs = 3;                    //cap on MOOD detection/revision sweeps; the loop
                                          //exits early once no revisable troubled cell
                                          //remains, so this is a safety cap, not a cost.

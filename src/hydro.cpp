@@ -764,6 +764,103 @@ void compute_fluxes(
     }
 }
 
+//One MOOD cascade level's flux at a face, written unblended into F.
+//
+//muscl=true is the limited-slope MUSCL-Hancock reconstruction -- the same
+//flux compute_fluxes above produces at theta=1, so cascade level 1 and
+//job/scheme=muscl agree by construction. muscl=false is donor cell: the two
+//face states are the adjacent cell averages, which is the most diffusive
+//level and the one that has to hold when nothing else does.
+template<int D>
+KOKKOS_INLINE_FUNCTION
+void level_flux(
+    FV_Vector W,
+    FV_Vector F,
+    Vector x_c,
+    Vector x_f,
+    Vector y_c,
+    Vector y_f,
+    Vector z_c,
+    Vector z_f,
+    int k,
+    int j,
+    int i,
+    double dt,
+    bool ay,
+    bool az,
+    double gm,
+    bool muscl
+    ){
+    double uL[NVAR];
+    double uR[NVAR];
+    double f[NVAR];
+    int v1 = choose(D,_vx_,_vy_,_vz_);
+    int v2 = choose(D,_vy_,_vz_,_vx_);
+    int v3 = choose(D,_vz_,_vx_,_vy_);
+    if(muscl){
+        double wL[2*NGH][NVAR];
+        double wR[2*NGH][NVAR];
+        for(int l=-NGH; l<NGH; l++)
+            slopes_d<D>(W,x_c,x_f,y_c,y_f,z_c,z_f,
+                        k + (D==_z_ ? l:0),
+                        j + (D==_y_ ? l:0),
+                        i + (D==_x_ ? l:0),
+                        (wL[l+NGH]),(wR[l+NGH]),dt,ay,az,gm);
+        //Face between cell -1 and cell 0: the lower cell supplies the L state
+        //at its upper face, the upper cell the R state at its lower face.
+        conservatives(wL[0],uL,gm);
+        conservatives(wR[1],uR,gm);
+    }
+    else{
+        const int kL = k-(D==_z_), jL = j-(D==_y_), iL = i-(D==_x_);
+        double wl[NVAR];
+        double wr[NVAR];
+        for(int var=0; var<NVAR; var++){
+            wl[var] = W(var,kL,jL,iL);
+            wr[var] = W(var,k,j,i);
+        }
+        conservatives(wl,uL,gm);
+        conservatives(wr,uR,gm);
+    }
+    riemann_hllc(f,uL,uR,v1,v2,v3,gm);
+    for(int var=0; var<NVAR; var++) F(var,k,j,i) = f[var];
+}
+
+//Fill one cascade level's face fluxes in every active direction.
+void level_fluxes(
+    FV_Solution U,
+    Vector x_c,
+    Vector x_f,
+    FV_Solution F_x,
+    Vector y_c,
+    Vector y_f,
+    FV_Solution F_y,
+    Vector z_c,
+    Vector z_f,
+    FV_Solution F_z,
+    int ader,
+    Vector w,
+    double dt,
+    bool muscl
+    ){
+    int Nx = U.Nx;
+    int Ny = U.Ny;
+    int Nz = U.Nz;
+    double gm = cfg.gamma;
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        level_flux<_x_>(U.Vector,F_x.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
+                        k,j,i,w[ader]*dt,ay,az,gm,muscl);
+        if(ay)
+            level_flux<_y_>(U.Vector,F_y.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
+                            k,j,i,w[ader]*dt,ay,az,gm,muscl);
+        if(az)
+            level_flux<_z_>(U.Vector,F_z.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
+                            k,j,i,w[ader]*dt,ay,az,gm,muscl);
+    });
+}
+
 void fallback_fluxes(
     FV_Solution U,
     FV_Solution theta,

@@ -160,6 +160,15 @@ int main(int argc, char** argv){
         cfg.nad_moore = pin.GetOrAddString("fallback","NAD_neighbors","2nd")=="2nd";
         cfg.sed       = pin.GetOrAddBoolean("fallback","SED",true);
         cfg.blending  = pin.GetOrAddBoolean("fallback","blending",true);
+        //fallback/style = blend (fractional theta, the Python-reference scheme)
+        //or cascade (discrete MOOD levels, as the MHD module runs).
+        string fbstyle = pin.GetOrAddString("fallback","style","blend");
+        if(fbstyle=="cascade")     cfg.mood_cascade = true;
+        else if(fbstyle!="blend"){
+            if(Master) cout<<"ERROR: unknown fallback/style '"<<fbstyle
+                           <<"' (expected blend or cascade)"<<endl;
+            exit(1);
+        }
         //job/scheme = muscl pins the fallback blend to 1 on every face, so the
         //run is plain MUSCL-Hancock on the flux-point subgrid instead of SD
         //with a fallback. Useful as a low-order reference at matched DoF.
@@ -267,6 +276,26 @@ int main(int argc, char** argv){
             }
             if(comm.nx*comm.ny*comm.nz>1){
                 if(Master) cout<<"ERROR: meshblocks/AMR are not yet supported with MPI"<<endl;
+                exit(1);
+            }
+            //The mesh path implements periodic and gradfree domain boundaries
+            //only. Anything else is not merely unhandled, it is silently
+            //wrong: neighbors_uniform labels a non-gradfree boundary block
+            //_periodic_ and wraps its neighbour index around the domain, so a
+            //reflective wall is exchanged with the opposite side. That still
+            //conserves mass, so it passes the usual checks while returning a
+            //completely different solution (measured: 56% relative error on a
+            //4-block implosion, and the SD-only variant diverges outright).
+            //Reflective walls remain available in single-block runs, which use
+            //the boundary.cpp path instead.
+            for(int d=0; d<3; d++){
+                if(!cfg.active[d]) continue;
+                if(cfg.bc[d]==_periodic_ || cfg.bc[d]==_gradfree_) continue;
+                if(Master)
+                    cout<<"ERROR: meshblocks/AMR support only periodic and gradfree "
+                        <<"boundaries, but x"<<(d+1)<<"_bc is neither. Reflective "
+                        <<"boundaries are implemented for single-block runs only "
+                        <<"(remove the <meshblock> block, or use periodic/gradfree)."<<endl;
                 exit(1);
             }
             //Meshblocks are allowed for hydro and MHD (uniform multiblock).

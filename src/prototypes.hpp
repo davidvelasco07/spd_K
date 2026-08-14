@@ -103,6 +103,7 @@ extern void block_boundary_fv(FV_Solution, FV_Solution, FV_Solution, int, int, i
 //Whole-pack ghost exchange: neighbour indices and side types come in as
 //per-block tables, so one launch replaces the per-block loop.
 extern void apply_domain_bc_fp(SD_Solution, int, int);
+extern void apply_domain_bc_fv(FV_Solution, int, int, int);
 extern void gather_fp_same(SD_Solution, IntVector, IntVector, int, int, int);
 extern void gather_fv_same(FV_Solution, IntVector, IntVector, int, int, int, int);
 extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
@@ -147,7 +148,11 @@ extern void detect_troubles(
     dimension, dimension, dimension, bool, int);
 extern void apply_blending(FV_Solution, FV_Solution);
 extern void blending_ring(FV_Solution, FV_Solution);
-extern void theta_from_cascade(FV_Solution, FV_Solution);
+extern void theta_from_flagged(FV_Solution, FV_Solution);
+//MOOD cascade, shared by hydro and MHD (see trouble_detection.cpp).
+extern int  update_cascade(FV_Solution flagged, FV_Solution cascade, int n_cascade);
+extern void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
+                             FV_Solution cascade, int dim);
 
 void fallback_fluxes(
     FV_Solution, FV_Solution,
@@ -155,6 +160,15 @@ void fallback_fluxes(
     Vector, Vector, FV_Solution,
     Vector, Vector, FV_Solution,
     int, Vector, double);
+
+//One MOOD cascade level's unblended face fluxes (muscl = limited slopes,
+//else donor cell). Same argument order as fallback_fluxes minus theta.
+void level_fluxes(
+    FV_Solution,
+    Vector, Vector, FV_Solution,
+    Vector, Vector, FV_Solution,
+    Vector, Vector, FV_Solution,
+    int, Vector, double, bool);
 
 void fv_update_B_solution(
     FV_Solution,
