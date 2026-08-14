@@ -940,6 +940,22 @@ struct Mesh : public PhysicsModule {
             blocks[0].wt, ader, dt, 0);
     }
 
+    //Both lower cascade levels' fluxes, over the whole pack: two launches per
+    //direction per stage instead of two per direction per block.
+    void cascade_levels_pack(int ader){
+        level_fluxes_b(pv.W_old,
+            fvxc_p, fvx_p, pv.F1_x,
+            fvyc_p, fvy_p, pv.F1_y,
+            fvzc_p, fvz_p, pv.F1_z,
+            ader, blocks[0].wt, dt, true);
+        level_fluxes_b(pv.W_old,
+            fvxc_p, fvx_p, pv.F2_x,
+            fvyc_p, fvy_p, pv.F2_y,
+            fvzc_p, fvz_p, pv.F2_z,
+            ader, blocks[0].wt, dt, false);
+        Kokkos::deep_copy(pv.cascade.Vector, 0.0);
+    }
+
     //Pick each face's flux from the pooled cascade level, over the whole pack.
     //This sits inside the revision loop, so per-block it was the launch that
     //repeated most: three directions x max_revs x block count, every stage.
@@ -1002,8 +1018,7 @@ struct Mesh : public PhysicsModule {
             { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
             { Region r("FV_cascade_levels");
               compute_primitives(pv.U_old, pv.W_old);
-              for(int b=0;b<nblocks;b++)
-                  blocks[b].FV_cascade_levels(ader,Xd[b],Yd[b],Zd[b]); }
+              cascade_levels_pack(ader); }
             for(int rev=0; rev<cfg.max_revs; rev++){
                 { Region r("FV_cascade_candidate");
                   cascade_assemble_pack();

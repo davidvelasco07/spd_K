@@ -193,6 +193,14 @@ void level_fluxes(
     Vector, Vector, FV_Solution,
     int, Vector, double, bool);
 
+//Whole-pack twin; geometry as packed Matrices (a row per block).
+void level_fluxes_b(
+    FV_Solution,
+    Matrix, Matrix, FV_Solution,
+    Matrix, Matrix, FV_Solution,
+    Matrix, Matrix, FV_Solution,
+    int, Vector, double, bool);
+
 void fv_update_B_solution(
     FV_Solution,
     FV_Solution,

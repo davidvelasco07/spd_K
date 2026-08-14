@@ -637,12 +637,13 @@ template<int D>
 KOKKOS_INLINE_FUNCTION
 void slopes_d(
     FV_Vector W,
-    Vector x_c,
-    Vector x_f,
-    Vector y_c,
-    Vector y_f,
-    Vector z_c,
-    Vector z_f,
+    const double* x_c,
+    const double* x_f,
+    const double* y_c,
+    const double* y_f,
+    const double* z_c,
+    const double* z_f,
+    int off,
     int k,
     int j,
     int i,
@@ -662,32 +663,32 @@ void slopes_d(
     double dwz[NVAR];
     double dwt[NVAR];
     for(int var=0; var<NVAR; var++){
-        w[var] = W(var,k,j,i);
-        wL=W(var,k,j,i-1);
-        wR=W(var,k,j,i+1);
+        w[var] = W(off+var,k,j,i);
+        wL=W(off+var,k,j,i-1);
+        wR=W(off+var,k,j,i+1);
         //Each one-sided difference uses its own center spacing: the FV
         //sub-grid (Gauss points) is non-uniform, and a shared h breaks the
         //mirror symmetry at reflective walls (spurious wall mass flux)
-        dwx[var] = minmod((wR - w[var])/(x_c(i+1)-x_c(i)),
-                          (w[var] - wL)/(x_c(i)-x_c(i-1)),x_f(i),x_f(i+1));
+        dwx[var] = minmod((wR - w[var])/(x_c[i+1]-x_c[i]),
+                          (w[var] - wL)/(x_c[i]-x_c[i-1]),x_f[i],x_f[i+1]);
         dwy[var] = 0;
         dwz[var] = 0;
         if(ay){
-            wL=W(var,k,j-1,i);
-            wR=W(var,k,j+1,i);
-            dwy[var] = minmod((wR - w[var])/(y_c(j+1)-y_c(j)),
-                              (w[var] - wL)/(y_c(j)-y_c(j-1)),y_f(j),y_f(j+1));
+            wL=W(off+var,k,j-1,i);
+            wR=W(off+var,k,j+1,i);
+            dwy[var] = minmod((wR - w[var])/(y_c[j+1]-y_c[j]),
+                              (w[var] - wL)/(y_c[j]-y_c[j-1]),y_f[j],y_f[j+1]);
         }
         if(az){
-            wL=W(var,k-1,j,i);
-            wR=W(var,k+1,j,i);
-            dwz[var] = minmod((wR - w[var])/(z_c(k+1)-z_c(k)),
-                              (w[var] - wL)/(z_c(k)-z_c(k-1)),z_f(k),z_f(k+1));
+            wL=W(off+var,k-1,j,i);
+            wR=W(off+var,k+1,j,i);
+            dwz[var] = minmod((wR - w[var])/(z_c[k+1]-z_c[k]),
+                              (w[var] - wL)/(z_c[k]-z_c[k-1]),z_f[k],z_f[k+1]);
         }
     }
     corrector(w,dwt,dwx,dwy,dwz,gm);
     for(int var=0; var<NVAR; var++){
-        h = (D==_x_ ? x_f(i+1)-x_f(i) : (D==_y_ ? y_f(j+1)-y_f(j) : z_f(k+1)-z_f(k)));
+        h = (D==_x_ ? x_f[i+1]-x_f[i] : (D==_y_ ? y_f[j+1]-y_f[j] : z_f[k+1]-z_f[k]));
         double dw = (D==_x_ ? dwx[var] : (D==_y_ ? dwy[var] : dwz[var]));
         WR[var] = w[var] - dw + dwt[var]*dt/h;
         WL[var] = w[var] + dw + dwt[var]*dt/h;
@@ -700,12 +701,14 @@ void compute_fluxes(
     FV_Vector W,
     FV_Vector F,
     FV_Vector theta,
-    Vector x_c,
-    Vector x_f,
-    Vector y_c,
-    Vector y_f,
-    Vector z_c,
-    Vector z_f,
+    int off,
+    int toff,
+    const double* x_c,
+    const double* x_f,
+    const double* y_c,
+    const double* y_f,
+    const double* z_c,
+    const double* z_f,
     int k,
     int j,
     int i,
@@ -736,6 +739,7 @@ void compute_fluxes(
             y_f,
             z_c,
             z_f,
+            off,
             k + (D==_z_ ? l:0),
             j + (D==_y_ ? l:0),
             i + (D==_x_ ? l:0),
@@ -755,12 +759,12 @@ void compute_fluxes(
     //(reference: affected_faces). Convex blend of the primary and the
     //fallback flux; the same value is seen from both sides of the face,
     //which preserves exact conservation.
-    th = max(theta(0,k,j,i),
-             theta(0,k-(D==_z_ ? 1:0),j-(D==_y_ ? 1:0),i-(D==_x_ ? 1:0)));
+    th = max(theta(toff,k,j,i),
+             theta(toff,k-(D==_z_ ? 1:0),j-(D==_y_ ? 1:0),i-(D==_x_ ? 1:0)));
     for(int var=0; var<NVAR; var++){
-        f  = F(var,k,j,i);
+        f  = F(off+var,k,j,i);
         f  = f + th*(fL[var]-f);
-        F(var,k,j,i) = f;
+        F(off+var,k,j,i) = f;
     }
 }
 
@@ -776,12 +780,13 @@ KOKKOS_INLINE_FUNCTION
 void level_flux(
     FV_Vector W,
     FV_Vector F,
-    Vector x_c,
-    Vector x_f,
-    Vector y_c,
-    Vector y_f,
-    Vector z_c,
-    Vector z_f,
+    int off,
+    const double* x_c,
+    const double* x_f,
+    const double* y_c,
+    const double* y_f,
+    const double* z_c,
+    const double* z_f,
     int k,
     int j,
     int i,
@@ -801,7 +806,7 @@ void level_flux(
         double wL[2*NGH][NVAR];
         double wR[2*NGH][NVAR];
         for(int l=-NGH; l<NGH; l++)
-            slopes_d<D>(W,x_c,x_f,y_c,y_f,z_c,z_f,
+            slopes_d<D>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
@@ -816,14 +821,14 @@ void level_flux(
         double wl[NVAR];
         double wr[NVAR];
         for(int var=0; var<NVAR; var++){
-            wl[var] = W(var,kL,jL,iL);
-            wr[var] = W(var,k,j,i);
+            wl[var] = W(off+var,kL,jL,iL);
+            wr[var] = W(off+var,k,j,i);
         }
         conservatives(wl,uL,gm);
         conservatives(wr,uR,gm);
     }
     riemann_hllc(f,uL,uR,v1,v2,v3,gm);
-    for(int var=0; var<NVAR; var++) F(var,k,j,i) = f[var];
+    for(int var=0; var<NVAR; var++) F(off+var,k,j,i) = f[var];
 }
 
 //Fill one cascade level's face fluxes in every active direction.
@@ -849,15 +854,53 @@ void level_fluxes(
     double gm = cfg.gamma;
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
+    const double *cx=x_c.data(), *ffx=x_f.data();
+    const double *cy=y_c.data(), *ffy=y_f.data();
+    const double *cz=z_c.data(), *ffz=z_f.data();
+    const double wa = 0.0; (void)wa;
+    Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        level_flux<_x_>(U.Vector,F_x.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
-                        k,j,i,w[ader]*dt,ay,az,gm,muscl);
-        if(ay)
-            level_flux<_y_>(U.Vector,F_y.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
-                            k,j,i,w[ader]*dt,ay,az,gm,muscl);
-        if(az)
-            level_flux<_z_>(U.Vector,F_z.Vector,x_c,x_f,y_c,y_f,z_c,z_f,
-                            k,j,i,w[ader]*dt,ay,az,gm,muscl);
+        const double sdt = wv[ader]*dt;
+        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+    });
+}
+
+//Same over a whole pack: one launch per direction instead of one per block.
+//Geometry rides in as packed Matrices; a LayoutRight row is contiguous, so a
+//block's coordinates are just its row's base pointer.
+void level_fluxes_b(
+    FV_Solution U,
+    Matrix cxm, Matrix fxm, FV_Solution F_x,
+    Matrix cym, Matrix fym, FV_Solution F_y,
+    Matrix czm, Matrix fzm, FV_Solution F_z,
+    int ader,
+    Vector w,
+    double dt,
+    bool muscl
+    ){
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var;
+    double gm = cfg.gamma;
+    bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
+    const double *cxd=cxm.data(), *fxd=fxm.data();
+    const double *cyd=cym.data(), *fyd=fym.data();
+    const double *czd=czm.data(), *fzd=fzm.data();
+    const int ncx=cxm.extent(1), nfx=fxm.extent(1);
+    const int ncy=cym.extent(1), nfy=fym.extent(1);
+    const int ncz=czm.extent(1), nfz=fzm.extent(1);
+    Vector wv = w;
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const double sdt = wv[ader]*dt;
+        const int off = b*nvar;
+        const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
+        const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
+        const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
+        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
     });
 }
 
@@ -883,17 +926,16 @@ void fallback_fluxes(
     double gm = cfg.gamma;
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    FV_Vector u=U.Vector, th=theta.Vector;
+    FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
+    const double *cx=x_c.data(), *ffx=x_f.data();
+    const double *cy=y_c.data(), *ffy=y_f.data();
+    const double *cz=z_c.data(), *ffz=z_f.data();
+    Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        compute_fluxes<_x_>(U.Vector,F_x.Vector,theta.Vector,
-            x_c,x_f,y_c,y_f,z_c,z_f,
-            k,j,i,w[ader]*dt,ader,ay,az,gm);
-        if(ay)
-            compute_fluxes<_y_>(U.Vector,F_y.Vector,theta.Vector,
-                x_c,x_f,y_c,y_f,z_c,z_f,
-                k,j,i,w[ader]*dt,ader,ay,az,gm);
-        if(az)
-            compute_fluxes<_z_>(U.Vector,F_z.Vector,theta.Vector,
-                x_c,x_f,y_c,y_f,z_c,z_f,
-                k,j,i,w[ader]*dt,ader,ay,az,gm);
+        const double sdt = wv[ader]*dt;
+        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
     });
 }
