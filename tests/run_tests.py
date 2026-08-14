@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 
 import numpy as np
@@ -752,16 +753,20 @@ def main():
         print(f"[{'PASS' if ok else 'FAIL'}] unit: transforms")
         failures += 0 if ok else 1
 
+    timings = []
     for name, cfg in CONFIGS.items():
         if args.only and args.only not in name:
             continue
         outdir = os.path.join(args.build_dir, "test_out", name)
+        t_case = time.time()
         try:
             stdout = run(args.build_dir, outdir, cfg)
         except RuntimeError as e:
             print(f"[FAIL] {name}: {e}")
             failures += 1
             continue
+        finally:
+            timings.append((time.time() - t_case, name))
         ok, msg = check_finite(outdir, cfg)
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
         failures += 0 if ok else 1
@@ -785,6 +790,13 @@ def main():
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1
 
+    #Where the wall time goes. A suite nobody will sit through is a suite that
+    #stops being run, so the slowest configs are worth seeing every time.
+    if timings:
+        total = sum(t for t, _ in timings)
+        print(f"\ntiming: {total:.0f} s over {len(timings)} configs")
+        for t, name in sorted(timings, reverse=True)[:8]:
+            print(f"  {t:7.1f} s  {100*t/total:4.1f}%  {name}")
     print("ALL TESTS PASSED" if failures == 0 else f"{failures} TEST(S) FAILED")
     return failures
 

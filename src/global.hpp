@@ -73,6 +73,9 @@ struct RunConfig {
     int bc[3] = {0, 0, 0};               //boundary type per direction
     int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
     int rk_order = 3;                    //SSP-RK order (1, 2 or 3)
+    int nlim = -1;                       //step cap (-1 = unlimited). Bounds a
+                                         //throughput measurement by steps
+                                         //rather than by an end time.
     bool outputs = false;                //file outputs (opt-in via <output> block)
     ProblemParams pp;                    //initial-condition parameters
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps

@@ -102,6 +102,12 @@ class Driver {
   void Execute(double t_end, double dt_output) {
     pmod->dt = pmod->Dt;
     double t_output = dt_output;
+    //SPD_DT_TRACE=1 prints (step, t, dt) every step. dt collapsing while
+    //staying finite is invisible otherwise: the non-finite-dt guard never
+    //fires and the run grinds instead of failing, so the only symptom is a
+    //step count that stops scaling with tlim.
+    const bool dt_trace = getenv("SPD_DT_TRACE") != nullptr;
+    const double dt0 = pmod->dt;
 
     // Time only the evolution loop; subtract time spent writing outputs.
     Kokkos::fence();
@@ -122,6 +128,26 @@ class Driver {
       pmod->n_step++;
       ExecuteTaskList("after_cycle", 1);
       pmod->dt = pmod->ComputeDt();
+
+      if (dt_trace && Master)
+        std::cout << "[dt] step " << (pmod->n_step - step0)
+                  << " t=" << pmod->t << " dt=" << pmod->dt
+                  << " dt/dt0=" << (dt0 != 0.0 ? pmod->dt/dt0 : 0.0)
+                  << std::endl;
+      //A collapsing-but-finite dt means the run never ends. Fail loudly
+      //instead: this is a bug every time, not a physical regime.
+      if (dt0 > 0.0 && pmod->dt > 0.0 && pmod->dt < 1e-6*dt0) {
+        if (Master)
+          std::cout << std::endl << "ERROR: dt collapsed to " << pmod->dt
+                    << " (" << pmod->dt/dt0 << " of its initial value) at step "
+                    << (pmod->n_step - step0) << ", t = " << pmod->t
+                    << "; run would not finish. Set SPD_DT_TRACE=1 to see the"
+                    << " approach." << std::endl;
+        break;
+      }
+      //time/nlim caps the step count, so a throughput measurement is bounded
+      //by steps rather than by an end time it may never reach.
+      if (cfg.nlim > 0 && (pmod->n_step - step0) >= cfg.nlim) break;
 
       if (Master) std::cout << ".";
       if (cfg.outputs) {

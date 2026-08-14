@@ -147,6 +147,7 @@ int main(int argc, char** argv){
         set_runtime_dimensionality(ax,ay,az);
 
         cfg.cfl      = pin.GetOrAddReal("time","cfl",0.8);
+        cfg.nlim     = pin.GetOrAddInteger("time","nlim",-1);
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
         //Constant gravitational acceleration (source term); default 0 leaves
         //the homogeneous Euler equations untouched. Set e.g. hydro/g2 for a
