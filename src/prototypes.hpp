@@ -110,6 +110,10 @@ extern void gather_fv_coarser(FV_Solution, IntVector, IntVector, IntVector,
                               int, int, int, int);
 extern void gather_fv_finer(FV_Solution, IntVector, IntVector, IntVector,
                             int, int, int, int, bool);
+//Conservative flux correction off the same fine->coarse table.
+extern void correct_cf_fv_flux_b(FV_Solution, IntVector, IntVector, IntVector,
+                                 int, int, int, int, int,
+                                 int, int, int, int, int, int);
 extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
                               int, int, int, Matrix);
 extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,
@@ -150,6 +154,15 @@ extern void detect_troubles(
     FV_Solution, FV_Solution, FV_Solution, FV_Solution,
     FV_Solution, FV_Solution, FV_Solution,
     dimension, dimension, dimension, bool, int);
+//Whole-pack detection: same criteria, one launch each rather than one per
+//block. Geometry comes in as packed Matrices (a row per block) because blocks
+//at different refinement levels have different spacings.
+extern void detect_troubles_b(
+    FV_Solution, FV_Solution, FV_Solution, FV_Solution,
+    FV_Solution, FV_Solution, FV_Solution,
+    Matrix, Matrix, Matrix, Matrix, Matrix, Matrix,
+    int, bool, int);
+extern int  update_cascade_b(FV_Solution, FV_Solution, int);
 extern void apply_blending(FV_Solution, FV_Solution);
 extern void blending_ring(FV_Solution, FV_Solution);
 extern void theta_from_flagged(FV_Solution, FV_Solution);

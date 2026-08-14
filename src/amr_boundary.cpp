@@ -20,6 +20,23 @@ void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     N_id[_z_] = dim == _z_ ? l  : k;
 }
 
+//Unpack a sub-face index into one transverse half per active direction. Device
+//copy of fv_sub_bits, which reads cfg on the host: the activity flags have to
+//ride into the kernel as plain ints.
+KOKKOS_INLINE_FUNCTION
+void fv_sub_bits_d(int sub, int dim, int actx, int acty, int actz,
+                   int& bx, int& by, int& bz){
+    bx = by = bz = 0;
+    int bit = 0;
+    for(int d=0; d<3; d++){
+        int act = (d==_x_?actx:(d==_y_?acty:actz));
+        if(d==dim || !act) continue;
+        int v = (sub>>bit)&1;
+        if(d==_x_) bx=v; else if(d==_y_) by=v; else bz=v;
+        bit++;
+    }
+}
+
 static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
     SD_Solution s;
     s.n_ader = ref.n_ader;
@@ -500,6 +517,62 @@ void correct_coarse_fine_fv_flux(BlockForest& forest, std::vector<Block>& blocks
             }
         }
     }
+}
+
+//Same correction as correct_coarse_fine_fv_flux, run off the fine->coarse
+//transaction table instead of a host loop over (coarse block, side, sub): the
+//table already carries exactly one entry per (coarse receiver, fine neighbour,
+//sub-face), which is the unit of work here. Coarse and fine fluxes live in the
+//same pack, so both are offsets into one array.
+//
+//One kernel per (dim, side), constant in the block count.
+void correct_cf_fv_flux_b(FV_Solution C, IntVector recv, IntVector send,
+                          IntVector subv, int ntr, int dim, int side,
+                          int cface, int fface,
+                          int Ncx, int Ncy, int Ncz, int nx, int ny, int nz){
+    if(ntr <= 0) return;
+    const int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    const bool tx = actx && dim!=_x_, ty = acty && dim!=_y_, tz = actz && dim!=_z_;
+    Matrix R0 = amr_RS_cv[0], R1 = amr_RS_cv[1];
+    const int nvar = C.n_var;
+    GHOST_LOCALS;
+    //One coarse face cell along the normal; half the coarse face in each
+    //transverse direction, which is the part this fine neighbour covers.
+    const int Qx = (dim==_x_) ? 1 : (tx ? Ncx/2 : 1);
+    const int Qy = (dim==_y_) ? 1 : (ty ? Ncy/2 : 1);
+    const int Qz = (dim==_z_) ? 1 : (tz ? Ncz/2 : 1);
+    fv_for_cells_b(ntr,Qz,Qy,Qx, KOKKOS_LAMBDA(int b,int kq,int jq,int iq){
+        int cx,cy,cz; fv_sub_bits_d(subv(b),dim,actx,acty,actz,cx,cy,cz);
+        const int i = (dim==_x_) ? cface : (tx ? sghx + cx*(Ncx/2) + iq : 0);
+        const int j = (dim==_y_) ? cface : (ty ? sghy + cy*(Ncy/2) + jq : 0);
+        const int k = (dim==_z_) ? cface : (tz ? sghz + cz*(Ncz/2) + kq : 0);
+        const int rb = recv(b)*nvar, sb = send(b)*nvar;
+        //Coarse cell -> its element and the cell within it, which selects the
+        //row of the overlap weights.
+        int ex=0,jx=0,ey=0,jy=0,ez=0,jz=0;
+        if(tx){ int r=i-sghx-cx*(Ncx/2); ex=r/nx; jx=r%nx; }
+        if(ty){ int r=j-sghy-cy*(Ncy/2); ey=r/ny; jy=r%ny; }
+        if(tz){ int r=k-sghz-cz*(Ncz/2); ez=r/nz; jz=r%nz; }
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            for(int sz=0; sz<(tz?2:1); sz++)
+            for(int iz=0; iz<(tz?nz:1); iz++)
+            for(int sy=0; sy<(ty?2:1); sy++)
+            for(int iy=0; iy<(ty?ny:1); iy++)
+            for(int sx=0; sx<(tx?2:1); sx++)
+            for(int ix=0; ix<(tx?nx:1); ix++){
+                double w=1.0;
+                int fi = (dim==_x_ ? fface : i);
+                int fj = (dim==_y_ ? fface : j);
+                int fk = (dim==_z_ ? fface : k);
+                if(tx){ fi = sghx+(2*ex+sx)*nx+ix; w *= (sx==0?R0:R1)(jx,ix); }
+                if(ty){ fj = sghy+(2*ey+sy)*ny+iy; w *= (sy==0?R0:R1)(jy,iy); }
+                if(tz){ fk = sghz+(2*ez+sz)*nz+iz; w *= (sz==0?R0:R1)(jz,iz); }
+                u += w * C.Vector(sb+var,fk,fj,fi);
+            }
+            C.Vector(rb+var,k,j,i) = u;
+        }
+    }, "correct_cf_fv_flux_b");
 }
 
 static void fv_copy_slab(FV_Solution U, FV_Solution src, int dim, int side, int ngh){
@@ -1015,23 +1088,6 @@ void gather_fv_same(FV_Solution U, IntVector recv, IntVector send,
             U.Vector(rb+var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) =
             U.Vector(sb+var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
     }, "gather_fv_same");
-}
-
-//Unpack a sub-face index into one transverse half per active direction. Device
-//copy of fv_sub_bits, which reads cfg on the host: the activity flags have to
-//ride into the kernel as plain ints.
-KOKKOS_INLINE_FUNCTION
-void fv_sub_bits_d(int sub, int dim, int actx, int acty, int actz,
-                   int& bx, int& by, int& bz){
-    bx = by = bz = 0;
-    int bit = 0;
-    for(int d=0; d<3; d++){
-        int act = (d==_x_?actx:(d==_y_?acty:actz));
-        if(d==dim || !act) continue;
-        int v = (sub>>bit)&1;
-        if(d==_x_) bx=v; else if(d==_y_) by=v; else bz=v;
-        bit++;
-    }
 }
 
 //COARSER: the receiver is fine and reads a coarse neighbour. Same mapping as

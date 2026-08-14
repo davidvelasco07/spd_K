@@ -153,7 +153,8 @@ struct Mesh : public PhysicsModule {
     //size and the FV sub-grid coordinates. Blocks differ only in these, which
     //is exactly what lets one kernel span refinement levels.
     Vector hx_p, hy_p, hz_p;      //element size per block
-    Matrix fvx_p, fvy_p, fvz_p;   //FV face coordinates per block
+    Matrix fvx_p, fvy_p, fvz_p;      //FV face coordinates per block
+    Matrix fvxc_p, fvyc_p, fvzc_p;   //FV cell centres per block (SED stencil)
 
     //Whole-pack views of the arrays the batched phases touch, cached so the
     //hot loop does no map lookups. Rebuilt with the pack on every adapt.
@@ -163,7 +164,8 @@ struct Mesh : public PhysicsModule {
         SD_Solution U_sp, W_sp, W_cv, U_cv, U_ader_sp, U0_sp, T_sweep;
         SD_Solution T_fp_x, T_fp_y, T_fp_z;
         FV_Solution U_old, U_new, W_old, W_new, theta;
-        FV_Solution flagged, cascade;
+        FV_Solution flagged, cascade, troubles;
+        FV_Solution alpha_x, alpha_y, alpha_z;
         FV_Solution F_x, F_y, F_z;
     } pv;
 
@@ -194,6 +196,10 @@ struct Mesh : public PhysicsModule {
         pv.theta       = fv_pack_view(pack,"theta");
         pv.flagged     = fv_pack_view(pack,"flagged");
         pv.cascade     = fv_pack_view(pack,"cascade");
+        pv.troubles    = fv_pack_view(pack,"troubles");
+        pv.alpha_x     = fv_pack_view(pack,"alpha_x");
+        pv.alpha_y     = fv_pack_view(pack,"alpha_y");
+        pv.alpha_z     = fv_pack_view(pack,"alpha_z");
     }
 
     void build_geometry_pack(){
@@ -208,20 +214,27 @@ struct Mesh : public PhysicsModule {
         }
         setup_push(hx_p,hxh); setup_push(hy_p,hyh); setup_push(hz_p,hzh);
 
-        auto pack_faces = [&](Matrix& M, const char* nm, std::vector<dimension>& D){
-            int n = D[0].fv_nfaces;
+        //One row per block of a per-direction FV coordinate array, so a batched
+        //kernel can read its own block's geometry from a leading block index.
+        auto pack_coord = [&](Matrix& M, const char* nm, std::vector<dimension>& D,
+                              bool centers){
+            int n = centers ? D[0].fv_ncells : D[0].fv_nfaces;
             M = Matrix(nm, nblocks, n);
             Matrix_h h = setup_mirror(M);
             for(int b=0;b<nblocks;b++){
-                Vector_h f = setup_mirror(D[b].fv_faces);
-                setup_pull(D[b].fv_faces, f);
+                Vector& src = centers ? D[b].fv_centers : D[b].fv_faces;
+                Vector_h f = setup_mirror(src);
+                setup_pull(src, f);
                 for(int i=0;i<n;i++) h(b,i) = f(i);
             }
             setup_push(M,h);
         };
-        pack_faces(fvx_p,"pack_fvx",Xd);
-        pack_faces(fvy_p,"pack_fvy",Yd);
-        pack_faces(fvz_p,"pack_fvz",Zd);
+        pack_coord(fvx_p,"pack_fvx",Xd,false);
+        pack_coord(fvy_p,"pack_fvy",Yd,false);
+        pack_coord(fvz_p,"pack_fvz",Zd,false);
+        pack_coord(fvxc_p,"pack_fvxc",Xd,true);
+        pack_coord(fvyc_p,"pack_fvyc",Yd,true);
+        pack_coord(fvzc_p,"pack_fvzc",Zd,true);
     }
 
     void init_W_glob(dimension X_dim, dimension Y_dim, dimension Z_dim, double* x_fp){
@@ -634,6 +647,40 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    FV_Solution& fv_flux_pack(int dim){
+        return dim==_x_ ? pv.F_x : dim==_y_ ? pv.F_y : pv.F_z;
+    }
+
+    //Conservative flux correction over the fine->coarse table. Hydro only for
+    //now: MHD's level-0 flux arrays (F0_*) have no pack view, so it stays on
+    //the per-block path.
+    void correct_cf_fv_flux_batched(int dim){
+        if(forest.max_level()==0 || !cfg.active[dim]) return;
+        FV_Solution& C = fv_flux_pack(dim);
+        //All blocks in a pack share extents, so one set of coarse dimensions
+        //serves every transaction.
+        const SD_Solution& S = pv.W_cv;
+        const int nx=S.nx, ny=S.ny, nz=S.nz;
+        const int Ncx=(S.Nx-2*NGHx)*nx, Ncy=(S.Ny-2*NGHy)*ny, Ncz=(S.Nz-2*NGHz)*nz;
+        GHOST_LOCALS;
+        const int lo = (dim==_x_?sghx:dim==_y_?sghy:sghz);
+        const int hi = lo + (dim==_x_?Ncx:dim==_y_?Ncy:Ncz);
+        for(int side=0; side<2; side++){
+            const int cface = (side==0 ? lo : hi);
+            const int fface = (side==0 ? hi : lo);
+            correct_cf_fv_flux_b(C, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                                 xtfi_[dim][side].sub, xtfi_[dim][side].n,
+                                 dim, side, cface, fface,
+                                 Ncx, Ncy, Ncz, nx, ny, nz);
+        }
+    }
+
+    //Whichever implementation is selected, for one direction.
+    void correct_cf_fv_flux_dim(int dim){
+        if(new_xchg() && !is_mhd) correct_cf_fv_flux_batched(dim);
+        else                      correct_coarse_fine_fv_flux(forest, blocks, dim);
+    }
+
     //All relations for one direction of an FV field, as batched gathers over
     //the same transaction tables the flux points use. Physical boundaries stay
     //a per-block call: there are few of them and they need no neighbour.
@@ -814,11 +861,17 @@ struct Mesh : public PhysicsModule {
         compute_primitives(pv.U_old, pv.W_old);
         if(cfg.muscl_only) return;
         compute_primitives(pv.U_new, pv.W_new);
-        for(int b=0;b<nblocks;b++)
-            detect_troubles(blocks[b].W_new,blocks[b].W_old,blocks[b].troubles,
-                            blocks[b].flagged,
-                            blocks[b].alpha_x,blocks[b].alpha_y,blocks[b].alpha_z,
-                            Xd[b],Yd[b],Zd[b],1,(1<<_d_)|(1<<_p_));
+        detect_pack();
+    }
+
+    //Detection over the whole pack: one launch per criterion. The per-block
+    //loop this replaces was the dominant cost once AMR started using the
+    //cascade, which calls detection once per revision.
+    void detect_pack(){
+        detect_troubles_b(pv.W_new, pv.W_old, pv.troubles, pv.flagged,
+                          pv.alpha_x, pv.alpha_y, pv.alpha_z,
+                          fvxc_p, fvx_p, fvyc_p, fvy_p, fvzc_p, fvz_p,
+                          Xd[0].p, 1, (1<<_d_)|(1<<_p_));
     }
 
     //SD face fluxes -> FV faces -> candidate update, over the whole pack.
@@ -872,7 +925,7 @@ struct Mesh : public PhysicsModule {
                 Region r("correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)
                     if(cfg.active[dim])
-                        correct_coarse_fine_fv_flux(forest, blocks, dim);
+                        correct_cf_fv_flux_dim(dim);
             }
             { Region r("FV_commit"); FV_commit_batched(ader); }
         }
@@ -903,8 +956,9 @@ struct Mesh : public PhysicsModule {
                 { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
                 int demoted = 0;
                 { Region r("FV_cascade_detect");
-                  for(int b=0;b<nblocks;b++)
-                      demoted += blocks[b].FV_cascade_detect(Xd[b],Yd[b],Zd[b]); }
+                  compute_primitives(pv.U_new, pv.W_new);
+                  detect_pack();
+                  demoted = update_cascade_b(pv.flagged, pv.cascade, 2); }
                 #ifdef MPI
                 int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
                 #endif
@@ -917,7 +971,7 @@ struct Mesh : public PhysicsModule {
                 Region r("correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)
                     if(cfg.active[dim])
-                        correct_coarse_fine_fv_flux(forest, blocks, dim);
+                        correct_cf_fv_flux_dim(dim);
             }
             { Region r("FV_commit"); FV_commit_batched(ader); }
         }

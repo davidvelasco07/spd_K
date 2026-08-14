@@ -298,6 +298,25 @@ int main(int argc, char** argv){
                         <<"(remove the <meshblock> block, or use periodic/gradfree)."<<endl;
                 exit(1);
             }
+            //Mixed-level AMR needs the MOOD cascade, not the fractional blend.
+            //A blended flux is a weighted mix of two fluxes, and the weight is
+            //a per-cell theta: the coarse and fine sides of a level jump blend
+            //differently, so the shared face is not single-valued and the
+            //correction has to patch the imbalance back afterwards. The
+            //cascade instead *selects* one flux per face from the pooled level,
+            //which is single-valued from both sides by construction. MHD always
+            //runs its own cascade, so this is a hydro-only requirement.
+            //job/scheme=muscl is exempt: it pins theta to 1 on every face, so
+            //every face takes the MUSCL flux and is single-valued after all.
+            //It is the low-order reference lane, not a blend.
+            if(system_name=="hydro" && cfg.amr_max_level>0 && cfg.fallback
+               && !cfg.mood_cascade && !cfg.muscl_only){
+                if(Master)
+                    cout<<"ERROR: mixed-level AMR with the FV fallback requires "
+                        <<"fallback/style=cascade; the fractional blend is not "
+                        <<"single-valued across a coarse-fine face"<<endl;
+                exit(1);
+            }
             //Meshblocks are allowed for hydro and MHD (uniform multiblock).
             //Mixed-level AMR for MHD is rejected inside Mesh<MHD_ader>.
             if(cfg.amr_max_level>0 && cfg.integrator==_integrator_ader_){

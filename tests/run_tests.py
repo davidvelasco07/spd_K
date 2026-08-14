@@ -14,7 +14,8 @@ plus command-line overrides. Checks per configuration:
   hydro_fv_blast : 2d blast with a real shock; detector fires, fallback
                    active, mass still conserved to round-off
   hydro_muscl_2d : job/scheme=muscl (blend pinned to 1 on every face) on a
-                   smooth periodic wave; currently a known failure (~3e-06)
+                   smooth periodic wave; the low-order reference lane for the
+                   figure-21 runs, conservative to round-off
   *_rk3          : same checks with the SSP-RK3 integrator (per-stage
                    fallback correction; temporal error below the spatial
                    floor at p=3, so the ADER L1 limit applies unchanged)
@@ -184,10 +185,10 @@ CONFIGS = {
     "hydro_muscl_2d": {
         # job/scheme=muscl pins the fallback blend to 1 on every face, which is
         # a different path from the hydro_fv_* tests: those run SD and only
-        # reach a MUSCL flux where the detector fires. Nothing exercised
-        # theta=1 everywhere until the figure-21 runs, and it does not
-        # conserve: a smooth periodic sine wave drifts ~3e-06 on one block.
-        # KNOWN FAIL.
+        # reach a MUSCL flux where the detector fires. This is the low-order
+        # reference lane for the figure-21 runs. It drifted ~3e-06 when the
+        # lane was first added; it is exact now (0.0 here, 2.2e-16 multiblock),
+        # so it is a real check rather than a known failure.
         "input": "inputs/sine_wave.athinput",
         "overrides": ["job/scheme=muscl", "mesh/p=0",
                       "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
@@ -200,7 +201,7 @@ CONFIGS = {
     },
     "hydro_muscl_2d_mb": {
         # same scheme across meshblock boundaries; the per-face flux must not
-        # depend on which block computes it. KNOWN FAIL.
+        # depend on which block computes it.
         "input": "inputs/sine_wave.athinput",
         "overrides": ["job/scheme=muscl", "mesh/p=0",
                       "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
@@ -312,13 +313,22 @@ CONFIGS = {
     },
     "hydro_smr_fallback_2d": {
         # static refinement with the FV fallback active. Isolates the
-        # coarse-fine handling of the blended fluxes from regridding: the
-        # mesh never changes, so any drift is the interface, not the transfer.
+        # coarse-fine handling of the assembled cascade fluxes from regridding:
+        # the mesh never changes, so any drift is the interface, not the
+        # transfer. AMR requires fallback/style=cascade (see main.cpp).
         "input": "inputs/amr_pulse.athinput",
-        "overrides": ["amr/adapt_interval=0",
+        "overrides": ["fallback/style=cascade", "amr/adapt_interval=0",
                       "refinement1/level=1", "refinement1/x1min=0.375",
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
+        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
+        # max_revs revisions per step, each with its own halo and a full
+        # detect, and on the per-block forest path that is a launch explosion:
+        # this config alone ran >80 min unfinished. The table path is verified
+        # bit-identical to the forest path at 1 and 2 levels on both backends,
+        # so this costs no coverage of the physics -- but it does mean the
+        # forest path is no longer exercised here.
+        "env": {"SPD_NEW_XCHG": "1"},
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
@@ -327,7 +337,15 @@ CONFIGS = {
     "hydro_amr_2d": {
         # dynamic AMR on a Gaussian pulse
         "input": "inputs/amr_pulse.athinput",
-        "overrides": [],
+        "overrides": ["fallback/style=cascade"],
+        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
+        # max_revs revisions per step, each with its own halo and a full
+        # detect, and on the per-block forest path that is a launch explosion:
+        # this config alone ran >80 min unfinished. The table path is verified
+        # bit-identical to the forest path at 1 and 2 levels on both backends,
+        # so this costs no coverage of the physics -- but it does mean the
+        # forest path is no longer exercised here.
+        "env": {"SPD_NEW_XCHG": "1"},
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
@@ -342,7 +360,15 @@ CONFIGS = {
         # balance it. Round-off since amr_boundary.cpp got the transverse
         # mapping right.
         "input": "inputs/amr_pulse.athinput",
-        "overrides": ["amr/max_level=2"],
+        "overrides": ["fallback/style=cascade", "amr/max_level=2"],
+        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
+        # max_revs revisions per step, each with its own halo and a full
+        # detect, and on the per-block forest path that is a launch explosion:
+        # this config alone ran >80 min unfinished. The table path is verified
+        # bit-identical to the forest path at 1 and 2 levels on both backends,
+        # so this costs no coverage of the physics -- but it does mean the
+        # forest path is no longer exercised here.
+        "env": {"SPD_NEW_XCHG": "1"},
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N64p3_1_0.dat",
