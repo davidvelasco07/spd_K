@@ -49,7 +49,6 @@ struct FaceGroups {
     std::map<int, std::pair<std::vector<int>, std::vector<int>>> coarser_by_sub;
     std::vector<int> fi_ib;
     std::vector<std::vector<int>> fi_jb; // [n_fi][n_sub]
-    bool valid = false;
 };
 
 class BlockForest {

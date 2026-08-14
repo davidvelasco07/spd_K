@@ -54,6 +54,7 @@ class FV_Solution{
     int jR;
     int kL;
     int kR;
+    int nb=1;   //meshblocks spanned: 1 for a block's own view, nblocks for a pack
     string label;
     FV_Solution() = default;
     FV_Solution(string name,
@@ -65,8 +66,7 @@ class FV_Solution{
         bool y,
         bool x
         ){init(name,nvar,Zdim,Ydim,Xdim,z,y,x);}
-    void init(string name,
-        int nvar,
+    void set_extents(int nvar,
         dimension Zdim,
         dimension Ydim,
         dimension Xdim,
@@ -84,8 +84,36 @@ class FV_Solution{
         jR = Ydim.idR;
         kL = Zdim.idL;
         kR = Zdim.idR;
+    }
 
+    void init(string name,
+        int nvar,
+        dimension Zdim,
+        dimension Ydim,
+        dimension Xdim,
+        bool z,
+        bool y,
+        bool x
+        ){
+        set_extents(nvar,Zdim,Ydim,Xdim,z,y,x);
         Kokkos::resize(Vector,nvar,Nz,Ny,Nx);
+        label=name;
+    }
+
+    //Block ib's slice of a shared pack (see BlockPack in structs.hpp).
+    void init_packed(BlockPack& pk, int ib, string name,
+        int nvar,
+        dimension Zdim,
+        dimension Ydim,
+        dimension Xdim,
+        bool z,
+        bool y,
+        bool x
+        ){
+        set_extents(nvar,Zdim,Ydim,Xdim,z,y,x);
+        Vector = pk.fv_slice(name, ib, n_var, Nz, Ny, Nx);
+        PackMeta& m = pk.meta[name];
+        m.iL=iL; m.iR=iR; m.jL=jL; m.jR=jR; m.kL=kL; m.kR=kR;
         label=name;
     }
 
@@ -98,6 +126,23 @@ class FV_Solution{
         #endif
     }
 };
+
+//Whole-pack descriptor (see sd_pack_view). Batched FV kernels index the
+//leading axis as b*n_var + var.
+inline FV_Solution fv_pack_view(BlockPack& pk, const std::string& name){
+    FV_Solution s;
+    auto it = pk.fv.find(name);
+    if(it == pk.fv.end()) return s;
+    const PackMeta& m = pk.meta.at(name);
+    s.Vector = it->second;
+    s.nb = m.nb; s.n_var = m.nvar;
+    s.Nz = m.Nz; s.Ny = m.Ny; s.Nx = m.Nx;
+    s.iL = m.iL; s.iR = m.iR;
+    s.jL = m.jL; s.jR = m.jR;
+    s.kL = m.kL; s.kR = m.kR;
+    s.label = name;
+    return s;
+}
 
 struct FV_Boundaries {
     int Nx;

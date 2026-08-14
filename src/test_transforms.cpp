@@ -84,8 +84,17 @@ int main(int argc, char** argv){
 
         Matrix sp_to_cv("sp_to_cv",p+1,p+1);
         Matrix cv_to_sp("cv_to_sp",p+1,p+1);
-        integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
-        inverse(sp_to_cv, cv_to_sp, p+1);
+        {
+            //Host builders must fill a mirror and push it: SetupSpace is
+            //CudaSpace on GPU, so writing these directly aborted the whole
+            //unit-test binary before any test ran.
+            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
+            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
+            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
+            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
+            setup_push(sp_to_cv, sp_to_cv_h);
+            setup_push(cv_to_sp, cv_to_sp_h);
+        }
 
         int nvar = NVAR;
         SD_Solution U_a  ("U_a"  ,1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -143,15 +152,19 @@ int main(int argc, char** argv){
                 return (1.0+var) + x*x*x - 2.0*y*y + 0.5*z + x*y - z*z*x;
             };
             double h = 1.0/N;
-            for(int var=0; var<nvar; var++)
-            for(int k=0; k<C.Nz; k++)
-            for(int j=0; j<C.Ny; j++)
-            for(int i=0; i<C.Nx; i++)
-            for(int kk=0; kk<C.nz; kk++)
-            for(int jj=0; jj<C.ny; jj++)
-            for(int ii=0; ii<C.nx; ii++)
-                C.Vector(0,var,k,j,i,kk,jj,ii) =
-                    poly(var,(i-NGHx+x_sp[ii])*h,(j-NGHy+x_sp[jj])*h,(k-NGHz+x_sp[kk])*h);
+            {
+                auto Ch = Kokkos::create_mirror_view(C.Vector);
+                for(int var=0; var<nvar; var++)
+                for(int k=0; k<C.Nz; k++)
+                for(int j=0; j<C.Ny; j++)
+                for(int i=0; i<C.Nx; i++)
+                for(int kk=0; kk<C.nz; kk++)
+                for(int jj=0; jj<C.ny; jj++)
+                for(int ii=0; ii<C.nx; ii++)
+                    Ch(0,var,k,j,i,kk,jj,ii) =
+                        poly(var,(i-NGHx+x_sp[ii])*h,(j-NGHy+x_sp[jj])*h,(k-NGHz+x_sp[kk])*h);
+                Kokkos::deep_copy(C.Vector, Ch);
+            }
             //ghosts are untouched by the child loop below; copy them so the
             //identity check can compare full arrays
             Kokkos::deep_copy(C2.Vector,C.Vector);
@@ -161,6 +174,7 @@ int main(int argc, char** argv){
                 int cx=c&1, cy=(c>>1)&1, cz=(c>>2)&1;
                 prolongate_block(C,F,P,cx,cy,cz);
                 Kokkos::fence();
+                auto Fh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), F.Vector);
                 //child (cx,cy,cz) covers fine elements [c*N, c*N+N) of the
                 //2N-element fine grid with spacing h/2
                 for(int var=0; var<nvar; var++)
@@ -173,7 +187,7 @@ int main(int argc, char** argv){
                     double x = (cx*N+i-NGHx+x_sp[ii])*0.5*h;
                     double y = (cy*N+j-NGHy+x_sp[jj])*0.5*h;
                     double z = (cz*N+k-NGHz+x_sp[kk])*0.5*h;
-                    dmax = max(dmax, abs(F.Vector(0,var,k,j,i,kk,jj,ii)-poly(var,x,y,z)));
+                    dmax = max(dmax, abs(Fh(0,var,k,j,i,kk,jj,ii)-poly(var,x,y,z)));
                 }
                 restrict_block(F,C2,R,cx,cy,cz);
                 Kokkos::fence();
@@ -208,11 +222,15 @@ int main(int argc, char** argv){
             double dpro=0, dres=0;
             for(int dim=0; dim<3; dim++){
                 SD_Solution C("Cface",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-                for(int var=0; var<nvar; var++)
-                for(int k=0;k<C.Nz;k++) for(int j=0;j<C.Ny;j++) for(int i=0;i<C.Nx;i++)
-                for(int kk=0;kk<C.nz;kk++) for(int jj=0;jj<C.ny;jj++) for(int ii=0;ii<C.nx;ii++)
-                    C.Vector(0,var,k,j,i,kk,jj,ii) =
-                        poly(var,(i-NGHx+x_sp[ii])*h,(j-NGHy+x_sp[jj])*h,(k-NGHz+x_sp[kk])*h);
+                {
+                    auto Ch = Kokkos::create_mirror_view(C.Vector);
+                    for(int var=0; var<nvar; var++)
+                    for(int k=0;k<C.Nz;k++) for(int j=0;j<C.Ny;j++) for(int i=0;i<C.Nx;i++)
+                    for(int kk=0;kk<C.nz;kk++) for(int jj=0;jj<C.ny;jj++) for(int ii=0;ii<C.nx;ii++)
+                        Ch(0,var,k,j,i,kk,jj,ii) =
+                            poly(var,(i-NGHx+x_sp[ii])*h,(j-NGHy+x_sp[jj])*h,(k-NGHz+x_sp[kk])*h);
+                    Kokkos::deep_copy(C.Vector, Ch);
+                }
 
                 SD_Solution sub_f[4];
                 const SD_Solution* ptrs[4];
@@ -221,6 +239,8 @@ int main(int argc, char** argv){
                     prolongate_face_coarser(C, sub_f[s], amr_P, dim, s);
                     Kokkos::fence();
                     ptrs[s] = &sub_f[s];
+                    auto Sh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                                  sub_f[s].Vector);
                     int sx=sub_half(s,dim,_x_), sy=sub_half(s,dim,_y_), sz=sub_half(s,dim,_z_);
                     for(int var=0; var<nvar; var++)
                     for(int k=NGHz;k<C.Nz-NGHz;k++) for(int j=NGHy;j<C.Ny-NGHy;j++)
@@ -233,20 +253,22 @@ int main(int argc, char** argv){
                                             : (sy*N+j-NGHy+x_sp[jj])*0.5*h;
                         double z = dim==_z_ ? (k-NGHz+x_sp[kk])*h
                                             : (sz*N+k-NGHz+x_sp[kk])*0.5*h;
-                        dpro = max(dpro, abs(sub_f[s].Vector(0,var,k,j,i,kk,jj,ii)
+                        dpro = max(dpro, abs(Sh(0,var,k,j,i,kk,jj,ii)
                                              - poly(var,x,y,z)));
                     }
                 }
                 SD_Solution back("back",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
                 restrict_face_overlap_sp(ptrs, n_sub, back, amr_RF, dim);
                 Kokkos::fence();
+                auto bh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), back.Vector);
+                auto ch = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), C.Vector);
                 for(int var=0; var<nvar; var++)
                 for(int k=NGHz;k<C.Nz-NGHz;k++) for(int j=NGHy;j<C.Ny-NGHy;j++)
                 for(int i=NGHx;i<C.Nx-NGHx;i++)
                 for(int kk=0;kk<C.nz;kk++) for(int jj=0;jj<C.ny;jj++)
                 for(int ii=0;ii<C.nx;ii++)
-                    dres = max(dres, abs(back.Vector(0,var,k,j,i,kk,jj,ii)
-                                         - C.Vector(0,var,k,j,i,kk,jj,ii)));
+                    dres = max(dres, abs(bh(0,var,k,j,i,kk,jj,ii)
+                                         - ch(0,var,k,j,i,kk,jj,ii)));
             }
             failures += check("prolongate_face_coarser exact (degree-p)", dpro, 1e-12);
             failures += check("restrict_face(prolongate_face) identity", dres, 1e-11);
@@ -261,9 +283,12 @@ int main(int argc, char** argv){
             //quadrature weights of the solution points over one element:
             //int f = h * sum_i q_i f(x_sp_i), from the cell widths and sp->cv
             double q[16];
-            for(int i=0;i<=p;i++){
-                q[i]=0;
-                for(int j=0;j<=p;j++) q[i] += (x_fp[j+1]-x_fp[j])*sp_to_cv(j,i);
+            {
+                auto s2c = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sp_to_cv);
+                for(int i=0;i<=p;i++){
+                    q[i]=0;
+                    for(int j=0;j<=p;j++) q[i] += (x_fp[j+1]-x_fp[j])*s2c(j,i);
+                }
             }
             double h = 1.0/N;
             //deliberately not a polynomial: conservation must not depend on
@@ -273,23 +298,26 @@ int main(int argc, char** argv){
                            + 0.1*z*z*z + 0.05*var + 0.15*sin(11.0*x*y);
             };
             auto fill = [&](SD_Solution S, double ox, double oy, double oz, double sc){
+                auto Sh = Kokkos::create_mirror_view(S.Vector);
                 for(int var=0; var<nvar; var++)
                 for(int k=0;k<S.Nz;k++) for(int j=0;j<S.Ny;j++) for(int i=0;i<S.Nx;i++)
                 for(int kk=0;kk<S.nz;kk++) for(int jj=0;jj<S.ny;jj++)
                 for(int ii=0;ii<S.nx;ii++)
-                    S.Vector(0,var,k,j,i,kk,jj,ii) =
+                    Sh(0,var,k,j,i,kk,jj,ii) =
                         rough(var, ox+(i-NGHx+x_sp[ii])*sc,
                                    oy+(j-NGHy+x_sp[jj])*sc,
                                    oz+(k-NGHz+x_sp[kk])*sc);
+                Kokkos::deep_copy(S.Vector, Sh);
             };
             auto integral = [&](SD_Solution S, double sc){
+                auto Sh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), S.Vector);
                 double t=0;
                 for(int var=0; var<nvar; var++)
                 for(int k=NGHz;k<S.Nz-NGHz;k++) for(int j=NGHy;j<S.Ny-NGHy;j++)
                 for(int i=NGHx;i<S.Nx-NGHx;i++)
                 for(int kk=0;kk<S.nz;kk++) for(int jj=0;jj<S.ny;jj++)
                 for(int ii=0;ii<S.nx;ii++)
-                    t += q[ii]*q[jj]*q[kk]*S.Vector(0,var,k,j,i,kk,jj,ii);
+                    t += q[ii]*q[jj]*q[kk]*Sh(0,var,k,j,i,kk,jj,ii);
                 return t*sc*sc*sc;
             };
 
@@ -323,6 +351,7 @@ int main(int argc, char** argv){
             //interface must equal what its fine neighbours emitted, or the
             //interface leaks every step.
             auto face_int = [&](SD_Solution S, int dim, int de, int dp, double sc){
+                auto Sh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), S.Vector);
                 double t=0;
                 for(int var=0; var<nvar; var++)
                 for(int k=NGHz;k<S.Nz-NGHz;k++) for(int j=NGHy;j<S.Ny-NGHy;j++)
@@ -336,7 +365,7 @@ int main(int argc, char** argv){
                     if(dim!=_x_) w*=q[ii];
                     if(dim!=_y_) w*=q[jj];
                     if(dim!=_z_) w*=q[kk];
-                    t += w*S.Vector(0,var,k,j,i,kk,jj,ii);
+                    t += w*Sh(0,var,k,j,i,kk,jj,ii);
                 }
                 return t*sc*sc;
             };
@@ -379,6 +408,7 @@ int main(int argc, char** argv){
                 return active ? dq[(c-gh)%n] : 1.0;
             };
             auto fv_face_int = [&](FV_Solution S, int dim, int face, double sc){
+                auto Sh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), S.Vector);
                 bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
                 int x0 = dim==_x_? face : (ax? sghx : 0);
                 int x1 = dim==_x_? face+1 : (ax? sghx+Ncx : 1);
@@ -393,7 +423,7 @@ int main(int argc, char** argv){
                     if(dim!=_x_) w *= cellw(i,sghx,cnx,ax)*sc;
                     if(dim!=_y_) w *= cellw(j,sghy,cny,ay)*sc;
                     if(dim!=_z_) w *= cellw(k,sghz,cnz,az)*sc;
-                    t += w*S.Vector(var,k,j,i);
+                    t += w*Sh(var,k,j,i);
                 }
                 return t;
             };
@@ -419,13 +449,11 @@ int main(int argc, char** argv){
                     FV_Solution FF("FFfv",nvar,Z_dim,Y_dim,X_dim,
                                    dim==_z_,dim==_y_,dim==_x_);
                     int Fx=FF.Nx, Fy=FF.Ny, Fz=FF.Nz, fnv=nvar;
-                    Kokkos::parallel_for("fill_fv",
-                        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({0,0,0},{Fz,Fy,Fx}),
-                        KOKKOS_LAMBDA(int k,int j,int i){
+                    for_box3(0,Fz,0,Fy,0,Fx, KOKKOS_LAMBDA(int k,int j,int i){
                         for(int var=0; var<fnv; var++)
                             FF.Vector(var,k,j,i) =
                                 sin(2.7*i+0.3*var) + 1.7*cos(1.9*j) + 0.6*k + 0.11*var;
-                    });
+                    }, "fill_fv");
                     Kokkos::fence();
                     emitted += fv_face_int(FF, dim, hi, 0.5);
                     restrict_face_fv_sub(CF, FF, dim, lo, hi, cx, cy, cz,
@@ -518,6 +546,9 @@ int main(int argc, char** argv){
     amr_RS_sp[0] = amr_RS_sp[1] = Matrix();
     amr_RS_cv[0] = amr_RS_cv[1] = Matrix();
     amr_RF = Matrix();
+    amr_P_fp = Matrix();
+    amr_RF_fp = Matrix();
+    amr_x_fp = Vector();
     Kokkos::finalize();
     if(failures)
         cout<<failures<<" TEST(S) FAILED"<<endl;

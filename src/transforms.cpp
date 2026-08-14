@@ -131,7 +131,10 @@ void transform_a_to_b_1d(
     int q = choose(dim, U_a.nx, U_a.ny, U_a.nz);
     int nader = U_a.n_ader;
     int nvar = U_a.n_var;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    int nb = U_a.nb;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
         int nid[3];
@@ -139,11 +142,11 @@ void transform_a_to_b_1d(
         int id = choose(dim,ii,jj,kk);
         for(int ll=0; ll<q; ll++){
             indices_n(nid,kk,jj,ii,ll,dim);
-            u += U_a.Vector(t_id,var,k,j,i,NODE)*a_to_b(id,ll);
+            u += U_a.Vector(boff+t_id,var,k,j,i,NODE)*a_to_b(id,ll);
         }
-        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
+        U_b.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = u;
         }}
-    });
+    }, "transform_a_to_b_1d");
 }
 
 //Single-direction sweep of one time slice: reads slice t_src of U_a and
@@ -174,6 +177,38 @@ void transform_a_to_b_1d_slice(
         U_b.Vector(0,var,k,j,i,kk,jj,ii) = u;
         }
     });
+}
+
+void transform_a_to_b_1d_slice_b(
+    SD_Solution U_a,
+    SD_Solution U_b,
+    Matrix a_to_b,
+    int dim,
+    int t_src){
+    int nb = U_a.nb;
+    int Nx = U_b.Nx;
+    int Ny = U_b.Ny;
+    int Nz = U_b.Nz;
+    int px = U_b.nx;
+    int py = U_b.ny;
+    int pz = U_b.nz;
+    int q = choose(dim, U_a.nx, U_a.ny, U_a.nz);
+    int nvar = U_a.n_var;
+    int na = U_a.n_ader;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(na);
+        for(int var=0; var<nvar; var++){
+        int nid[3];
+        double u=0;
+        int id = choose(dim,ii,jj,kk);
+        for(int ll=0; ll<q; ll++){
+            indices_n(nid,kk,jj,ii,ll,dim);
+            u += U_a.Vector(boff+t_src,var,k,j,i,NODE)*a_to_b(id,ll);
+        }
+        U_b.Vector(b,var,k,j,i,kk,jj,ii) = u;
+        }
+    }, "transform_a_to_b_1d_slice");
 }
 
 //Reference implementation of the transverse (2d) transform.
@@ -252,12 +287,14 @@ void transform_a_to_b_2d(
 void combine_solution(SD_Solution U, SD_Solution U0, double a){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
     int nvar=U.n_var;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    int nb=U.nb;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++)
-            U.Vector(0,var,k,j,i,kk,jj,ii) =
-                a*U0.Vector(0,var,k,j,i,kk,jj,ii)
-                + (1.0-a)*U.Vector(0,var,k,j,i,kk,jj,ii);
-    });
+            U.Vector(b,var,k,j,i,kk,jj,ii) =
+                a*U0.Vector(b,var,k,j,i,kk,jj,ii)
+                + (1.0-a)*U.Vector(b,var,k,j,i,kk,jj,ii);
+    }, "combine_solution");
 }
 
 void update_prediction(
@@ -478,6 +515,177 @@ void face_integral(
                 F.Vector(var,K,J,I) = f;
         }
     });
+}
+
+void face_integral_ref_b(
+    SD_Solution F_fp,
+    FV_Solution F,
+    Matrix sp_to_cv,
+    int t_id,
+    int dim){
+    int nb = F_fp.nb;
+    int Nx = F_fp.Nx+(dim==0);
+    int Ny = F_fp.Ny+(dim==1);
+    int Nz = F_fp.Nz+(dim==2);
+    int px = F_fp.nx-(dim==0);
+    int py = F_fp.ny-(dim==1);
+    int pz = F_fp.nz-(dim==2);
+    //Needed to compute K,J,I
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int dim1 = choose(dim , _y_, _z_, _x_);
+    int dim2 = choose(dim1, _y_, _z_, _x_);
+    int q1   = choose(dim1 , px, py, pz);
+    int q2   = choose(dim2 , px, py, pz);
+    int nvar  = F_fp.n_var;
+    int na    = F_fp.n_ader;
+    int Ni = F.Nx;
+    int Nj = F.Ny;
+    int Nk = F.Nz;
+    bool a1 = cfg.active[dim1];
+    bool a2 = cfg.active[dim2];
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(na);
+        const int foff = b*nvar;
+        double s=0;
+        double f;
+        int nid[3];
+        int id1 = choose(dim1, ii, jj, kk);
+        int id2 = choose(dim2, ii, jj, kk);
+        for(int var=0; var<nvar; var++){
+            f=0;
+            for(int nn=0; nn<q2; nn++){
+                indices_n(nid,kk,jj,ii,nn,dim2);
+                for(int ll=0; ll<q1; ll++){
+                    indices_n(nid,NODE,ll,dim1);
+                    s = F_fp.Vector(boff+t_id,var,k,j,i,NODE);
+                    if(a1) s *= sp_to_cv(id1,ll);
+                    if(a2) s *= sp_to_cv(id2,nn);
+                    f += s;
+                }
+            }
+            if(K < Nk && J < Nj && I < Ni)
+                F.Vector(foff+var,K,J,I) = f;
+        }
+    }, "face_integral_ref");
+}
+
+void face_integral_b(
+    SD_Solution F_fp,
+    FV_Solution F,
+    SD_Solution T,
+    Matrix sp_to_cv,
+    int t_id,
+    int dim){
+    int dim1 = choose(dim , _y_, _z_, _x_);
+    int dim2 = choose(dim1, _y_, _z_, _x_);
+    if(!cfg.active[dim1] || !cfg.active[dim2]){
+        face_integral_ref_b(F_fp, F, sp_to_cv, t_id, dim);
+        return;
+    }
+    transform_a_to_b_1d_slice_b(F_fp, T, sp_to_cv, dim1, t_id);
+    int nb = F_fp.nb;
+    int Nx = F_fp.Nx+(dim==0);
+    int Ny = F_fp.Ny+(dim==1);
+    int Nz = F_fp.Nz+(dim==2);
+    int px = F_fp.nx-(dim==0);
+    int py = F_fp.ny-(dim==1);
+    int pz = F_fp.nz-(dim==2);
+    //Needed to compute K,J,I
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int q2   = choose(dim2 , px, py, pz);
+    int nvar  = F_fp.n_var;
+    int Ni = F.Nx;
+    int Nj = F.Ny;
+    int Nk = F.Nz;
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        const int foff = b*nvar;
+        double f;
+        int nid[3];
+        int id2 = choose(dim2, ii, jj, kk);
+        for(int var=0; var<nvar; var++){
+            f=0;
+            for(int nn=0; nn<q2; nn++){
+                indices_n(nid,kk,jj,ii,nn,dim2);
+                f += T.Vector(b,var,k,j,i,NODE)*sp_to_cv(id2,nn);
+            }
+            if(K < Nk && J < Nj && I < Ni)
+                F.Vector(foff+var,K,J,I) = f;
+        }
+    }, "face_integral");
+}
+
+//Batched counterpart: faces_* carry one row of FV face coordinates per
+//block, which is the only geometry that differs between refinement levels.
+void fv_update_solution_b(
+    FV_Solution U_new,
+    FV_Solution U_old,
+    SD_Solution U_cv,
+    FV_Solution F_x,
+    Matrix faces_x,
+    FV_Solution F_y,
+    Matrix faces_y,
+    FV_Solution F_z,
+    Matrix faces_z,
+    Vector w,
+    int t_id,
+    double dt,
+    bool update
+){
+    int nb = U_cv.nb;
+    int Nx = U_cv.Nx;
+    int Ny = U_cv.Ny;
+    int Nz = U_cv.Nz;
+    int px = U_cv.nx;
+    int py = U_cv.ny;
+    int pz = U_cv.nz;
+    //Needed to compute K,J,I
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int nvar = U_cv.n_var;
+    bool ax = cfg.active[_x_];
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        const int foff = b*nvar;
+        for(int var=0; var<nvar; var++){
+        double h;
+        double F;
+        double u_new;
+        F=0;
+        U_old.Vector(foff+var,K,J,I) = U_cv.Vector(b,var,k,j,i,kk,jj,ii);
+        if(ax){
+            h = faces_x(b,I+1)-faces_x(b,I);
+            F += (F_x.Vector(foff+var,K,J,I+1)-F_x.Vector(foff+var,K,J,I))/h;
+        }
+        if(ay){
+            h = faces_y(b,J+1)-faces_y(b,J);
+            F += (F_y.Vector(foff+var,K,J+1,I)-F_y.Vector(foff+var,K,J,I))/h;
+        }
+        if(az){
+            h = faces_z(b,K+1)-faces_z(b,K);
+            F += (F_z.Vector(foff+var,K+1,J,I)-F_z.Vector(foff+var,K,J,I))/h;
+        }
+        if(grav)
+            F -= gravity_source(U_cv,var,b,k,j,i,kk,jj,ii,gx,gy,gz);
+        u_new = U_old.Vector(foff+var,K,J,I) - w(t_id)*dt*F;
+        U_new.Vector(foff+var,K,J,I) = u_new;
+        if(update)
+            U_cv.Vector(b,var,k,j,i,kk,jj,ii) = u_new;
+        }
+    }, "fv_update_solution");
 }
 
 void fv_update_solution(

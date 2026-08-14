@@ -74,6 +74,22 @@ struct Hydro_ader : public PhysicsModule{
     FV_Boundaries BC_z;
     SD_Solution T_fp_z;
 
+    //Non-null when this block's arrays are slices of a mesh-wide pack
+    BlockPack* pack_ = nullptr;
+    int pib_ = 0;
+
+    void alloc(SD_Solution& s, const char* name, int nader, int nv,
+               dimension Zd, dimension Yd, dimension Xd, bool z, bool y, bool x){
+        if(pack_) s.init_packed(*pack_, pib_, name, nader, nv, Zd, Yd, Xd, z, y, x);
+        else      s.init(name, nader, nv, Zd, Yd, Xd, z, y, x);
+    }
+
+    void alloc(FV_Solution& s, const char* name, int nv,
+               dimension Zd, dimension Yd, dimension Xd, bool z, bool y, bool x){
+        if(pack_) s.init_packed(*pack_, pib_, name, nv, Zd, Yd, Xd, z, y, x);
+        else      s.init(name, nv, Zd, Yd, Xd, z, y, x);
+    }
+
     Hydro_ader(
         CommHelper comm,
         int p,
@@ -86,8 +102,13 @@ struct Hydro_ader : public PhysicsModule{
         double* x_fp,
         double _nu,
         double _beta,
-        bool standalone=true //false when driven as one block of a mesh
-    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim) {
+        bool standalone=true, //false when driven as one block of a mesh
+        //When a pack is supplied this block's arrays are slices of it (see
+        //BlockPack), so mesh-level kernels can span every block in one launch.
+        BlockPack* pack=nullptr,
+        int pack_ib=0
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim),
+        pack_(pack), pib_(pack_ib) {
         //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
         nvar = NVAR;
         n_output = 0;
@@ -170,49 +191,49 @@ struct Hydro_ader : public PhysicsModule{
             }
         }
 
-        W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U_sp.init("U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        W_cv.init("W_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U_cv.init("U_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        T_sweep.init("T_sweep",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(W_sp,"W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_sp,"U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(W_cv,"W_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_cv,"U_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(T_sweep,"T_sweep",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
-        U_ader_sp.init("U_ader_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_ader_sp,"U_ader_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         if(cfg.integrator==_integrator_rk_)
-            U0_sp.init("U0_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(U0_sp,"U0_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
-        U_ader_fp_x.init("U_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
-        F_ader_fp_x.init("F_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
-        dUx_sp.init("dUx_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_ader_fp_x,"U_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+        alloc(F_ader_fp_x,"F_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+        alloc(dUx_sp,"dUx_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_x.init(X_dim,cfg.bc[_x_],n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
-        U_ader_fp_y.init("U_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
-        F_ader_fp_y.init("F_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
-        dUy_sp.init("dUy_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_ader_fp_y,"U_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+        alloc(F_ader_fp_y,"F_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+        alloc(dUy_sp,"dUy_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_y.init(Y_dim,cfg.bc[_y_],n_ader,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
-        U_ader_fp_z.init("U_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
-        F_ader_fp_z.init("F_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
-        dUz_sp.init("dUz_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_ader_fp_z,"U_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+        alloc(F_ader_fp_z,"F_ader_fp_z",n_ader,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+        alloc(dUz_sp,"dUz_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_z.init(Z_dim,cfg.bc[_z_],n_ader,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
 
         if(cfg.fallback){
-            U_new.init("U_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            W_new.init("W_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            U_old.init("U_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            W_old.init("W_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            troubles.init("troubles",nvar,Z_dim,Y_dim,X_dim,0,0,0);
-            theta.init("theta",1,Z_dim,Y_dim,X_dim,0,0,0);
-            theta_tmp.init("theta_tmp",1,Z_dim,Y_dim,X_dim,0,0,0);
-            F_x.init("F_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
-            alpha_x.init("alpha_x",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(U_new,"U_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(W_new,"W_new",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(U_old,"U_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(W_old,"W_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(troubles,"troubles",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(theta,"theta",1,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(theta_tmp,"theta_tmp",1,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(F_x,"F_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+            alloc(alpha_x,"alpha_x",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             BC_x.init(X_dim,cfg.bc[_x_],nvar,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
-            T_fp_x.init("T_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
-            F_y.init("F_y",nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
-            alpha_y.init("alpha_y",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(T_fp_x,"T_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
+            alloc(F_y,"F_y",nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+            alloc(alpha_y,"alpha_y",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             BC_y.init(Y_dim,cfg.bc[_y_],nvar,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
-            T_fp_y.init("T_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
-            F_z.init("F_z",nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
-            alpha_z.init("alpha_z",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(T_fp_y,"T_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
+            alloc(F_z,"F_z",nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+            alloc(alpha_z,"alpha_z",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             BC_z.init(Z_dim,cfg.bc[_z_],nvar,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
-            T_fp_z.init("T_fp_z",1,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
+            alloc(T_fp_z,"T_fp_z",1,nvar,Z_dim,Y_dim,X_dim,cfg.active[_z_],0,0);
         }
 
         ////////////////////////
@@ -530,12 +551,15 @@ struct Hydro_ader : public PhysicsModule{
         int pz = U.nz;
         int nvar = U.n_var;
         int nader = U_ader.n_ader;
-        sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        int nb = U.nb;
+        sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+            KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+            BOFF(nader);
             for(int t_id=0; t_id<nader; t_id++){
             for(int var=0; var<nvar; var++){
-            U_ader.Vector(t_id,var,k,j,i,kk,jj,ii) = U.Vector(0,var,k,j,i,kk,jj,ii);
+            U_ader.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = U.Vector(b,var,k,j,i,kk,jj,ii);
             }}
-        });
+        }, "copy_ader");
     }
 
     void Integrate_fluxes(int ader){
@@ -564,15 +588,13 @@ struct Hydro_ader : public PhysicsModule{
         Vector fy = Y_dim.fv_faces;
         Vector fz = Z_dim.fv_faces;
         bool ay=cfg.active[_y_], az=cfg.active[_z_];
-        double mass=0;
-        Kokkos::parallel_reduce("fv_mass_cells",
-            Kokkos::MDRangePolicy<Kokkos::Rank<3>>({nGHz,nGHy,nGHx},{Nz-nGHz,Ny-nGHy,Nx-nGHx}),
+        double mass = fv_sum_cells_ngh2(Nz,Ny,Nx,
             KOKKOS_LAMBDA(int k,int j,int i,double& sum){
                 double V = fx(i+1)-fx(i);
                 if(ay) V *= fy(j+1)-fy(j);
                 if(az) V *= fz(k+1)-fz(k);
                 sum += U.Vector(0,k,j,i)*V;
-            }, mass);
+            });
         return mass;
     }
     #endif
@@ -586,15 +608,13 @@ struct Hydro_ader : public PhysicsModule{
         Vector fz = Z_dim.fv_faces;
         bool ay=cfg.active[_y_], az=cfg.active[_z_];
         GHOST_LOCALS;
-        double mass=0;
-        Kokkos::parallel_reduce("fv_mass",
-            Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,pz,py,px}),
+        double mass = sd_sum_active_cells(Nz,Ny,Nx,pz,py,px,
             KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& sum){
                 double V = fx(I+1)-fx(I);
                 if(ay) V *= fy(J+1)-fy(J);
                 if(az) V *= fz(K+1)-fz(K);
                 sum += U.Vector(0,0,k,j,i,kk,jj,ii)*V;
-            }, mass);
+            });
         return mass;
     }
 

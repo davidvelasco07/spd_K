@@ -76,7 +76,12 @@ FV_Solution& block_Ffv<MHD_ader>(MHD_ader& blk, int dim){
                     : blk.F0_z;
 }
 
-static void copy_face_to_ghost(SD_Solution U, SD_Solution& src, int dim, int side){
+//src is taken by value on purpose. nvcc's extended lambdas cannot capture a
+//reference: `[=]` on a reference parameter leaves a host pointer in the
+//closure, which is fine when host and device are the same space and reads
+//garbage on CUDA. SD_Solution holds Kokkos Views, so a copy is a shallow
+//handle and writes still land in the same allocation.
+static void copy_face_to_ghost(SD_Solution U, SD_Solution src, int dim, int side){
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
     int nader=U.n_ader, nvar=U.n_var;
@@ -123,7 +128,7 @@ static void mirror_face_to_ghost(SD_Solution U, int dim, int side){
     });
 }
 
-static void apply_domain_bc_fp(SD_Solution U, int dim, int side){
+void apply_domain_bc_fp(SD_Solution U, int dim, int side){
     if(cfg.bc[dim] != _gradfree_) return;
     mirror_face_to_ghost(U, dim, side);
 }
@@ -132,7 +137,8 @@ static void apply_domain_bc_fp(SD_Solution U, int dim, int side){
 //solver stores each common flux twice -- once on the ghost side of the
 //interface and once on the interior side -- and the update reads the interior
 //copy, so a correction that only wrote the ghost would be a no-op.
-static void set_interface_flux(SD_Solution U, SD_Solution& src, int dim, int side){
+//By value, for the reason given on copy_face_to_ghost.
+static void set_interface_flux(SD_Solution U, SD_Solution src, int dim, int side){
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
     int nader=U.n_ader, nvar=U.n_var;
@@ -393,9 +399,7 @@ void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
     if(dim==_z_){ z0=cface; z1=cface+1; }
     else if(tz){ z0=sghz+cz*(Ncz/2); z1=z0+Ncz/2; }
     else { z0=0; z1=1; }
-    Kokkos::parallel_for("restrict_face_fv_sub",
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({z0,y0,x0},{z1,y1,x1}),
-        KOKKOS_LAMBDA(int k, int j, int i){
+    for_box3(z0,z1,y0,y1,x0,x1, KOKKOS_LAMBDA(int k, int j, int i){
         //Coarse cell -> its element and the cell within it, which selects
         //the row of the overlap weights.
         int ex=0,jx=0,ey=0,jy=0,ez=0,jz=0;
@@ -421,7 +425,7 @@ void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
             }
             C.Vector(var,k,j,i) = u;
         }
-    });
+    }, "restrict_face_fv_sub");
 }
 
 //At a coarse-fine face the coarse block's FV flux has to equal the
@@ -492,25 +496,67 @@ static void fv_copy_slab(FV_Solution U, FV_Solution src, int dim, int side, int 
     });
 }
 
-static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int side, int /*sub*/){
+//Floor division by two. The built-in truncates toward zero, which is off by
+//one for the negative offsets that transverse ghost cells produce.
+KOKKOS_INLINE_FUNCTION int fv_fdiv2(int a){ return a>=0 ? a/2 : -((-a+1)/2); }
+
+KOKKOS_INLINE_FUNCTION int fv_clamp(int a, int hi){
+    return a<0 ? 0 : (a>hi ? hi : a);
+}
+
+//Unpack the sub-face index into one transverse half per active direction, in
+//the ascending-dimension order the forest packs them (forest.cpp fills
+//`row[e.sub]`, and correct_coarse_fine_fv_flux unpacks the same way).
+static void fv_sub_bits(int sub, int dim, int& bx, int& by, int& bz){
+    bx = by = bz = 0;
+    int bit = 0;
+    for(int d=0; d<3; d++){
+        if(d==dim || !cfg.active[d]) continue;
+        int v = (sub>>bit)&1;
+        if(d==_x_) bx=v; else if(d==_y_) by=v; else bz=v;
+        bit++;
+    }
+}
+
+//Coarse -> fine ghost injection.
+//
+//The fine block's cells are half as wide as its coarse neighbour's and it
+//covers only one half of that neighbour in each transverse direction, so both
+//indices have to be mapped: two fine cells share one coarse cell along the
+//normal, and the transverse offset depends on which half (`sub`) this block
+//occupies. Reading the coarse neighbour at the fine block's own index -- as
+//this did before -- samples a cell up to half a block away.
+//
+//The transverse ghost corners are filled from this one neighbour as a
+//fallback; forest_exchange_fv_same overwrites every corner a same-level
+//neighbour actually owns.
+static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int side, int sub){
     int ngh = nGH_rt[dim];
-    int half = std::max(1, ngh/2);
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int Nc = (dim==_x_ ? coarse.Nx : (dim==_y_ ? coarse.Ny : coarse.Nz));
     int nvar = U.n_var;
     int Nx = (dim==_x_ ? ngh : U.Nx);
     int Ny = (dim==_y_ ? ngh : U.Ny);
     int Nz = (dim==_z_ ? ngh : U.Nz);
-    //This fills the transverse ghost corners too, by prolongating this one
-    //coarse neighbour across them. Those cells lie outside the block, so the
-    //value is only a fallback: forest_exchange_fv_same overwrites it wherever
-    //a same-level neighbour owns the corner.
+    int bx, by, bz;
+    fv_sub_bits(sub, dim, bx, by, bz);
+    int gx = nGH_rt[_x_], gy = nGH_rt[_y_], gz = nGH_rt[_z_];
+    int ax = U.Nx - 2*gx, ay = U.Ny - 2*gy, az = U.Nz - 2*gz;
+    int cx = coarse.Nx-1, cy = coarse.Ny-1, cz = coarse.Nz-1;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        //Transverse: fine active offset a maps to coarse active offset
+        //(b*Na + a)/2, b being the half of the coarse block this one covers.
+        int ci = (dim==_x_) ? i : fv_clamp(gx + fv_fdiv2(bx*ax + (i-gx)), cx);
+        int cj = (dim==_y_) ? j : fv_clamp(gy + fv_fdiv2(by*ay + (j-gy)), cy);
+        int ck = (dim==_z_) ? k : fv_clamp(gz + fv_fdiv2(bz*az + (k-gz)), cz);
+        int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        //Normal: the coarse cell holding this ghost, counted off the interface
+        //(two fine cells deep per coarse cell).
+        int cl = (side==0) ? (Nc-ngh) - ((ngh-l)+1)/2
+                           : (ngh-1) + ((l+2)/2);
         for(int var=0; var<nvar; var++){
         int Nid[3], Nidc[3];
-        int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
-        int cl = (side==0 ? Nc-2*ngh-half+l/2 : ngh+l/2);
-        fv_indices(Nidc,k,j,i,cl,dim);
+        fv_indices(Nidc,ck,cj,ci,cl,dim);
         double v = coarse.Vector(var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
         fv_indices(Nid,k,j,i,(side==0?l:N-ngh+l),dim);
         U.Vector(FV_INDICES) = v;
@@ -518,31 +564,84 @@ static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int si
     });
 }
 
-static void fv_restrict_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
-                              FV_Solution& f2, FV_Solution& f3, int nf, int dim, int side){
+//Fine -> coarse ghost fill.
+//
+//One coarse ghost cell covers two fine cells along the normal and two more
+//across each transverse direction, all inside the single fine neighbour that
+//owns that transverse half. So the value is a volume average over 2^ndim fine
+//cells -- not, as this did before, an average of every fine neighbour sampled
+//at the coarse block's own index, which reads each of them at the wrong place.
+//
+//`take_max` swaps the average for a maximum, which is what the MOOD cascade
+//index needs: a demotion on either side of a level jump must be seen by both.
+static void fv_from_finer(FV_Solution U, FV_Solution f0, FV_Solution f1,
+                          FV_Solution f2, FV_Solution f3, int nf, int dim,
+                          int side, bool take_max){
     int ngh = nGH_rt[dim];
     int nvar = U.n_var;
     int Nx = (dim==_x_ ? ngh : U.Nx);
     int Ny = (dim==_y_ ? ngh : U.Ny);
     int Nz = (dim==_z_ ? ngh : U.Nz);
+    int gx = nGH_rt[_x_], gy = nGH_rt[_y_], gz = nGH_rt[_z_];
+    int ax = U.Nx - 2*gx, ay = U.Ny - 2*gy, az = U.Nz - 2*gz;
+    //Fine blocks carry the same cell counts as the coarse one.
+    int hx = U.Nx-1, hy = U.Ny-1, hz = U.Nz-1;
+    int Nf = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    //cfg is a host global, so the activity flags have to ride into the kernel
+    //as plain locals.
+    int actx = cfg.active[_x_], acty = cfg.active[_y_], actz = cfg.active[_z_];
+    //Every direction contributes two fine cells except the inactive ones.
+    int ox = actx ? 2 : 1;
+    int oy = acty ? 2 : 1;
+    int oz = actz ? 2 : 1;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        //Transverse: which half owns this cell, and where it lands inside it.
+        int bx=0, by=0, bz=0;
+        int fx=i, fy=j, fz=k;
+        if(dim!=_x_ && actx){ int a=i-gx; bx = (2*a>=ax); fx = gx + 2*a - bx*ax; }
+        if(dim!=_y_ && acty){ int a=j-gy; by = (2*a>=ay); fy = gy + 2*a - by*ay; }
+        if(dim!=_z_ && actz){ int a=k-gz; bz = (2*a>=az); fz = gz + 2*a - bz*az; }
+        int sub=0, bit=0;
+        for(int d=0; d<3; d++){
+            int act = (d==_x_?actx:(d==_y_?acty:actz));
+            if(d==dim || !act) continue;
+            sub |= (d==_x_?bx:(d==_y_?by:bz))<<bit;
+            bit++;
+        }
+        if(sub >= nf) sub = 0;
+        //Normal: the two fine cells this coarse ghost spans.
+        int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        int nbase = (side==0) ? (Nf-ngh) - 2*(ngh-l) : ngh + 2*l;
+        if(dim==_x_)      fx = nbase;
+        else if(dim==_y_) fy = nbase;
+        else              fz = nbase;
         for(int var=0; var<nvar; var++){
-        double sum=0; int cnt=0;
-        if(nf>0){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f0.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); sum+=f0.Vector(FV_INDICES); cnt++; }
-        if(nf>1){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f1.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); sum+=f1.Vector(FV_INDICES); cnt++; }
-        if(nf>2){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f2.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); sum+=f2.Vector(FV_INDICES); cnt++; }
-        if(nf>3){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f3.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); sum+=f3.Vector(FV_INDICES); cnt++; }
+        double acc = take_max ? -1e300 : 0.0;
+        int cnt = 0;
+        for(int dz=0; dz<oz; dz++)
+        for(int dy=0; dy<oy; dy++)
+        for(int dx=0; dx<ox; dx++){
+            int px = fv_clamp(fx+dx, hx);
+            int py = fv_clamp(fy+dy, hy);
+            int pz = fv_clamp(fz+dz, hz);
+            double v;
+            if     (sub==0) v = f0.Vector(var,pz,py,px);
+            else if(sub==1) v = f1.Vector(var,pz,py,px);
+            else if(sub==2) v = f2.Vector(var,pz,py,px);
+            else            v = f3.Vector(var,pz,py,px);
+            if(take_max) acc = max(acc, v); else acc += v;
+            cnt++;
+        }
         int Nid[3];
-        if(dim==_x_) fv_indices(Nid,k,j,i,(side==0?i:U.Nx-ngh+i),dim);
-        else if(dim==_y_) fv_indices(Nid,k,j,i,(side==0?j:U.Ny-ngh+j),dim);
-        else fv_indices(Nid,k,j,i,(side==0?k:U.Nz-ngh+k),dim);
-        U.Vector(FV_INDICES) = sum/max(cnt,1);
+        fv_indices(Nid,k,j,i,(side==0?l:Nf-ngh+l),dim);
+        U.Vector(FV_INDICES) = take_max ? acc : acc/max(cnt,1);
         }
     });
+}
+
+static void fv_restrict_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
+                              FV_Solution& f2, FV_Solution& f3, int nf, int dim, int side){
+    fv_from_finer(U, f0, f1, f2, f3, nf, dim, side, false);
 }
 
 //Same-level copies only. Run after every direction has been exchanged, this
@@ -604,29 +703,7 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
 //a demotion on either side of a level jump must be visible to both).
 static void fv_max_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
                          FV_Solution& f2, FV_Solution& f3, int nf, int dim, int side){
-    int ngh = nGH_rt[dim];
-    int nvar = U.n_var;
-    int Nx = (dim==_x_ ? ngh : U.Nx);
-    int Ny = (dim==_y_ ? ngh : U.Ny);
-    int Nz = (dim==_z_ ? ngh : U.Nz);
-    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        for(int var=0; var<nvar; var++){
-        double mval=-1e300;
-        if(nf>0){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f0.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f0.Vector(FV_INDICES)); }
-        if(nf>1){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f1.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f1.Vector(FV_INDICES)); }
-        if(nf>2){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f2.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f2.Vector(FV_INDICES)); }
-        if(nf>3){ int Nid[3]; int l=(dim==_x_?i:(dim==_y_?j:k)); int fl=(side==0?f3.Nx-3*ngh+l:ngh+l);
-            fv_indices(Nid,k,j,i,fl,dim); mval=max(mval,f3.Vector(FV_INDICES)); }
-        int Nid[3];
-        if(dim==_x_) fv_indices(Nid,k,j,i,(side==0?i:U.Nx-ngh+i),dim);
-        else if(dim==_y_) fv_indices(Nid,k,j,i,(side==0?j:U.Ny-ngh+j),dim);
-        else fv_indices(Nid,k,j,i,(side==0?k:U.Nz-ngh+k),dim);
-        U.Vector(FV_INDICES) = mval;
-        }
-    });
+    fv_from_finer(U, f0, f1, f2, f3, nf, dim, side, true);
 }
 
 template<typename Block>
@@ -687,3 +764,183 @@ template void forest_exchange_fv_max<Hydro_ader>(BlockForest&, std::vector<Hydro
                                                  FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_max<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
                                                FV_Solution MHD_ader::*, int);
+
+//======================================================================
+// Receiver-driven flux-point ghost gather (the replacement exchange).
+//
+// One kernel per (dim, side), ranging over (transaction, face cell) with the
+// transaction index as the leading kernel axis -- the block is just another
+// index, so the launch count is constant in the block count and the only
+// price of more meshblocks is the surface-to-volume ratio.
+//
+// The loop is driven by the *receiver's* ghost cells, so every ghost is
+// written exactly once by construction. That is the property the previous
+// push-style exchanges lacked, and the reason their corner handling needed a
+// second same-level pass to paint over a "fallback" value.
+//
+// A transaction names the receiving block and its source. Mixed levels will
+// add a relation code and a sub-face index here, changing only which operator
+// the kernel applies (copy / prolongate / overlap-restrict), not the loop
+// structure; same-level is the degenerate case where the operator is a copy.
+//======================================================================
+void gather_fp_same(SD_Solution U, IntVector recv, IntVector send,
+                    int ntr, int dim, int side){
+    if(ntr <= 0) return;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader = U.n_ader, nvar = U.n_var;
+    //Collapse the normal axis: exactly one thread per destination cell.
+    int Nx = (dim==_x_ ? 1 : U.Nx);
+    int Ny = (dim==_y_ ? 1 : U.Ny);
+    int Nz = (dim==_z_ ? 1 : U.Nz);
+    int px = (dim==_x_ ? 1 : U.nx);
+    int py = (dim==_y_ ? 1 : U.ny);
+    int pz = (dim==_z_ ? 1 : U.nz);
+    //Destination is my ghost element; source is the neighbour's last (side 0)
+    //or first (side 1) active element, at the flux point on the shared face.
+    const int de = (side==0 ? 0   : N-1);
+    const int dp = (side==0 ? n-1 : 0  );
+    const int se = (side==0 ? N-2 : 1  );
+    const int sp = (side==0 ? n-1 : 0  );
+    sd_for_cells_b(ntr,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        const int rb = recv(b)*nader;
+        const int sb = send(b)*nader;
+        int Nid[3], nid[3];
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++){
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,se,sp,dim);
+            double v = U.Vector(sb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                            nid[_z_],nid[_y_],nid[_x_]);
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,de,dp,dim);
+            U.Vector(rb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                 nid[_z_],nid[_y_],nid[_x_]) = v;
+        }
+    }, "gather_fp_same");
+}
+
+//Unpack a sub-face index into one transverse half per active direction.
+KOKKOS_INLINE_FUNCTION
+void sub_halves(int sub, int dim, int actx, int acty, int actz,
+                int& cx, int& cy, int& cz){
+    cx=0; cy=0; cz=0;
+    int bit=0;
+    for(int d=0; d<3; d++){
+        int act = (d==_x_?actx:(d==_y_?acty:actz));
+        if(d==dim || !act) continue;
+        int v = (sub>>bit)&1;
+        if(d==_x_) cx=v; else if(d==_y_) cy=v; else cz=v;
+        bit++;
+    }
+}
+
+//COARSER: the receiver is fine and reads a coarse neighbour. Its whole ghost
+//face is the transverse prolongation of the sub-face of the coarse trace that
+//it covers -- the same mapping prolongate_face_coarser uses, with the normal
+//index pinned to my ghost slot and the neighbour's facing active slot.
+void gather_fp_coarser(SD_Solution U, IntVector recv, IntVector send, IntVector subv,
+                       int ntr, int dim, int side, Matrix P){
+    if(ntr <= 0) return;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader=U.n_ader, nvar=U.n_var;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nx=U.nx, ny=U.ny, nz=U.nz;
+    int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    bool tx = actx && dim!=_x_, ty = acty && dim!=_y_, tz = actz && dim!=_z_;
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    const int de = (side==0 ? 0 : N-1), dp = (side==0 ? n-1 : 0);
+    const int se = (side==0 ? N-2 : 1), sp = (side==0 ? n-1 : 0);
+    //Transverse span of the receiver's face; the normal axis is collapsed.
+    int bz0 = tz?NGHz:0, bz1 = tz?Nz-NGHz:1;
+    int by0 = ty?NGHy:0, by1 = ty?Ny-NGHy:1;
+    int bx0 = tx?NGHx:0, bx1 = tx?Nx-NGHx:1;
+    int pnz = tz?nz:1, pny = ty?ny:1, pnx = tx?nx:1;
+    GHOST_LOCALS;
+    sd_for_cells_b(ntr, bz1-bz0, by1-by0, bx1-bx0, pnz, pny, pnx,
+        KOKKOS_LAMBDA(int b,int kk_,int jj_,int ii_,int kp,int jp,int ip){
+        int k = kk_+bz0, j = jj_+by0, i = ii_+bx0;
+        int cxh,cyh,czh; sub_halves(subv(b),dim,actx,acty,actz,cxh,cyh,czh);
+        int gx = tx ? cxh*NBx + (i-ghx) : 0;
+        int gy = ty ? cyh*NBy + (j-ghy) : 0;
+        int gz = tz ? czh*NBz + (k-ghz) : 0;
+        int cex = tx ? ghx+gx/2 : 0, sx = tx ? gx%2 : 0;
+        int cey = ty ? ghy+gy/2 : 0, sy = ty ? gy%2 : 0;
+        int cez = tz ? ghz+gz/2 : 0, sz = tz ? gz%2 : 0;
+        const int rb = recv(b)*nader, sb = send(b)*nader;
+        int Nid[3], nid[3];
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            for(int nn=0; nn<(tz?nz:1); nn++)
+            for(int mm=0; mm<(ty?ny:1); mm++)
+            for(int ll=0; ll<(tx?nx:1); ll++){
+                //source: neighbour's facing active element, coarse transverse cell
+                amr_indices(Nid,nid, tz?cez:k, ty?cey:j, tx?cex:i,
+                                     tz?nn:kp, ty?mm:jp, tx?ll:ip, se, sp, dim);
+                double s = U.Vector(sb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                                nid[_z_],nid[_y_],nid[_x_]);
+                if(tx) s *= P(sx*nx+ip,ll);
+                if(ty) s *= P(sy*ny+jp,mm);
+                if(tz) s *= P(sz*nz+kp,nn);
+                u += s;
+            }
+            amr_indices(Nid,nid,k,j,i,kp,jp,ip,de,dp,dim);
+            U.Vector(rb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                 nid[_z_],nid[_y_],nid[_x_]) = u;
+        }
+    }, "gather_fp_coarser");
+}
+
+//FINER: the receiver is coarse and each fine neighbour supplies one quadrant
+//of its ghost face, overlap-restricted (amr_RF). One transaction per fine
+//neighbour, and the quadrants partition the face, so every ghost cell is
+//still written exactly once.
+void gather_fp_finer(SD_Solution U, IntVector recv, IntVector send, IntVector subv,
+                     int ntr, int dim, int side, Matrix R){
+    if(ntr <= 0) return;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader=U.n_ader, nvar=U.n_var;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nx=U.nx, ny=U.ny, nz=U.nz;
+    int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    bool tx = actx && dim!=_x_, ty = acty && dim!=_y_, tz = actz && dim!=_z_;
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    const int de = (side==0 ? 0 : N-1), dp = (side==0 ? n-1 : 0);
+    const int se = (side==0 ? N-2 : 1), sp = (side==0 ? n-1 : 0);
+    //Each transaction covers half the face per transverse direction.
+    int hz = tz?NBz/2:1, hy = ty?NBy/2:1, hx = tx?NBx/2:1;
+    int pnz = tz?nz:1, pny = ty?ny:1, pnx = tx?nx:1;
+    GHOST_LOCALS;
+    sd_for_cells_b(ntr, hz, hy, hx, pnz, pny, pnx,
+        KOKKOS_LAMBDA(int b,int kk_,int jj_,int ii_,int kp,int jp,int ip){
+        int cxh,cyh,czh; sub_halves(subv(b),dim,actx,acty,actz,cxh,cyh,czh);
+        int i = tx ? ghx + cxh*(NBx/2) + ii_ : 0;
+        int j = ty ? ghy + cyh*(NBy/2) + jj_ : 0;
+        int k = tz ? ghz + czh*(NBz/2) + kk_ : 0;
+        int fx = tx ? ghx+2*(i-ghx)-cxh*NBx : 0;
+        int fy = ty ? ghy+2*(j-ghy)-cyh*NBy : 0;
+        int fz = tz ? ghz+2*(k-ghz)-czh*NBz : 0;
+        const int rb = recv(b)*nader, sb = send(b)*nader;
+        int Nid[3], nid[3];
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            for(int nn=0; nn<(tz?2*nz:1); nn++)
+            for(int mm=0; mm<(ty?2*ny:1); mm++)
+            for(int ll=0; ll<(tx?2*nx:1); ll++){
+                amr_indices(Nid,nid, tz?fz+nn/nz:k, ty?fy+mm/ny:j, tx?fx+ll/nx:i,
+                                     tz?nn%nz:kp,   ty?mm%ny:jp,   tx?ll%nx:ip,
+                                     se, sp, dim);
+                double s = U.Vector(sb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                                nid[_z_],nid[_y_],nid[_x_]);
+                if(tx) s *= R(ip,ll);
+                if(ty) s *= R(jp,mm);
+                if(tz) s *= R(kp,nn);
+                u += s;
+            }
+            amr_indices(Nid,nid,k,j,i,kp,jp,ip,de,dp,dim);
+            U.Vector(rb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                 nid[_z_],nid[_y_],nid[_x_]) = u;
+        }
+    }, "gather_fp_finer");
+}

@@ -1,5 +1,6 @@
 #include "spd_k.hpp"
 #include "amr_criteria.hpp"
+#include <set>
 #include <type_traits>
 
 double lohner_score(SD_Solution W, int var){
@@ -115,9 +116,11 @@ double shear_score(SD_Solution W){
     return g;
 }
 
-//Löhner second-difference indicator on |B| = sqrt(Bx^2+By^2+Bz^2). Tracks OT
-//structure from t=0 (uniform density/pressure); hydro falls back to density.
-double bfield_lohner_score(SD_Solution W){
+//Element means of B^2 = Bx^2+By^2+Bz^2 over the block. B^2 rather than |B|
+//because |B| has a cusp wherever the field passes through zero -- on the
+//Orszag-Tang lattice of nulls, say -- and a curvature indicator would then keep
+//refining those points at every resolution.
+static std::vector<double> bfield_element_means(SD_Solution W){
     W.copy();
     int t = 0;
     #ifdef KOKKOS_ENABLE_CUDA
@@ -125,55 +128,85 @@ double bfield_lohner_score(SD_Solution W){
     #else
     auto& A = W.Vector;
     #endif
-    auto mag = [&](int k, int j, int i, int kk, int jj, int ii){
-        double bx = A(t,_mbx_,k,j,i,kk,jj,ii);
-        double by = A(t,_mby_,k,j,i,kk,jj,ii);
-        double bz = A(t,_mbz_,k,j,i,kk,jj,ii);
-        return std::sqrt(bx*bx + by*by + bz*bz);
+    std::vector<double> m((size_t)W.Nz*W.Ny*W.Nx, 0.0);
+    double inv = 1.0/(W.nz*W.ny*W.nx);
+    for(int k=0; k<W.Nz; k++)
+    for(int j=0; j<W.Ny; j++)
+    for(int i=0; i<W.Nx; i++){
+        double s = 0.0;
+        for(int kk=0; kk<W.nz; kk++)
+        for(int jj=0; jj<W.ny; jj++)
+        for(int ii=0; ii<W.nx; ii++){
+            double bx = A(t,_mbx_,k,j,i,kk,jj,ii);
+            double by = A(t,_mby_,k,j,i,kk,jj,ii);
+            double bz = A(t,_mbz_,k,j,i,kk,jj,ii);
+            s += bx*bx + by*by + bz*bz;
+        }
+        m[((size_t)k*W.Ny + j)*W.Nx + i] = s*inv;
+    }
+    return m;
+}
+
+double bfield_mean(SD_Solution W){
+    auto m = bfield_element_means(W);
+    double s = 0.0;
+    int cnt = 0;
+    for(int k=NGHz; k<W.Nz-NGHz; k++)
+    for(int j=NGHy; j<W.Ny-NGHy; j++)
+    for(int i=NGHx; i<W.Nx-NGHx; i++){
+        s += m[((size_t)k*W.Ny + j)*W.Nx + i];
+        cnt++;
+    }
+    return s/std::max(cnt,1);
+}
+
+//Löhner indicator on B^2, in its filtered form
+//
+//    L = |v2 - 2 v1 + v0| / (|v2 - v1| + |v1 - v0| + eps (|v2| + 2|v1| + |v0|))
+//
+//scored as the largest L over the block. It tracks Orszag-Tang structure from
+//t = 0, where density and pressure are uniform and a hydro indicator sees
+//nothing. Being dimensionless, L falls off once a feature is resolved, so
+//refinement stops instead of walking to a uniformly refined mesh.
+//
+//Two details are specific to this discretisation. The stencil runs over element
+//*means*, not solution points: the SD representation is discontinuous across
+//elements, so a point-to-point stencil measures the inter-element jump, which
+//stays O(1) at every resolution and saturates the indicator everywhere. And the
+//filter term carries a floor built from a forest-wide field strength bref,
+//without which a field-free block (the exterior of a field loop) compares
+//round-off against round-off and scores as though it were a discontinuity.
+//
+//Only stencils that stay inside the block are used, so the score never depends
+//on how recently the ghost elements were exchanged.
+double bfield_lohner_score(SD_Solution W, double bref){
+    const double eps = 0.01;
+    auto m = bfield_element_means(W);
+    auto at = [&](int k, int j, int i){
+        return m[((size_t)k*W.Ny + j)*W.Nx + i];
     };
     double g2 = 0.0;
     for(int dim=0; dim<3; dim++){
         if(!cfg.active[dim]) continue;
-        if((dim==_x_ ? W.Nx : (dim==_y_ ? W.Ny : W.Nz)) < 3) continue;
+        int lo = (dim==_x_ ? NGHx+1 : (dim==_y_ ? NGHy+1 : NGHz+1));
+        int hi = (dim==_x_ ? W.Nx-NGHx-1 : (dim==_y_ ? W.Ny-NGHy-1 : W.Nz-NGHz-1));
+        if(hi <= lo) continue;
         for(int k=NGHz; k<W.Nz-NGHz; k++)
         for(int j=NGHy; j<W.Ny-NGHy; j++)
-        for(int i=NGHx; i<W.Nx-NGHx; i++)
-        for(int kk=0; kk<W.nz; kk++)
-        for(int jj=0; jj<W.ny; jj++)
-        for(int ii=0; ii<W.nx; ii++){
+        for(int i=NGHx; i<W.Nx-NGHx; i++){
+            int c = (dim==_x_ ? i : (dim==_y_ ? j : k));
+            if(c < lo || c >= hi) continue;
             double v0,v1,v2;
-            if(dim==_x_){
-                if(i-1<NGHx || i+1>=W.Nx-NGHx) continue;
-                v0=mag(k,j,i-1,kk,jj,ii);
-                v1=mag(k,j,i,kk,jj,ii);
-                v2=mag(k,j,i+1,kk,jj,ii);
-            } else if(dim==_y_){
-                if(j-1<NGHy || j+1>=W.Ny-NGHy) continue;
-                v0=mag(k,j-1,i,kk,jj,ii);
-                v1=mag(k,j,i,kk,jj,ii);
-                v2=mag(k,j+1,i,kk,jj,ii);
-            } else {
-                if(k-1<NGHz || k+1>=W.Nz-NGHz) continue;
-                v0=mag(k-1,j,i,kk,jj,ii);
-                v1=mag(k,j,i,kk,jj,ii);
-                v2=mag(k+1,j,i,kk,jj,ii);
-            }
-            g2 = std::max(g2, std::abs(v0 - 2.0*v1 + v2));
+            if(dim==_x_){        v0=at(k,j,i-1); v1=at(k,j,i); v2=at(k,j,i+1); }
+            else if(dim==_y_){   v0=at(k,j-1,i); v1=at(k,j,i); v2=at(k,j+1,i); }
+            else {               v0=at(k-1,j,i); v1=at(k,j,i); v2=at(k+1,j,i); }
+            double den = std::abs(v2-v1) + std::abs(v1-v0)
+                       + eps*(std::abs(v2) + 2.0*std::abs(v1) + std::abs(v0))
+                       + 4.0*eps*bref;
+            g2 = std::max(g2, std::abs(v0 - 2.0*v1 + v2)/den);
         }
     }
-    double den = 0.0;
-    int cnt = 0;
-    for(int k=NGHz; k<W.Nz-NGHz; k++)
-    for(int j=NGHy; j<W.Ny-NGHy; j++)
-    for(int i=NGHx; i<W.Nx-NGHx; i++)
-    for(int kk=0; kk<W.nz; kk++)
-    for(int jj=0; jj<W.ny; jj++)
-    for(int ii=0; ii<W.nx; ii++){
-        den += mag(k,j,i,kk,jj,ii);
-        cnt++;
-    }
-    den = den/std::max(cnt,1) + 1e-12;
-    return g2/den;
+    return g2;
 }
 
 template<typename Block>
@@ -208,15 +241,9 @@ static bool refine_flag(int criterion, Block& blk){
     switch(criterion){
         case 1: return pressure_gradient_score(blk.W_sp) > 0.03;
         case 2: return trouble_fraction(blk) > 0.01;
-        //Thresholds are the paper's: refine above 0.01, derefine below 0.005.
-        case 3: return shear_score(blk.W_sp) > 0.01;
-        case 4:{
-            //Absolute floor; tag_blocks_impl applies a relative cut for MHD so
-            //spatially uniform OT structure still leaves a coarse rim.
-            if constexpr (std::is_same_v<Block, MHD_ader>)
-                return bfield_lohner_score(blk.W_sp) > 0.3;
-            return lohner_score(blk.W_sp, _d_) > 0.5;
-        }
+        case 3: return shear_score(blk.W_sp) > cfg.amr_refine_threshold;
+        //criterion 4 on MHD is handled in tag_blocks_impl, which needs every
+        //block's score at once to set the field scale and to derefine
         default: return lohner_score(blk.W_sp, _d_) > 0.5;
     }
 }
@@ -237,17 +264,7 @@ static bool derefine_flag(int criterion, const std::vector<Block*>& sibs){
         case 3:{
             double g = 0.0;
             for(auto* b : sibs) g = std::max(g, shear_score(b->W_sp));
-            return g < 0.005;
-        }
-        case 4:{
-            if constexpr (std::is_same_v<Block, MHD_ader>){
-                double s = 0.0;
-                for(auto* b : sibs) s = std::max(s, bfield_lohner_score(b->W_sp));
-                return s < 0.05*0.25;
-            }
-            double s = 0.0;
-            for(auto* b : sibs) s = std::max(s, lohner_score(b->W_sp, _d_));
-            return s < 0.05*0.25;
+            return g < cfg.amr_derefine_threshold;
         }
         default:{
             double s = 0.0;
@@ -264,33 +281,47 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
                             int max_level, int criterion){
     to_refine.clear();
     to_derefine.clear();
-    //|B| Löhner on OT is nearly uniform across blocks; refine only the peak
-    //block(s) so 2:1 balance grows a compact fine patch with a coarse rim.
+    //Scores of the |B| criterion, which needs every block's score in one place
+    //so the derefine pass can reuse it. Empty for every other criterion, which
+    //keeps its per-block refine_flag/derefine_flag test.
+    std::vector<double> bscore;
+    double bpeak = 0.0;
     if constexpr (std::is_same_v<Block, MHD_ader>){
         if(criterion==4){
-            std::vector<double> scores(forest.Nblocks(), 0.0);
-            for(int ib=0; ib<forest.Nblocks(); ib++){
-                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+            int nb = forest.Nblocks();
+            bscore.assign(nb, 0.0);
+            double bref = 0.0;
+            for(int ib=0; ib<nb; ib++){
                 mhd_compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
-                scores[ib] = bfield_lohner_score(blocks[ib].W_sp);
+                bref = std::max(bref, bfield_mean(blocks[ib].W_sp));
+            }
+            for(int ib=0; ib<nb; ib++){
+                bscore[ib] = bfield_lohner_score(blocks[ib].W_sp, bref);
+                bpeak = std::max(bpeak, bscore[ib]);
             }
             double vmax = 0.0;
-            for(int ib=0; ib<forest.Nblocks(); ib++) vmax = std::max(vmax, scores[ib]);
-            //Only the peak block(s): 2:1 balance grows a compact patch and leaves
-            //a coarse rim (refining all above-mean blocks fills the domain).
-            for(int ib=0; ib<forest.Nblocks(); ib++){
+            for(int ib=0; ib<nb; ib++){
                 if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
-                if(scores[ib] > 0.3 && scores[ib] >= vmax - 1e-15)
+                vmax = std::max(vmax, bscore[ib]);
+            }
+            for(int ib=0; ib<nb; ib++){
+                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
+                if(bscore[ib] > cfg.amr_bfield_threshold &&
+                   bscore[ib] >= cfg.amr_refine_frac*vmax - 1e-15)
                     to_refine.push_back(ib);
             }
-        } else {
-            for(int ib=0; ib<forest.Nblocks(); ib++){
-                if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
-                if(refine_flag(criterion, blocks[ib]))
-                    to_refine.push_back(ib);
+            //Tuning a criterion is mostly a matter of seeing how separated the
+            //scores are, which is invisible from the block counts alone.
+            if(getenv("SPD_AMR_DEBUG")){
+                std::vector<double> s = bscore;
+                std::sort(s.begin(), s.end());
+                std::cout<<"\n[amr] nb="<<nb<<" vmax="<<vmax
+                         <<" med="<<s[nb/2]<<" p90="<<s[(9*nb)/10]
+                         <<" min="<<s[0]<<" tagged="<<to_refine.size()<<std::endl;
             }
         }
-    } else {
+    }
+    if(bscore.empty()){
         for(int ib=0; ib<forest.Nblocks(); ib++){
             if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
             if(refine_flag(criterion, blocks[ib]))
@@ -306,8 +337,29 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
         auto key = std::make_tuple(b.level, b.logical[0]/2, b.logical[1]/2, b.logical[2]/2);
         groups[key].push_back(ib);
     }
+    std::set<int> refining(to_refine.begin(), to_refine.end());
     for(auto& kv : groups){
         if((int)kv.second.size() != n_sib) continue;
+        //A group whose score straddles the refine threshold and the derefine cut
+        //can be tagged both ways; refinement wins, since the group would be gone
+        //by the time the derefine pass ran.
+        bool clash = false;
+        for(int ib : kv.second) if(refining.count(ib)) clash = true;
+        if(clash) continue;
+        if(!bscore.empty()){
+            double s = 0.0;
+            for(int ib : kv.second) s = std::max(s, bscore[ib]);
+            //A fixed cut alone ratchets the mesh: the indicator saturates on
+            //whatever grid-scale noise the scheme carries, so a block that once
+            //refined keeps scoring above any absolute cut and the mesh walks to
+            //uniform refinement. Releasing anything well below the current peak
+            //score instead makes the fine region track the strongest feature and
+            //bounds the block count. Off by default (derefine_frac = 0).
+            if(s < 0.5*cfg.amr_bfield_threshold ||
+               s < cfg.amr_derefine_frac*bpeak)
+                to_derefine.push_back(kv.second);
+            continue;
+        }
         std::vector<Block*> sibs;
         for(int ib : kv.second) sibs.push_back(&blocks[ib]);
         if(derefine_flag(criterion, sibs))

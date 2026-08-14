@@ -31,13 +31,20 @@ extern void build_overlap_restrict_matrices(Matrix R_sp[2], Matrix R_cv[2],
 extern void prolongate_block(SD_Solution, SD_Solution, Matrix, int, int, int);
 extern void restrict_block(SD_Solution, SD_Solution, Matrix, int, int, int);
 extern void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
-                                     SD_Solution& coarse_face, Matrix R, int dim);
+                                     SD_Solution coarse_face, Matrix R, int dim);
 extern void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
                                     Matrix P, int dim, int sub);
 //Face-staggered B (CT): restrict one normal-component field from a fine child
 //onto the covered coarse subregion (transverse amr_RF, inject along face normal).
 extern void restrict_block_face_B(SD_Solution fine, SD_Solution coarse, Matrix R,
                                   int face_dim, int cx, int cy, int cz);
+//Restrict face B from one fine child onto its quadrant of the coarse block,
+//preserving discrete divB=0 (2D). Coarse faces are the averages of the fine
+//faces they cover, so the fine faces interior to a coarse element cancel.
+extern void restrict_block_face_B_2d(SD_Solution BxF, SD_Solution ByF, SD_Solution BzF,
+                                     SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
+                                     Matrix R, Matrix sp_to_cv, Matrix cv_to_sp,
+                                     int cx, int cy, int cz);
 //Prolongate face B from coarse parent to fine child. Shared faces: transverse
 //amr_P. Interior faces (2D): Toth–Roe on face averages so discrete divB=0.
 //3D mixed-level errors out (Stage 4 is 2D-first).
@@ -93,6 +100,18 @@ extern void boundaries(CommHelper, FV_Boundaries, FV_Solution, int, int);
 //Block-to-block ghost exchange (multi-block, single rank)
 extern void block_boundary_sd(SD_Solution, SD_Solution, SD_Solution, int, int, int);
 extern void block_boundary_fv(FV_Solution, FV_Solution, FV_Solution, int, int, int);
+//Whole-pack ghost exchange: neighbour indices and side types come in as
+//per-block tables, so one launch replaces the per-block loop.
+extern void apply_domain_bc_fp(SD_Solution, int, int);
+extern void gather_fp_same(SD_Solution, IntVector, IntVector, int, int, int);
+extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
+                              int, int, int, Matrix);
+extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,
+                            int, int, int, Matrix);
+extern void block_boundary_sd_b(SD_Solution, IntVector, IntVector,
+                                IntVector, IntVector, int);
+extern void block_boundary_fv_b(FV_Solution, IntVector, IntVector,
+                                IntVector, IntVector, int);
 //Make the shared interface face of a face-staggered field identical on both
 //sides of a same-level block boundary (left's last-active right face is the
 //canonical value). No-op for _gradfree_ ends.
@@ -106,6 +125,15 @@ extern void edge_integral(SD_Solution, FV_Solution, Matrix, int, int);
 extern void fv_update_solution(
     FV_Solution, FV_Solution, SD_Solution,
     FV_Solution, Vector, FV_Solution, Vector, FV_Solution, Vector,
+    Vector, int, double, bool);
+
+//Batched (whole-pack) counterparts; geometry arrives as one row per block
+extern void transform_a_to_b_1d_slice_b(SD_Solution, SD_Solution, Matrix, int, int);
+extern void face_integral_ref_b(SD_Solution, FV_Solution, Matrix, int, int);
+extern void face_integral_b(SD_Solution, FV_Solution, SD_Solution, Matrix, int, int);
+extern void fv_update_solution_b(
+    FV_Solution, FV_Solution, SD_Solution,
+    FV_Solution, Matrix, FV_Solution, Matrix, FV_Solution, Matrix,
     Vector, int, double, bool);
 
 //Trouble detection

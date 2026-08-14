@@ -43,15 +43,13 @@ void gather_block(SD_Solution B, SD_Solution G, int ox, int oy, int oz){
     int nx=B.nx, ny=B.ny, nz=B.nz;
     int nader=B.n_ader, nvar=B.n_var;
     GHOST_LOCALS;
-    Kokkos::parallel_for("gather_block",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({0,0,0,0,0,0},{Nz,Ny,Nx,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_box_cells(0,Nz,0,Ny,0,Nx,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
         G.Vector(t_id,var,ghz+oz+k,ghy+oy+j,ghx+ox+i,kk,jj,ii) =
             B.Vector(t_id,var,ghz+k,ghy+j,ghx+i,kk,jj,ii);
         }}
-    });
+    }, "gather_block");
 }
 
 //Fill the active region of fine child (cx,cy,cz) from the coarse block.
@@ -65,9 +63,7 @@ void prolongate_block(SD_Solution C, SD_Solution F, Matrix P, int cx, int cy, in
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
     GHOST_LOCALS;
-    Kokkos::parallel_for("prolongate_block",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_box_cells(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         //global fine element index and its coarse parent/sub-half per dim
         int gx = cx*NBx + (i-ghx);
         int gy = cy*NBy + (j-ghy);
@@ -93,7 +89,7 @@ void prolongate_block(SD_Solution C, SD_Solution F, Matrix P, int cx, int cy, in
             }}}
             F.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
-    });
+    }, "prolongate_block");
 }
 
 //Adjoint of prolongate_block: write the coarse subregion covered by fine
@@ -114,9 +110,7 @@ void restrict_block(SD_Solution F, SD_Solution C, Matrix R, int cx, int cy, int 
     int iy1 = ay ? iy0+NBy/2 : Ny-NGHy;
     int iz1 = az ? iz0+NBz/2 : Nz-NGHz;
     GHOST_LOCALS;
-    Kokkos::parallel_for("restrict_block",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({iz0,iy0,ix0,0,0,0},{iz1,iy1,ix1,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_box_cells(iz0,iz1,iy0,iy1,ix0,ix1,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         //first of the two fine elements (block-local, +ghost offset)
         int fx = ax ? ghx+2*(i-ghx)-cx*NBx : i;
         int fy = ay ? ghy+2*(j-ghy)-cy*NBy : j;
@@ -141,7 +135,7 @@ void restrict_block(SD_Solution F, SD_Solution C, Matrix R, int cx, int cy, int 
             }}}
             C.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
-    });
+    }, "restrict_block");
 }
 
 //Side-aware overlap restriction matrices (spd/amr/transfer.py).
@@ -244,8 +238,10 @@ static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
     return s;
 }
 
+//coarse_face by value: nvcc extended lambdas cannot capture references, and
+//a Kokkos View copy still writes through to the same allocation.
 void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
-                              SD_Solution& coarse_face, Matrix R, int dim){
+                              SD_Solution coarse_face, Matrix R, int dim){
     if(cfg.ndim==1 || n_sub<=1){
         Kokkos::deep_copy(coarse_face.Vector, fine_faces[0]->Vector);
         return;
@@ -278,10 +274,7 @@ void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
         int iy0 = NGHy + (ty ? cy*NBy/2 : 0), iy1 = ty ? iy0+NBy/2 : Ny-NGHy;
         int iz0 = NGHz + (tz ? cz*NBz/2 : 0), iz1 = tz ? iz0+NBz/2 : Nz-NGHz;
         SD_Solution Fs = *fine_faces[sub];
-        Kokkos::parallel_for("restrict_face_overlap_sp",
-            Kokkos::MDRangePolicy<Kokkos::Rank<6>>({iz0,iy0,ix0,0,0,0},
-                                                   {iz1,iy1,ix1,nz,ny,nx}),
-            KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        sd_for_box_cells(iz0,iz1,iy0,iy1,ix0,ix1,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
             int fx = tx ? ghx+2*(i-ghx)-cx*NBx : i;
             int fy = ty ? ghy+2*(j-ghy)-cy*NBy : j;
             int fz = tz ? ghz+2*(k-ghz)-cz*NBz : k;
@@ -305,7 +298,7 @@ void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
                 }}}
                 coarse_face.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
             }}
-        });
+        }, "restrict_face_overlap_sp");
     }
 }
 
@@ -320,8 +313,11 @@ void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
     //through. Transversally this is prolongate_block's mapping -- bit b of
     //`sub` picks which half of the coarse block the fine neighbour covers,
     //and the element parity within it picks the half of P.
-    SD_Solution& C = coarse_face;
-    SD_Solution& F = fine_face;
+    //By value: a reference captured into a device lambda leaves a host pointer
+    //in the closure, which CUDA rejects outright. Views copy shallowly, so
+    //writes through C still land in the caller's allocation.
+    SD_Solution C = coarse_face;
+    SD_Solution F = fine_face;
     int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
     int nx=F.nx, ny=F.ny, nz=F.nz;
     int nader=F.n_ader, nvar=F.n_var;
@@ -340,10 +336,7 @@ void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
         }
     }
     GHOST_LOCALS;
-    Kokkos::parallel_for("prolongate_face_coarser",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({NGHz,NGHy,NGHx,0,0,0},
-                                               {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_box_cells(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int gx = tx ? cx*NBx + (i-ghx) : 0;
         int gy = ty ? cy*NBy + (j-ghy) : 0;
         int gz = tz ? cz*NBz + (k-ghz) : 0;
@@ -368,7 +361,7 @@ void prolongate_face_coarser(SD_Solution coarse_face, SD_Solution fine_face,
             }}}
             F.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
-    });
+    }, "prolongate_face_coarser");
 }
 
 //Restrict one face-normal B component from fine child (cx,cy,cz) onto the
@@ -394,9 +387,7 @@ void restrict_block_face_B(SD_Solution F, SD_Solution C, Matrix R,
     int iy1 = ay ? iy0+NBy/2 : Ny-NGHy;
     int iz1 = az ? iz0+NBz/2 : Nz-NGHz;
     GHOST_LOCALS;
-    Kokkos::parallel_for("restrict_block_face_B",
-        Kokkos::MDRangePolicy<Kokkos::Rank<6>>({iz0,iy0,ix0,0,0,0},{iz1,iy1,ix1,nz,ny,nx}),
-        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_box_cells(iz0,iz1,iy0,iy1,ix0,ix1,nz,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int fx = ax ? ghx+2*(i-ghx)-cx*NBx : i;
         int fy = ay ? ghy+2*(j-ghy)-cy*NBy : j;
         int fz = az ? ghz+2*(k-ghz)-cz*NBz : k;
@@ -429,7 +420,7 @@ void restrict_block_face_B(SD_Solution F, SD_Solution C, Matrix R,
             }}}
             C.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
-    });
+    }, "restrict_block_face_B");
 }
 
 //2D Toth–Roe interior faces inside each 2×2 of fine elements covering one
@@ -444,9 +435,7 @@ static void fill_interior_face_B_2d(SD_Solution Bx, SD_Solution By,
     GHOST_LOCALS;
     int ix0 = NGHx, ix1 = Bx.Nx-NGHx;
     int iy0 = NGHy, iy1 = By.Ny-NGHy;
-    Kokkos::parallel_for("fill_interior_face_B_2d",
-        Kokkos::MDRangePolicy<Kokkos::Rank<2>>({iy0,ix0},{iy1,ix1}),
-        KOKKOS_LAMBDA(int j, int i){
+    for_box2(iy0,iy1,ix0,ix1, KOKKOS_LAMBDA(int j, int i){
         int gx = (i-ghx) + cx*NBx;
         int gy = (j-ghy) + cy*NBy;
         if((gx%2)!=0 || (gy%2)!=0) return;
@@ -487,26 +476,27 @@ static void fill_interior_face_B_2d(SD_Solution Bx, SD_Solution By,
             By.Vector(0,0,k0,j0,i1,0,ny-1,ii) = By_M_E;
             By.Vector(0,0,k0,j1,i1,0,0,ii)    = By_M_E;
         }
-    });
+    }, "fill_interior_face_B_2d");
 }
 
 //Inject the coarse face average (constant) onto each fine face that lies on a
 //coarse element face. Full-face averages preserve the coarse FV divergence so
 //Toth–Roe then yields exact fine divB=0 (unlike half-face Lagrange + flatten).
+//The average is the flux-point-spacing weighted sum of the control volumes, not
+//a plain mean: the control volumes tile the face unevenly, and only the true
+//integral makes the coarse element's face balance equal its (zero) divergence.
 static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                                           int face_dim, int cx, int cy, int cz){
     int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
     int nx=F.nx, ny=F.ny, nz=F.nz;
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    Vector xfp = amr_x_fp;
     GHOST_LOCALS;
     (void)cz;
     if(face_dim==_x_){
         int nty=F.ny, ntyC=C.ny;
-        Kokkos::parallel_for("prolong_shared_Bx_const",
-            Kokkos::MDRangePolicy<Kokkos::Rank<4>>({NGHz,NGHy,NGHx,0},
-                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz}),
-            KOKKOS_LAMBDA(int k, int j, int i, int kk){
+        for_box3p1(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz, KOKKOS_LAMBDA(int k, int j, int i, int kk){
                 int gx = ax ? cx*NBx + (i-ghx) : 0;
                 int gy = ay ? cy*NBy + (j-ghy) : 0;
                 int gz = az ? cz*NBz + (k-ghz) : 0;
@@ -520,18 +510,15 @@ static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                     int cii = side ? C.nx-1 : 0;
                     double a=0;
                     for(int jj=0; jj<ntyC; jj++)
-                        a += C.Vector(0,0,cez,cey,cex,kk,jj,cii);
-                    a /= ntyC;
+                        a += (xfp(jj+1)-xfp(jj))
+                           * C.Vector(0,0,cez,cey,cex,kk,jj,cii);
                     for(int jj=0; jj<nty; jj++)
                         F.Vector(0,0,k,j,i,kk,jj,ii) = a;
                 }
-            });
+            }, "prolong_shared_Bx_const");
     } else if(face_dim==_y_){
         int ntx=F.nx, ntxC=C.nx;
-        Kokkos::parallel_for("prolong_shared_By_const",
-            Kokkos::MDRangePolicy<Kokkos::Rank<4>>({NGHz,NGHy,NGHx,0},
-                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz}),
-            KOKKOS_LAMBDA(int k, int j, int i, int kk){
+        for_box3p1(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz, KOKKOS_LAMBDA(int k, int j, int i, int kk){
                 int gx = ax ? cx*NBx + (i-ghx) : 0;
                 int gy = ay ? cy*NBy + (j-ghy) : 0;
                 int gz = az ? cz*NBz + (k-ghz) : 0;
@@ -545,12 +532,12 @@ static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                     int cjj = side ? C.ny-1 : 0;
                     double a=0;
                     for(int ii=0; ii<ntxC; ii++)
-                        a += C.Vector(0,0,cez,cey,cex,kk,cjj,ii);
-                    a /= ntxC;
+                        a += (xfp(ii+1)-xfp(ii))
+                           * C.Vector(0,0,cez,cey,cex,kk,cjj,ii);
                     for(int ii=0; ii<ntx; ii++)
                         F.Vector(0,0,k,j,i,kk,jj,ii) = a;
                 }
-            });
+            }, "prolong_shared_By_const");
     }
 }
 
@@ -567,43 +554,94 @@ static void fill_interior_normal_fps(SD_Solution B, int face_dim){
     GHOST_LOCALS;
     if(face_dim==_x_){
         if(nx < 3 || nfp < nx) return;
-        Kokkos::parallel_for("fill_interior_normal_fps_x",
-            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
-                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,ny}),
-            KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj){
+        for_box3p2(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz,ny, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj){
                 double BL = B.Vector(0,0,k,j,i,kk,jj,0);
                 double BR = B.Vector(0,0,k,j,i,kk,jj,nx-1);
                 for(int ii=1; ii<nx-1; ii++){
                     double xi = xfp(ii);
                     B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*BL + xi*BR;
                 }
-            });
+            }, "fill_interior_normal_fps_x");
     } else if(face_dim==_y_){
         if(ny < 3 || nfp < ny) return;
-        Kokkos::parallel_for("fill_interior_normal_fps_y",
-            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
-                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,nz,nx}),
-            KOKKOS_LAMBDA(int k, int j, int i, int kk, int ii){
+        for_box3p2(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz,nx, KOKKOS_LAMBDA(int k, int j, int i, int kk, int ii){
                 double BB = B.Vector(0,0,k,j,i,kk,0,ii);
                 double BT = B.Vector(0,0,k,j,i,kk,ny-1,ii);
                 for(int jj=1; jj<ny-1; jj++){
                     double xi = xfp(jj);
                     B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*BB + xi*BT;
                 }
-            });
+            }, "fill_interior_normal_fps_y");
     } else {
         if(nz < 3 || nfp < nz) return;
-        Kokkos::parallel_for("fill_interior_normal_fps_z",
-            Kokkos::MDRangePolicy<Kokkos::Rank<5>>({NGHz,NGHy,NGHx,0,0},
-                                                   {Nz-NGHz,Ny-NGHy,Nx-NGHx,ny,nx}),
-            KOKKOS_LAMBDA(int k, int j, int i, int jj, int ii){
+        for_box3p2(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,ny,nx, KOKKOS_LAMBDA(int k, int j, int i, int jj, int ii){
                 double B0 = B.Vector(0,0,k,j,i,0,jj,ii);
                 double B1 = B.Vector(0,0,k,j,i,nz-1,jj,ii);
                 for(int kk=1; kk<nz-1; kk++){
                     double xi = xfp(kk);
                     B.Vector(0,0,k,j,i,kk,jj,ii) = (1.0-xi)*B0 + xi*B1;
                 }
-            });
+            }, "fill_interior_normal_fps_z");
+    }
+}
+
+//Restrict the coarse faces of one fine child onto its quadrant of the coarse
+//block, as face constants. A coarse face average is the mean of the two fine
+//face averages covering it; the faces interior to the coarse element are
+//dropped. Summing the four fine elements' face balances cancels those interior
+//faces, so the coarse element inherits a zero balance exactly -- no projection
+//needed. Each fine face average is the flux-point-spacing weighted sum of its
+//control volumes, which is the true integral and hence equals the fine
+//element's divergence via the divergence theorem.
+static void restrict_shared_face_B_const(SD_Solution Fa, SD_Solution Ca,
+                                         int face_dim, int cx, int cy){
+    int Nx=Ca.Nx, Ny=Ca.Ny, Nz=Ca.Nz;
+    int nx=Ca.nx, ny=Ca.ny, nz=Ca.nz;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    int ix0 = NGHx + (ax ? cx*NBx/2 : 0);
+    int iy0 = NGHy + (ay ? cy*NBy/2 : 0);
+    int ix1 = ax ? ix0+NBx/2 : Nx-NGHx;
+    int iy1 = ay ? iy0+NBy/2 : Ny-NGHy;
+    int iz1 = az ? NGHz+NBz/2 : Nz-NGHz;
+    Vector xfp = amr_x_fp;
+    GHOST_LOCALS;
+    if(face_dim==_x_){
+        int nty=Ca.ny;
+        int nsy = ay ? 2 : 1;
+        for_box3p1(NGHz,iz1,iy0,iy1,ix0,ix1,nz, KOKKOS_LAMBDA(int k, int j, int i, int kk){
+                int fx = ax ? ghx+2*(i-ghx)-cx*NBx : i;
+                int fy = ay ? ghy+2*(j-ghy)-cy*NBy : j;
+                double L=0, R=0;
+                for(int sub=0; sub<nsy; sub++)
+                for(int jj=0; jj<nty; jj++){
+                    double w = (xfp(jj+1)-xfp(jj))/nsy;
+                    L += w*Fa.Vector(0,0,k,fy+sub,fx,       kk,jj,0);
+                    R += w*Fa.Vector(0,0,k,fy+sub,fx+(ax?1:0),kk,jj,nx-1);
+                }
+                for(int jj=0; jj<nty; jj++){
+                    Ca.Vector(0,0,k,j,i,kk,jj,0)    = L;
+                    Ca.Vector(0,0,k,j,i,kk,jj,nx-1) = R;
+                }
+            }, "restrict_shared_Bx_const");
+    } else if(face_dim==_y_){
+        int ntx=Ca.nx;
+        int nsx = ax ? 2 : 1;
+        for_box3p1(NGHz,iz1,iy0,iy1,ix0,ix1,nz, KOKKOS_LAMBDA(int k, int j, int i, int kk){
+                int fx = ax ? ghx+2*(i-ghx)-cx*NBx : i;
+                int fy = ay ? ghy+2*(j-ghy)-cy*NBy : j;
+                double B=0, T=0;
+                for(int sub=0; sub<nsx; sub++)
+                for(int ii=0; ii<ntx; ii++){
+                    double w = (xfp(ii+1)-xfp(ii))/nsx;
+                    B += w*Fa.Vector(0,0,k,fy,       fx+sub,kk,0,ii);
+                    T += w*Fa.Vector(0,0,k,fy+(ay?1:0),fx+sub,kk,ny-1,ii);
+                }
+                for(int ii=0; ii<ntx; ii++){
+                    Ca.Vector(0,0,k,j,i,kk,0,ii)    = B;
+                    Ca.Vector(0,0,k,j,i,kk,ny-1,ii) = T;
+                }
+            }, "restrict_shared_By_const");
     }
 }
 
@@ -616,10 +654,7 @@ void project_face_B_divfree_2d(SD_Solution Bx, SD_Solution By){
     int nx=Bx.nx, ny=By.ny, nty=Bx.ny, ntx=By.nx, nz=Bx.nz;
     Vector xfp = amr_x_fp;
     GHOST_LOCALS;
-    Kokkos::parallel_for("project_face_B_divfree_2d",
-        Kokkos::MDRangePolicy<Kokkos::Rank<3>>({NGHz,NGHy,NGHx},
-                                               {Nz-NGHz,Ny-NGHy,Nx-NGHx}),
-        KOKKOS_LAMBDA(int k, int j, int i){
+    for_box3(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx, KOKKOS_LAMBDA(int k, int j, int i){
             for(int kk=0; kk<nz; kk++){
                 double bxL=0, bxR=0, byB=0, byT=0;
                 for(int jj=0; jj<nty; jj++){
@@ -642,7 +677,7 @@ void project_face_B_divfree_2d(SD_Solution Bx, SD_Solution By){
                     }
                 }
             }
-        });
+        }, "project_face_B_divfree_2d");
 }
 
 void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
@@ -678,6 +713,43 @@ void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
     transform_a_to_b_2d(BxFa, BxF, TxF, cv_to_sp, _x_);
     transform_a_to_b_2d(ByFa, ByF, TyF, cv_to_sp, _y_);
     prolongate_block(BzC, BzF, P, cx, cy, 0);
+}
+
+//Derefinement counterpart of prolongate_block_face_B. Works in the same
+//transverse-face-average representation so the coarse block ends up
+//face-constant with a linear normal profile, the one form in which the SD
+//divergence and the FV face balance coincide. Called once per child; the
+//coarse block is round-tripped through the cv representation each time, which
+//is exact and leaves the quadrants already written by earlier children alone.
+void restrict_block_face_B_2d(SD_Solution BxF, SD_Solution ByF, SD_Solution BzF,
+                              SD_Solution BxC, SD_Solution ByC, SD_Solution BzC,
+                              Matrix R, Matrix sp_to_cv, Matrix cv_to_sp,
+                              int cx, int cy, int cz){
+    if(cfg.active[_z_]){
+        if(Master)
+            std::cout<<"ERROR: restrict_block_face_B_2d 3D not implemented "
+                       <<"(Stage 4 supports true-2D MHD SMR only)"<<std::endl;
+        exit(1);
+    }
+    SD_Solution BxFa = make_scratch_like(BxF, "BxFa_r");
+    SD_Solution ByFa = make_scratch_like(ByF, "ByFa_r");
+    SD_Solution BxCa = make_scratch_like(BxC, "BxCa_r");
+    SD_Solution ByCa = make_scratch_like(ByC, "ByCa_r");
+    SD_Solution TxF = make_scratch_like(BxF, "TxF_r");
+    SD_Solution TyF = make_scratch_like(ByF, "TyF_r");
+    SD_Solution TxC = make_scratch_like(BxC, "TxC_r");
+    SD_Solution TyC = make_scratch_like(ByC, "TyC_r");
+    transform_a_to_b_2d(BxF, BxFa, TxF, sp_to_cv, _x_);
+    transform_a_to_b_2d(ByF, ByFa, TyF, sp_to_cv, _y_);
+    transform_a_to_b_2d(BxC, BxCa, TxC, sp_to_cv, _x_);
+    transform_a_to_b_2d(ByC, ByCa, TyC, sp_to_cv, _y_);
+    restrict_shared_face_B_const(BxFa, BxCa, _x_, cx, cy);
+    restrict_shared_face_B_const(ByFa, ByCa, _y_, cx, cy);
+    fill_interior_normal_fps(BxCa, _x_);
+    fill_interior_normal_fps(ByCa, _y_);
+    transform_a_to_b_2d(BxCa, BxC, TxC, cv_to_sp, _x_);
+    transform_a_to_b_2d(ByCa, ByC, TyC, cv_to_sp, _y_);
+    restrict_block_face_B(BzF, BzC, R, _z_, cx, cy, cz);
 }
 
 

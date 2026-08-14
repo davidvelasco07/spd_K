@@ -164,6 +164,23 @@ struct MHD_ader : public PhysicsModule {
 
     bool standalone_ = true;
 
+    //Non-null when this block's arrays are slices of a mesh-wide pack, so
+    //mesh-level kernels can span every block in one launch (see BlockPack).
+    BlockPack* pack_ = nullptr;
+    int pib_ = 0;
+
+    void alloc(SD_Solution& s, const char* name, int nader, int nv,
+               dimension Zd, dimension Yd, dimension Xd, bool z, bool y, bool x){
+        if(pack_) s.init_packed(*pack_, pib_, name, nader, nv, Zd, Yd, Xd, z, y, x);
+        else      s.init(name, nader, nv, Zd, Yd, Xd, z, y, x);
+    }
+
+    void alloc(FV_Solution& s, const char* name, int nv,
+               dimension Zd, dimension Yd, dimension Xd, bool z, bool y, bool x){
+        if(pack_) s.init_packed(*pack_, pib_, name, nv, Zd, Yd, Xd, z, y, x);
+        else      s.init(name, nv, Zd, Yd, Xd, z, y, x);
+    }
+
     MHD_ader(
         CommHelper comm,
         int p,
@@ -174,8 +191,11 @@ struct MHD_ader : public PhysicsModule {
         double* w,
         double* x_sp,
         double* x_fp,
-        bool standalone=true //false when driven as one block of a mesh
-    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim), standalone_(standalone) {
+        bool standalone=true, //false when driven as one block of a mesh
+        BlockPack* pack=nullptr,
+        int pack_ib=0
+    ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim), standalone_(standalone),
+        pack_(pack), pib_(pack_ib) {
         //Constrained transport needs at least the x-y plane: 3D runs evolve all
         //three face fields from three edge-EMF families; 2D (x-y, z inactive)
         //degenerates to the Ez family only, with Bz a cell-centered conserved
@@ -206,51 +226,76 @@ struct MHD_ader : public PhysicsModule {
         Kokkos::resize(sp_to_cv,p+1,p+1);
         Kokkos::resize(cv_to_sp,p+1,p+1);
         Kokkos::resize(fp_to_cv,p+1,p+2);
-        lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
-        lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
-        lagrange_prime_matrix(dfp_to_sp, x_fp, x_sp, p+2, p+1);
-        integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
-        integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
-        inverse(sp_to_cv, cv_to_sp, p+1);
+        //Setup matrices live in SetupSpace, which is CudaSpace on GPU: these
+        //builders are host loops, so they must fill a mirror that is then
+        //pushed (.cursor/rules/kokkos-no-uvm.mdc). Writing the device views
+        //directly aborted every MHD run on CUDA with an inaccessible
+        //memory-space error, which is why MHD had never run on the A100s.
+        {
+            Matrix_h sp_to_fp_h = setup_mirror(sp_to_fp);
+            Matrix_h fp_to_sp_h = setup_mirror(fp_to_sp);
+            Matrix_h dfp_to_sp_h = setup_mirror(dfp_to_sp);
+            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
+            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
+            Matrix_h fp_to_cv_h = setup_mirror(fp_to_cv);
+            lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
+            lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
+            integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
+            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
+            setup_push(sp_to_fp, sp_to_fp_h);
+            setup_push(fp_to_sp, fp_to_sp_h);
+            setup_push(dfp_to_sp, dfp_to_sp_h);
+            setup_push(sp_to_cv, sp_to_cv_h);
+            setup_push(cv_to_sp, cv_to_sp_h);
+            setup_push(fp_to_cv, fp_to_cv_h);
+        }
 
         Vector xx, wx;
         Kokkos::resize(xx,p+1);
         Kokkos::resize(wx,p+1);
-        gauss_legendre(0.0, 1.0, p+1, xx.data(), wx.data());
+        {
+            Vector_h xx_h = setup_mirror(xx);
+            Vector_h wx_h = setup_mirror(wx);
+            gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
+            setup_push(xx, xx_h);
+            setup_push(wx, wx_h);
+        }
 
-        U_sp.init("U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        W_cv.init("W_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U_cv.init("U_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        T_sweep.init("T_sweep",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U0_sp.init("U0_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_sp, "U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(W_sp, "W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(W_cv, "W_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_cv, "U_cv",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(T_sweep, "T_sweep",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U0_sp, "U0_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
 
-        U_ader_sp.init("U_ader_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
-        U_ader_fp_x.init("U_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
-        F_ader_fp_x.init("F_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
+        alloc(U_ader_sp, "U_ader_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(U_ader_fp_x, "U_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
+        alloc(F_ader_fp_x, "F_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
         BC_fp_x.init(X_dim,cfg.bc[_x_],1,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
-        U_ader_fp_y.init("U_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
-        F_ader_fp_y.init("F_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        alloc(U_ader_fp_y, "U_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
+        alloc(F_ader_fp_y, "F_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
         BC_fp_y.init(Y_dim,cfg.bc[_y_],1,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
-        U_ader_fp_z.init("U_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
-        F_ader_fp_z.init("F_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        alloc(U_ader_fp_z, "U_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
+        alloc(F_ader_fp_z, "F_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
         BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
 
-        Bx_fp_x.init("Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
-        By_fp_y.init("By_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
-        Bz_fp_z.init("Bz_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
-        B0x_fp_x.init("B0x_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
-        B0y_fp_y.init("B0y_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
-        B0z_fp_z.init("B0z_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
-        B2_cv.init("B2_cv",1,DIM+1,Z_dim,Y_dim,X_dim,0,0,0);
+        alloc(Bx_fp_x, "Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+        alloc(By_fp_y, "By_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+        alloc(Bz_fp_z, "Bz_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+        alloc(B0x_fp_x, "B0x_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+        alloc(B0y_fp_y, "B0y_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+        alloc(B0z_fp_z, "B0z_fp_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+        alloc(B2_cv, "B2_cv",1,DIM+1,Z_dim,Y_dim,X_dim,0,0,0);
 
-        Ax_ep_yz.init("Ax_ep_yz",1,1,Z_dim,Y_dim,X_dim,1,1,0);
-        Ay_ep_zx.init("Ay_ep_zx",1,1,Z_dim,Y_dim,X_dim,1,0,1);
-        Az_ep_xy.init("Az_ep_xy",1,1,Z_dim,Y_dim,X_dim,0,1,1);
+        alloc(Ax_ep_yz, "Ax_ep_yz",1,1,Z_dim,Y_dim,X_dim,1,1,0);
+        alloc(Ay_ep_zx, "Ay_ep_zx",1,1,Z_dim,Y_dim,X_dim,1,0,1);
+        alloc(Az_ep_xy, "Az_ep_xy",1,1,Z_dim,Y_dim,X_dim,0,1,1);
 
-        Ex_ep_yz.init("Ex_ep_yz",1,NEMHD,Z_dim,Y_dim,X_dim,1,1,0);
-        Ey_ep_zx.init("Ey_ep_zx",1,NEMHD,Z_dim,Y_dim,X_dim,1,0,1);
-        Ez_ep_xy.init("Ez_ep_xy",1,NEMHD,Z_dim,Y_dim,X_dim,0,1,1);
+        alloc(Ex_ep_yz, "Ex_ep_yz",1,NEMHD,Z_dim,Y_dim,X_dim,1,1,0);
+        alloc(Ey_ep_zx, "Ey_ep_zx",1,NEMHD,Z_dim,Y_dim,X_dim,1,0,1);
+        alloc(Ez_ep_xy, "Ez_ep_xy",1,NEMHD,Z_dim,Y_dim,X_dim,0,1,1);
 
         BC_Ey_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_fp,Y_dim.n_sp,1);
         BC_Ez_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_fp,1);
@@ -260,13 +305,13 @@ struct MHD_ader : public PhysicsModule {
         BC_Ey_ep_z.init(Z_dim,cfg.bc[_z_],1,NEMHD,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
 
         if(cfg.fallback){
-            U_old_fv.init("U_old_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
-            U_new_fv.init("U_new_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
-            W_fv.init("W_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
-            det_old.init("det_old",4,Z_dim,Y_dim,X_dim,0,0,0);
-            det_new.init("det_new",4,Z_dim,Y_dim,X_dim,0,0,0);
-            troubles.init("troubles",1,Z_dim,Y_dim,X_dim,0,0,0);
-            cascade.init("cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(U_old_fv, "U_old_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(U_new_fv, "U_new_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(W_fv, "W_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(det_old, "det_old",4,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(det_new, "det_new",4,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(troubles, "troubles",1,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(cascade, "cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
             BCu_x.init(X_dim,cfg.bc[_x_],NMHD,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
             BCu_y.init(Y_dim,cfg.bc[_y_],NMHD,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
             BCu_z.init(Z_dim,cfg.bc[_z_],NMHD,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
@@ -274,30 +319,30 @@ struct MHD_ader : public PhysicsModule {
             BCs_y.init(Y_dim,cfg.bc[_y_],1,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
             BCs_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
 
-            F0_x.init("F0_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1); F1_x.init("F1_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
-            F2_x.init("F2_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
-            F0_y.init("F0_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0); F1_y.init("F1_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0);
-            F2_y.init("F2_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0);
-            F0_z.init("F0_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0); F1_z.init("F1_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
-            F2_z.init("F2_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
-            Bxf.init("Bxf",1,1,Z_dim,Y_dim,X_dim,0,0,1);
-            Byf.init("Byf",1,1,Z_dim,Y_dim,X_dim,0,1,0);
-            Bzf.init("Bzf",1,1,Z_dim,Y_dim,X_dim,1,0,0);
-            TB_x.init("TB_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
-            TB_y.init("TB_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
-            TB_z.init("TB_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
-            Bx_old.init("Bx_old",1,Z_dim,Y_dim,X_dim,0,0,1); Bx_new.init("Bx_new",1,Z_dim,Y_dim,X_dim,0,0,1);
-            By_old.init("By_old",1,Z_dim,Y_dim,X_dim,0,1,0); By_new.init("By_new",1,Z_dim,Y_dim,X_dim,0,1,0);
-            Bz_old.init("Bz_old",1,Z_dim,Y_dim,X_dim,1,0,0); Bz_new.init("Bz_new",1,Z_dim,Y_dim,X_dim,1,0,0);
-            B_old_cv.init("B_old_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
-            B_new_cv.init("B_new_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(F0_x, "F0_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1); alloc(F1_x, "F1_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(F2_x, "F2_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(F0_y, "F0_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0); alloc(F1_y, "F1_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(F2_y, "F2_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(F0_z, "F0_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0); alloc(F1_z, "F1_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
+            alloc(F2_z, "F2_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
+            alloc(Bxf, "Bxf",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(Byf, "Byf",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(Bzf, "Bzf",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+            alloc(TB_x, "TB_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(TB_y, "TB_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(TB_z, "TB_z",1,1,Z_dim,Y_dim,X_dim,1,0,0);
+            alloc(Bx_old, "Bx_old",1,Z_dim,Y_dim,X_dim,0,0,1); alloc(Bx_new, "Bx_new",1,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(By_old, "By_old",1,Z_dim,Y_dim,X_dim,0,1,0); alloc(By_new, "By_new",1,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(Bz_old, "Bz_old",1,Z_dim,Y_dim,X_dim,1,0,0); alloc(Bz_new, "Bz_new",1,Z_dim,Y_dim,X_dim,1,0,0);
+            alloc(B_old_cv, "B_old_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(B_new_cv, "B_new_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
 
-            E0x.init("E0x",1,Z_dim,Y_dim,X_dim,1,1,0);
-            E1x.init("E1x",1,Z_dim,Y_dim,X_dim,1,1,0); E2x.init("E2x",1,Z_dim,Y_dim,X_dim,1,1,0);
-            E0y.init("E0y",1,Z_dim,Y_dim,X_dim,1,0,1);
-            E1y.init("E1y",1,Z_dim,Y_dim,X_dim,1,0,1); E2y.init("E2y",1,Z_dim,Y_dim,X_dim,1,0,1);
-            E0z.init("E0z",1,Z_dim,Y_dim,X_dim,0,1,1);
-            E1z.init("E1z",1,Z_dim,Y_dim,X_dim,0,1,1); E2z.init("E2z",1,Z_dim,Y_dim,X_dim,0,1,1);
+            alloc(E0x, "E0x",1,Z_dim,Y_dim,X_dim,1,1,0);
+            alloc(E1x, "E1x",1,Z_dim,Y_dim,X_dim,1,1,0); alloc(E2x, "E2x",1,Z_dim,Y_dim,X_dim,1,1,0);
+            alloc(E0y, "E0y",1,Z_dim,Y_dim,X_dim,1,0,1);
+            alloc(E1y, "E1y",1,Z_dim,Y_dim,X_dim,1,0,1); alloc(E2y, "E2y",1,Z_dim,Y_dim,X_dim,1,0,1);
+            alloc(E0z, "E0z",1,Z_dim,Y_dim,X_dim,0,1,1);
+            alloc(E1z, "E1z",1,Z_dim,Y_dim,X_dim,0,1,1); alloc(E2z, "E2z",1,Z_dim,Y_dim,X_dim,0,1,1);
         }
 
         ////////////////////////

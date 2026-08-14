@@ -56,19 +56,22 @@ void compute_conservatives(
     int pz = W.nz;
     int nader = W.n_ader;
     int nvar = W.n_var;
+    int nb = W.nb;
     double gm = cfg.gamma;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         double u[NVAR]={0};
         double w[NVAR];
         int var;
         for(var=0; var<nvar; var++)
-            w[var] = W.Vector(t_id,var,k,j,i,kk,jj,ii);
+            w[var] = W.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
         conservatives(w,u,gm);
         for(var=0; var<nvar; var++)
-            U.Vector(t_id,var,k,j,i,kk,jj,ii) = u[var];
+            U.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = u[var];
         }
-    });
+    }, "compute_conservatives");
 }
 
 void compute_conservatives(
@@ -116,19 +119,22 @@ void compute_primitives(
     int py = W.ny;
     int pz = W.nz;
     int nader = W.n_ader;
+    int nb = W.nb;
     double gm = cfg.gamma;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         int var;
         double u[NVAR];
         double w[NVAR]={0};
         for(var=0; var<NVAR; var++)
-            u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
+            u[var] = U.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
         primitives(u,w,gm);
         for(var=0; var<NVAR; var++)
-            W.Vector(t_id,var,k,j,i,kk,jj,ii) = w[var];
+            W.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = w[var];
         }
-    });
+    }, "compute_primitives");
 }
 
 void compute_primitives(
@@ -139,17 +145,19 @@ void compute_primitives(
     int Ny = U.Ny;
     int Nz = U.Nz;
     int nvar = U.n_var;
+    int nb = U.nb;
     double gm = cfg.gamma;
-    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+    fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b, int k, int j, int i){
+        const int boff = b*nvar;
         double u[10]={0};
         double w[10]={0};
         int var;
         for(var=0; var<nvar; var++)
-            u[var] = U.Vector(var,k,j,i);
+            u[var] = U.Vector(boff+var,k,j,i);
         primitives(u,w,gm);
         for(var=0; var<nvar; var++)
-            W.Vector(var,k,j,i) = w[var];
-    });
+            W.Vector(boff+var,k,j,i) = w[var];
+    }, "compute_primitives_fv");
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -175,21 +183,24 @@ void compute_fluxes_t(
     int py = U.ny;
     int pz = U.nz;
     int nader = U.n_ader;
+    int nb = U.nb;
     double gm = cfg.gamma;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         int var;
         double u[NVAR];
         double w[NVAR]={0};
         double f[NVAR]={0};
         for(var=0; var<NVAR; var++)
-            u[var] = U.Vector(t_id,var,k,j,i,kk,jj,ii);
+            u[var] = U.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
         primitives(u,w,gm);
         fluxes(u,w,f,V1,V2,V3);
         for(var=0; var<NVAR; var++)
-            F.Vector(t_id,var,k,j,i,kk,jj,ii) = f[var];
+            F.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = f[var];
         }
-    });
+    }, "compute_fluxes");
 }
 
 void compute_fluxes(
@@ -376,8 +387,11 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
     int pz = D==_z_ ? 1 : U.nz;
     int n = choose(D, U.nx, U.ny, U.nz);
     int nader = U.n_ader;
+    int nb = U.nb;
     double gm = cfg.gamma;
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(nader);
         int var;
         double u_L[NVAR];
         double u_R[NVAR];
@@ -391,24 +405,24 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
         indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,D);
         for(int t_id=0; t_id<nader; t_id++){
             for(var=0;var<NVAR;var++){
-                u_L[var] = U.Vector(INDICES_L);
-                u_R[var] = U.Vector(INDICES_R);
+                u_L[var] = U.Vector(B_INDICES_L);
+                u_R[var] = U.Vector(B_INDICES_R);
             }
             riemann_llf(f,u_L,u_R,V1,V2,V3,gm);
             for(var=0;var<NVAR;var++){
-                F.Vector(INDICES_L) = f[var];
-                F.Vector(INDICES_R) = f[var];
+                F.Vector(B_INDICES_L) = f[var];
+                F.Vector(B_INDICES_R) = f[var];
             }
             if(viscous){
                 //Central interface state, consumed only by the diffusive terms
                 riemann_wind(f,u_L,u_R,0.5);
                 for(var=0;var<NVAR;var++){
-                    U.Vector(INDICES_L) = f[var];
-                    U.Vector(INDICES_R) = f[var];
+                    U.Vector(B_INDICES_L) = f[var];
+                    U.Vector(B_INDICES_R) = f[var];
                 }
             }
         }
-    });
+    }, "sd_riemann_solver");
 }
 
 void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim, bool viscous){

@@ -258,6 +258,14 @@ void BlockForest::build_fast_paths(){
                 } else if(!entries.empty()){
                     bool all_finer = true;
                     for(const auto &e : entries) if(e.rel != NEIGH_FINER) all_finer = false;
+                    //A face group needs all 2^(ndim-1) children to be usable.
+                    //Partial groups do occur: adapt refines, then derefines,
+                    //then calls enforce_2to1_balance, and each of the first two
+                    //rebuilds neighbours, so this runs on intermediate forests
+                    //that are still unbalanced (a face can front one child at
+                    //L+1 and two at L+2). Those groups are dropped here and the
+                    //final, balanced rebuild replaces them before any exchange
+                    //or flux correction reads them.
                     if(all_finer && (int)entries.size()==n_sub){
                         std::vector<int> row(n_sub, -1);
                         for(const auto &e : entries)
@@ -267,9 +275,8 @@ void BlockForest::build_fast_paths(){
                         if(ok){
                             g.fi_ib.push_back(ib);
                             g.fi_jb.push_back(row);
-                        } else g.valid = false;
-                    } else if(!entries.empty() && entries[0].rel != NEIGH_SAME)
-                        g.valid = false;
+                        }
+                    }
                 }
             }
             if(all_same) same_jb[dim][side] = jbs;
@@ -278,7 +285,7 @@ void BlockForest::build_fast_paths(){
                 g.coarser_by_sub[s].first.push_back(g.co_ib[k]);
                 g.coarser_by_sub[s].second.push_back(g.co_jb[k]);
             }
-            g.valid = true;
+
         }
     }
 }
@@ -389,6 +396,8 @@ void BlockForest::derefine_blocks(const std::vector<std::vector<int>> &groups){
 
 void BlockForest::derefine_blocks_keys(
         const std::vector<std::vector<BlockKey>> &key_groups){
+    int n_sib = 1;
+    for(int d=0; d<3; d++) if(active[d]) n_sib *= 2;
     for(const auto &kg : key_groups){
         std::map<BlockKey,int> id_map;
         for(int ib=0; ib<(int)blocks.size(); ib++) id_map[block_key(ib)] = ib;
@@ -397,7 +406,11 @@ void BlockForest::derefine_blocks_keys(
             auto it = id_map.find(k);
             if(it != id_map.end()) ibs.push_back(it->second);
         }
-        if(!ibs.empty()) derefine_block_mutate(ibs);
+        //Groups are tagged against the mesh as it stood before this adapt, and
+        //the refine pass runs first: a sibling can have been refined away in the
+        //meantime. A partly present group is no longer a derefinable set, so drop
+        //it and let the next regrid retag.
+        if((int)ibs.size() == n_sib) derefine_block_mutate(ibs);
     }
     rebuild_neighbors();
 }

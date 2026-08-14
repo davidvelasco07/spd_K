@@ -2,12 +2,24 @@
 #define MESH_HPP_
 
 #include <array>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <type_traits>
 #include <vector>
 
 #include "forest.hpp"
 #include "amr_criteria.hpp"
+
+//Scoped Kokkos profiling region. A no-op unless a tool is loaded
+//(KOKKOS_TOOLS_LIBS), and it is what attributes kernel launches to a phase
+//when measuring per-block launch overhead.
+struct Region {
+    explicit Region(const char* n){ Kokkos::Profiling::pushRegion(n); }
+    ~Region(){ Kokkos::Profiling::popRegion(); }
+    Region(const Region&) = delete;
+    Region& operator=(const Region&) = delete;
+};
 
 //Block-forest mesh driver: uniform multiblock and mixed-level AMR (hydro +
 //true-2D MHD). Derives from PhysicsModule and registers mesh-orchestrated
@@ -28,6 +40,11 @@ struct Mesh : public PhysicsModule {
     std::vector<dimension> Xd, Yd, Zd;
     dimension Xg, Yg, Zg;
     SD_Solution W_glob;
+
+    //All blocks' evolution arrays live here, one allocation per array name
+    //with a leading block axis, so a phase can be one kernel over the mesh
+    //instead of one kernel per block.
+    BlockPack pack;
 
     static constexpr bool is_hydro = std::is_same_v<Block, Hydro_ader>;
     static constexpr bool is_mhd   = std::is_same_v<Block, MHD_ader>;
@@ -78,11 +95,14 @@ struct Mesh : public PhysicsModule {
         Write_outputs();
     }
 
-    Block make_block(const dimension& Xdim, const dimension& Ydim, const dimension& Zdim){
+    Block make_block(const dimension& Xdim, const dimension& Ydim, const dimension& Zdim,
+                     int ib){
         if constexpr (is_hydro)
-            return Hydro_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,nu_,beta_,false);
+            return Hydro_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,nu_,beta_,false,
+                              &pack, ib);
         else
-            return MHD_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,false);
+            return MHD_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,false,
+                            &pack, ib);
     }
 
     //Uniform unigrid blocks use the legacy global-offset dimension layout so
@@ -109,13 +129,93 @@ struct Mesh : public PhysicsModule {
     void build_block_solvers(){
         blocks.clear(); Xd.clear(); Yd.clear(); Zd.clear();
         nblocks = forest.Nblocks();
+        //Drop the previous pack before the new one is sized: adapt() changes
+        //the block count, so every array is reallocated with a new leading
+        //extent and the old slices must not keep it alive.
+        pack.reset(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             const MeshBlock& b = forest.blocks[ib];
             Xd.emplace_back(x_dim_for_block(b, p_, x_fp_));
             Yd.emplace_back(y_dim_for_block(b, p_, x_fp_));
             Zd.emplace_back(z_dim_for_block(b, p_, x_fp_));
-            blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib]));
+            blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib], ib));
         }
+        build_geometry_pack();
+        build_pack_views();
+        build_neighbor_tables();
+        build_xchg_tables();
+    }
+
+    //Per-block geometry that batched kernels need by block index: element
+    //size and the FV sub-grid coordinates. Blocks differ only in these, which
+    //is exactly what lets one kernel span refinement levels.
+    Vector hx_p, hy_p, hz_p;      //element size per block
+    Matrix fvx_p, fvy_p, fvz_p;   //FV face coordinates per block
+
+    //Whole-pack views of the arrays the batched phases touch, cached so the
+    //hot loop does no map lookups. Rebuilt with the pack on every adapt.
+    struct PackViews {
+        SD_Solution U_ader_fp_x, U_ader_fp_y, U_ader_fp_z;
+        SD_Solution F_ader_fp_x, F_ader_fp_y, F_ader_fp_z;
+        SD_Solution U_sp, W_sp, W_cv, U_cv, U_ader_sp, U0_sp, T_sweep;
+        SD_Solution T_fp_x, T_fp_y, T_fp_z;
+        FV_Solution U_old, U_new, W_old, W_new, theta;
+        FV_Solution F_x, F_y, F_z;
+    } pv;
+
+    void build_pack_views(){
+        pv.U_ader_fp_x = sd_pack_view(pack,"U_ader_fp_x");
+        pv.U_ader_fp_y = sd_pack_view(pack,"U_ader_fp_y");
+        pv.U_ader_fp_z = sd_pack_view(pack,"U_ader_fp_z");
+        pv.F_ader_fp_x = sd_pack_view(pack,"F_ader_fp_x");
+        pv.F_ader_fp_y = sd_pack_view(pack,"F_ader_fp_y");
+        pv.F_ader_fp_z = sd_pack_view(pack,"F_ader_fp_z");
+        pv.U_sp        = sd_pack_view(pack,"U_sp");
+        pv.W_sp        = sd_pack_view(pack,"W_sp");
+        pv.W_cv        = sd_pack_view(pack,"W_cv");
+        pv.U_ader_sp   = sd_pack_view(pack,"U_ader_sp");
+        pv.U0_sp       = sd_pack_view(pack,"U0_sp");
+        pv.T_sweep     = sd_pack_view(pack,"T_sweep");
+        pv.U_cv        = sd_pack_view(pack,"U_cv");
+        pv.T_fp_x      = sd_pack_view(pack,"T_fp_x");
+        pv.T_fp_y      = sd_pack_view(pack,"T_fp_y");
+        pv.T_fp_z      = sd_pack_view(pack,"T_fp_z");
+        pv.F_x         = fv_pack_view(pack,"F_x");
+        pv.F_y         = fv_pack_view(pack,"F_y");
+        pv.F_z         = fv_pack_view(pack,"F_z");
+        pv.U_old       = fv_pack_view(pack,"U_old");
+        pv.U_new       = fv_pack_view(pack,"U_new");
+        pv.W_old       = fv_pack_view(pack,"W_old");
+        pv.W_new       = fv_pack_view(pack,"W_new");
+        pv.theta       = fv_pack_view(pack,"theta");
+    }
+
+    void build_geometry_pack(){
+        hx_p = Vector("pack_hx", nblocks);
+        hy_p = Vector("pack_hy", nblocks);
+        hz_p = Vector("pack_hz", nblocks);
+        Vector_h hxh = setup_mirror(hx_p);
+        Vector_h hyh = setup_mirror(hy_p);
+        Vector_h hzh = setup_mirror(hz_p);
+        for(int b=0;b<nblocks;b++){
+            hxh(b)=Xd[b].h; hyh(b)=Yd[b].h; hzh(b)=Zd[b].h;
+        }
+        setup_push(hx_p,hxh); setup_push(hy_p,hyh); setup_push(hz_p,hzh);
+
+        auto pack_faces = [&](Matrix& M, const char* nm, std::vector<dimension>& D){
+            int n = D[0].fv_nfaces;
+            M = Matrix(nm, nblocks, n);
+            Matrix_h h = setup_mirror(M);
+            for(int b=0;b<nblocks;b++){
+                Vector_h f = setup_mirror(D[b].fv_faces);
+                setup_pull(D[b].fv_faces, f);
+                for(int i=0;i<n;i++) h(b,i) = f(i);
+            }
+            setup_push(M,h);
+        };
+        pack_faces(fvx_p,"pack_fvx",Xd);
+        pack_faces(fvy_p,"pack_fvy",Yd);
+        pack_faces(fvz_p,"pack_fvz",Zd);
     }
 
     void init_W_glob(dimension X_dim, dimension Y_dim, dimension Z_dim, double* x_fp){
@@ -169,27 +269,248 @@ struct Mesh : public PhysicsModule {
         tR = (c[dim]==(dim==0?nbx:dim==1?nby:nbz)-1 && cfg.bc[dim]==_gradfree_) ? _gradfree_ : _periodic_;
     }
 
+    //Per-block neighbour indices and side types on a uniform mesh, uploaded
+    //once so the batched exchanges can read them inside the kernel instead of
+    //the host re-deriving them per block per launch.
+    IntVector nbrL_[3], nbrR_[3], typL_[3], typR_[3];
+
+    void build_neighbor_tables(){
+        for(int dim=0; dim<3; dim++){
+            nbrL_[dim] = IntVector("nbrL", nblocks);
+            nbrR_[dim] = IntVector("nbrR", nblocks);
+            typL_[dim] = IntVector("typL", nblocks);
+            typR_[dim] = IntVector("typR", nblocks);
+            IntVector_h hL = setup_mirror(nbrL_[dim]);
+            IntVector_h hR = setup_mirror(nbrR_[dim]);
+            IntVector_h htL = setup_mirror(typL_[dim]);
+            IntVector_h htR = setup_mirror(typR_[dim]);
+            for(int b=0; b<nblocks; b++){
+                int L,R,tL,tR;
+                neighbors_uniform(b,dim,L,R,tL,tR);
+                hL(b)=L; hR(b)=R; htL(b)=tL; htR(b)=tR;
+            }
+            setup_push(nbrL_[dim],hL); setup_push(nbrR_[dim],hR);
+            setup_push(typL_[dim],htL); setup_push(typR_[dim],htR);
+        }
+    }
+
+    SD_Solution& block_fp_dbg(int b, int dim){
+        return dim==_x_ ? blocks[b].U_ader_fp_x
+             : dim==_y_ ? blocks[b].U_ader_fp_y
+                        : blocks[b].U_ader_fp_z;
+    }
+
+    //Ghost-fill transactions for the receiver-driven gather: one entry per
+    //(receiving block, face) with the block it reads from. Rebuilt with the
+    //forest on every adapt; the block index becomes a kernel axis rather than
+    //a host loop. Same-level only for now -- a relation/sub column joins these
+    //when mixed levels move onto the same path.
+    struct XchgTable { IntVector recv, send, sub; int n = 0; };
+    //One set per relation: same-level copies, coarse->fine prolongation, and
+    //fine->coarse restriction. FINER expands to one transaction per fine
+    //neighbour, each covering a disjoint quadrant of the coarse face, so the
+    //"every ghost written exactly once" property holds across all three.
+    XchgTable xt_[3][2], xtco_[3][2], xtfi_[3][2];
+
+    static void push_table(XchgTable& t, const std::vector<int>& r,
+                           const std::vector<int>& s, const std::vector<int>& sb){
+        t = XchgTable{};
+        if(r.empty()) return;
+        t.n = (int)r.size();
+        t.recv = IntVector("xchg_recv", r.size());
+        t.send = IntVector("xchg_send", r.size());
+        t.sub  = IntVector("xchg_sub",  r.size());
+        auto hr = setup_mirror(t.recv);
+        auto hs = setup_mirror(t.send);
+        auto hb = setup_mirror(t.sub);
+        for(size_t k=0; k<r.size(); k++){ hr(k)=r[k]; hs(k)=s[k]; hb(k)=sb[k]; }
+        setup_push(t.recv, hr); setup_push(t.send, hs); setup_push(t.sub, hb);
+    }
+
+    void build_xchg_tables(){
+        for(int dim=0; dim<3; dim++)
+        for(int side=0; side<2; side++){
+            xt_[dim][side] = XchgTable{};
+            xtco_[dim][side] = XchgTable{};
+            xtfi_[dim][side] = XchgTable{};
+            if(!cfg.active[dim]) continue;
+            std::vector<int> r, s, b, cr, cs, cb, fr, fs, fb;
+            const auto& sj = forest.same_jb[dim][side];
+            if(!sj.empty()){
+                for(int ib=0; ib<nblocks; ib++){ r.push_back(ib); s.push_back(sj[ib]); b.push_back(0); }
+            } else {
+                const FaceGroups& g = forest.face_groups[dim][side];
+                for(size_t k=0; k<g.same_ib.size(); k++){
+                    r.push_back(g.same_ib[k]); s.push_back(g.same_jb[k]); b.push_back(0);
+                }
+                for(size_t k=0; k<g.co_ib.size(); k++){
+                    cr.push_back(g.co_ib[k]); cs.push_back(g.co_jb[k]); cb.push_back(g.co_sub[k]);
+                }
+                for(size_t k=0; k<g.fi_ib.size(); k++)
+                for(size_t t=0; t<g.fi_jb[k].size(); t++){
+                    fr.push_back(g.fi_ib[k]); fs.push_back(g.fi_jb[k][t]); fb.push_back((int)t);
+                }
+            }
+            push_table(xt_[dim][side],   r,  s,  b);
+            push_table(xtco_[dim][side], cr, cs, cb);
+            push_table(xtfi_[dim][side], fr, fs, fb);
+        }
+    }
+
+    static bool new_xchg(){
+        static bool v = getenv("SPD_NEW_XCHG") != nullptr;
+        return v;
+    }
+
+    SD_Solution& fp_pack(int dim){
+        return dim==_x_ ? pv.U_ader_fp_x
+             : dim==_y_ ? pv.U_ader_fp_y
+                        : pv.U_ader_fp_z;
+    }
+
+    //SPD_NO_PACK=1 routes a uniform forest through the per-block forest
+    //exchange instead of the batched packed kernel. The two must agree
+    //exactly; setting it isolates whether a discrepancy lives in the pack.
+    static bool no_pack(){
+        static bool v = getenv("SPD_NO_PACK") != nullptr;
+        return v;
+    }
+
+    static bool exchange_check(){
+        static bool v = getenv("SPD_EXCHANGE_CHECK") != nullptr;
+        return v;
+    }
+
+    //Compare the forest result now in P against `other`, and print the first
+    //disagreeing (block, element, point) with both values.
+    void report_exchange_diff(SD_Solution P, SD_Vector other, int dim){
+        static int reported = 0;
+        auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.Vector);
+        auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), other);
+        double worst = 0.0;
+        long nbad = 0;
+        int f[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+        for(size_t t=0; t<a.extent(0); t++)
+        for(size_t v=0; v<a.extent(1); v++)
+        for(size_t k=0; k<a.extent(2); k++)
+        for(size_t j=0; j<a.extent(3); j++)
+        for(size_t i=0; i<a.extent(4); i++)
+        for(size_t kk=0; kk<a.extent(5); kk++)
+        for(size_t jj=0; jj<a.extent(6); jj++)
+        for(size_t ii=0; ii<a.extent(7); ii++){
+            double d = std::abs(a(t,v,k,j,i,kk,jj,ii) - b(t,v,k,j,i,kk,jj,ii));
+            if(d == 0.0) continue;
+            nbad++;
+            if(d > worst){
+                worst = d;
+                f[0]=(int)t; f[1]=(int)v; f[2]=(int)k; f[3]=(int)j;
+                f[4]=(int)i; f[5]=(int)kk; f[6]=(int)jj; f[7]=(int)ii;
+            }
+        }
+        //Classify: is the disagreement on the face proper (transverse indices
+        //all active) or only in the transverse ghost corners/edges?
+        long face_only = 0, corner = 0;
+        {
+            int gx=NGHx, gy=NGHy, gz=NGHz;
+            for(size_t t=0; t<a.extent(0); t++)
+            for(size_t v=0; v<a.extent(1); v++)
+            for(size_t k=0; k<a.extent(2); k++)
+            for(size_t j=0; j<a.extent(3); j++)
+            for(size_t i=0; i<a.extent(4); i++)
+            for(size_t kk=0; kk<a.extent(5); kk++)
+            for(size_t jj=0; jj<a.extent(6); jj++)
+            for(size_t ii=0; ii<a.extent(7); ii++){
+                if(a(t,v,k,j,i,kk,jj,ii) == b(t,v,k,j,i,kk,jj,ii)) continue;
+                bool tg = false;
+                if(dim!=_x_ && ((int)i<gx || (int)i>=P.Nx-gx)) tg = true;
+                if(dim!=_y_ && ((int)j<gy || (int)j>=P.Ny-gy)) tg = true;
+                if(dim!=_z_ && ((int)k<gz || (int)k>=P.Nz-gz)) tg = true;
+                if(tg) corner++; else face_only++;
+            }
+        }
+        if(nbad && reported < 4 && Master){
+            reported++;
+            std::cout<<std::endl<<"[xchk] dim="<<dim<<" step="<<this->n_step
+                <<"  differing entries = "<<nbad<<"  max|forest-packed| = "<<worst
+                <<"\n       worst at (t="<<f[0]<<",var="<<f[1]<<",k="<<f[2]
+                <<",j="<<f[3]<<",i="<<f[4]<<",kk="<<f[5]<<",jj="<<f[6]<<",ii="<<f[7]<<")"
+                <<"  forest="<<std::setprecision(17)<<a(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
+                <<"  packed="<<b(f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7])
+                <<std::setprecision(6)
+                <<"\n       on-face entries = "<<face_only
+                <<"   transverse-ghost (corner/edge) entries = "<<corner
+                <<"\n       extents N=("<<P.Nz<<","<<P.Ny<<","<<P.Nx<<")"
+                <<" n=("<<P.nz<<","<<P.ny<<","<<P.nx<<") NGH=("<<NGHz<<","<<NGHy<<","<<NGHx<<")"
+                <<std::endl;
+        }
+    }
+
+    //All relations for one direction, as batched gathers over the
+    //transaction tables. Physical boundaries stay a per-block call: there are
+    //few of them and they need no neighbour.
+    void gather_all_fp(int dim){
+        SD_Solution P = fp_pack(dim);
+        for(int side=0; side<2; side++){
+            gather_fp_same(P, xt_[dim][side].recv, xt_[dim][side].send,
+                           xt_[dim][side].n, dim, side);
+            gather_fp_coarser(P, xtco_[dim][side].recv, xtco_[dim][side].send,
+                              xtco_[dim][side].sub, xtco_[dim][side].n, dim, side, amr_P);
+            gather_fp_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                            xtfi_[dim][side].sub, xtfi_[dim][side].n, dim, side, amr_RF);
+            //Physical boundaries: bc_ib is empty for periodic and when the
+            //all-same fast path is in use, so this is a no-op there.
+            for(int ib : forest.face_groups[dim][side].bc_ib)
+                apply_domain_bc_fp(block_fp_dbg(ib, dim), dim, side);
+        }
+    }
+
     void Exchange_fp(){
         if(nblocks<=1 && forest.max_level()==0) return;
+        //SPD_EXCHANGE_CHECK=1 runs both exchange implementations from the
+        //same pre-state and reports the first element where they disagree.
+        //The forest path is verified bit-exact against a single block, so it
+        //is the reference; this is also the A/B harness each step of the
+        //exchange rework is checked with.
+        if(exchange_check()){
+            for(int dim=0; dim<3; dim++){
+                if(!cfg.active[dim]) continue;
+                SD_Solution& P = fp_pack(dim);
+                SD_Vector pre("xchk_pre",  P.Vector.layout());
+                SD_Vector packed("xchk_pk", P.Vector.layout());
+                Kokkos::deep_copy(pre, P.Vector);
+                if(new_xchg()){
+                    gather_all_fp(dim);
+                } else {
+                    block_boundary_sd_b(P,nbrL_[dim],nbrR_[dim],typL_[dim],typR_[dim],dim);
+                }
+                Kokkos::deep_copy(packed, P.Vector);
+                Kokkos::deep_copy(P.Vector, pre);
+                forest_exchange_fp(forest, blocks, dim);
+                report_exchange_diff(P, packed, dim);
+            }
+            return;   //the forest result is left in place
+        }
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
-            if(forest.max_level()==0){
-                for(int b=0; b<nblocks; b++){
-                    int L,R,tL,tR;
-                    neighbors_uniform(b,dim,L,R,tL,tR);
-                    block_boundary_sd(fp(b,dim),fp(L,dim),fp(R,dim),tL,tR,dim);
-                }
+            if(new_xchg()){
+                gather_all_fp(dim);
+            } else if(forest.max_level()==0 && !no_pack()){
+                block_boundary_sd_b(fp_pack(dim),nbrL_[dim],nbrR_[dim],
+                                    typL_[dim],typR_[dim],dim);
             } else {
                 forest_exchange_fp(forest, blocks, dim);
             }
         }
     }
 
-    void Exchange_fv_field(FV_Solution Block::*member){
+    void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr){
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
-            if(forest.max_level()>0){
+            if(forest.max_level()>0 || no_pack()){
                 forest_exchange_fv(forest, blocks, member, dim);
+            } else if(packed){
+                block_boundary_fv_b(*packed,nbrL_[dim],nbrR_[dim],
+                                    typL_[dim],typR_[dim],dim);
             } else {
                 for(int b=0; b<nblocks; b++){
                     int L,R,tL,tR;
@@ -239,43 +560,141 @@ struct Mesh : public PhysicsModule {
                     forest_exchange_fv_same(forest, blocks, member, dim);
     }
 
+    //Batched phases: one kernel per direction over every block of the pack,
+    //replacing a per-block loop of identical kernels. Same arithmetic per
+    //cell, so results are unchanged; only the launch count differs.
+    void Compute_Fluxes_batched(){
+        if(cfg.active[_x_]) compute_fluxes(pv.U_ader_fp_x,pv.F_ader_fp_x,_vx_,_vy_,_vz_);
+        if(cfg.active[_y_]) compute_fluxes(pv.U_ader_fp_y,pv.F_ader_fp_y,_vy_,_vz_,_vx_);
+        if(cfg.active[_z_]) compute_fluxes(pv.U_ader_fp_z,pv.F_ader_fp_z,_vz_,_vx_,_vy_);
+    }
+
+    void Riemann_Solver_batched(){
+        bool visc = blocks[0].viscosity;
+        if(cfg.active[_x_])
+            sd_riemann_solver(pv.U_ader_fp_x,pv.F_ader_fp_x,_vx_,_vy_,_vz_,_x_,visc);
+        if(cfg.active[_y_])
+            sd_riemann_solver(pv.U_ader_fp_y,pv.F_ader_fp_y,_vy_,_vz_,_vx_,_y_,visc);
+        if(cfg.active[_z_])
+            sd_riemann_solver(pv.U_ader_fp_z,pv.F_ader_fp_z,_vz_,_vx_,_vy_,_z_,visc);
+    }
+
+    void Interpolate_to_fp_batched(){
+        Matrix sp_to_fp = blocks[0].sp_to_fp;
+        if(cfg.active[_x_])
+            transform_a_to_b_1d(pv.U_ader_sp,pv.U_ader_fp_x,sp_to_fp,_x_);
+        if(cfg.active[_y_])
+            transform_a_to_b_1d(pv.U_ader_sp,pv.U_ader_fp_y,sp_to_fp,_y_);
+        if(cfg.active[_z_])
+            transform_a_to_b_1d(pv.U_ader_sp,pv.U_ader_fp_z,sp_to_fp,_z_);
+    }
+
+    //Packed W_sp -> W_cv, the same sweep the blocks do individually
+    void transform_sp_to_cv_batched(SD_Solution src, SD_Solution dst){
+        transform_a_to_b(src, dst, pv.T_sweep, blocks[0].sp_to_cv);
+    }
+
     void Solve_fluxes_hydro(){
-        for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre();
-        Exchange_fp();
-        for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver();
+        { Region r("Fluxes_pre");
+          Interpolate_to_fp_batched();
+          Compute_Fluxes_batched(); }
+        { Region r("Exchange_fp"); Exchange_fp(); }
+        { Region r("Riemann_Solver"); Riemann_Solver_batched(); }
         if(forest.max_level()>0){
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) correct_coarse_fine_flux(forest, blocks, dim);
         }
-        #ifdef VISCOSITY
-        for(int b=0;b<nblocks;b++) blocks[b].Viscosity(Xd[b].h,Yd[b].h,Zd[b].h);
-        Exchange_fp();
-        for(int b=0;b<nblocks;b++) blocks[b].Rusanov_Solver();
-        #endif
+        //Viscosity is opt-in at runtime (athenak-style): hydro/nu>0 in the
+        //input file sets Hydro_ader::viscosity. The second flux-point exchange
+        //is needed because the viscous flux depends on gradients that the
+        //first exchange has only just made available.
+        if(blocks[0].viscosity){
+            Region r("Viscosity");
+            for(int b=0;b<nblocks;b++) blocks[b].Viscosity(Xd[b].h,Yd[b].h,Zd[b].h);
+            Exchange_fp();
+            for(int b=0;b<nblocks;b++) blocks[b].Rusanov_Solver();
+        }
+    }
+
+    //U_sp -> U_cv over the whole pack (the sweep FV_begin does per block)
+    void FV_begin_batched(){
+        transform_a_to_b(pv.U_sp, pv.U_cv, pv.T_sweep, blocks[0].sp_to_cv);
+    }
+
+    void FV_end_batched(){
+        transform_a_to_b(pv.U_cv, pv.U_sp, pv.T_sweep, blocks[0].cv_to_sp);
+    }
+
+    //Pure MUSCL pins the blend to 1 everywhere, so this is one fill over the
+    //whole pack rather than one per block.
+    //Primitives over the whole pack; the detection stencil (not yet batched)
+    //is skipped entirely under pure MUSCL, which never reads the flags.
+    void FV_detect_batched(){
+        compute_primitives(pv.U_old, pv.W_old);
+        if(cfg.muscl_only) return;
+        compute_primitives(pv.U_new, pv.W_new);
+        for(int b=0;b<nblocks;b++)
+            detect_troubles(blocks[b].W_new,blocks[b].W_old,blocks[b].troubles,
+                            blocks[b].alpha_x,blocks[b].alpha_y,blocks[b].alpha_z,
+                            Xd[b],Yd[b],Zd[b],1,(1<<_d_)|(1<<_p_));
+    }
+
+    //SD face fluxes -> FV faces -> candidate update, over the whole pack.
+    //The per-block FV face coordinates come in as the geometry pack, so one
+    //launch spans blocks that sit at different refinement levels.
+    void FV_flux_update_batched(int ader){
+        if(cfg.active[_x_])
+            face_integral_b(pv.F_ader_fp_x, pv.F_x, pv.T_fp_x,
+                            blocks[0].sp_to_cv, ader, _x_);
+        if(cfg.active[_y_])
+            face_integral_b(pv.F_ader_fp_y, pv.F_y, pv.T_fp_y,
+                            blocks[0].sp_to_cv, ader, _y_);
+        if(cfg.active[_z_])
+            face_integral_b(pv.F_ader_fp_z, pv.F_z, pv.T_fp_z,
+                            blocks[0].sp_to_cv, ader, _z_);
+        fv_update_solution_b(pv.U_new, pv.U_old, pv.U_cv,
+            pv.F_x, fvx_p, pv.F_y, fvy_p, pv.F_z, fvz_p,
+            blocks[0].wt, ader, dt, 0);
+    }
+
+    void FV_commit_batched(int ader){
+        fv_update_solution_b(pv.U_new, pv.U_old, pv.U_cv,
+            pv.F_x, fvx_p, pv.F_y, fvy_p, pv.F_z, fvz_p,
+            blocks[0].wt, ader, dt, 1);
+    }
+
+    void FV_theta_batched(){
+        if(cfg.muscl_only){
+            Kokkos::deep_copy(pv.theta.Vector, 1.0);
+            return;
+        }
+        for(int b=0;b<nblocks;b++) blocks[b].FV_theta();
     }
 
     void FV_Update_solution_hydro(){
-        for(int b=0;b<nblocks;b++) blocks[b].FV_begin();
+        { Region r("FV_begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
-            for(int b=0;b<nblocks;b++)
-                blocks[b].FV_flux_update(ader,Xd[b],Yd[b],Zd[b]);
-            Exchange_fv_field(&Block::U_old);
-            Exchange_fv_field(&Block::U_new);
-            for(int b=0;b<nblocks;b++)
-                blocks[b].FV_detect(Xd[b],Yd[b],Zd[b]);
-            if(!cfg.muscl_only) Exchange_fv_field(&Block::troubles);
-            for(int b=0;b<nblocks;b++) blocks[b].FV_theta();
-            if(!cfg.muscl_only) Exchange_fv_field(&Block::theta);
-            for(int b=0;b<nblocks;b++)
-                blocks[b].FV_blend(ader,Xd[b],Yd[b],Zd[b]);
-            if(forest.max_level()>0)
+            { Region r("FV_flux_update"); FV_flux_update_batched(ader); }
+            { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
+            { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+            { Region r("FV_detect"); FV_detect_batched(); }
+            if(!cfg.muscl_only){ Region r("Exchange_troubles");
+                                 Exchange_fv_field(&Block::troubles); }
+            { Region r("FV_theta"); FV_theta_batched(); }
+            if(!cfg.muscl_only){ Region r("Exchange_theta");
+                                 Exchange_fv_field(&Block::theta); }
+            { Region r("FV_blend");
+              for(int b=0;b<nblocks;b++)
+                  blocks[b].FV_blend(ader,Xd[b],Yd[b],Zd[b]); }
+            if(forest.max_level()>0){
+                Region r("correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)
                     if(cfg.active[dim])
                         correct_coarse_fine_fv_flux(forest, blocks, dim);
-            for(int b=0;b<nblocks;b++)
-                blocks[b].FV_commit(ader,Xd[b],Yd[b],Zd[b]);
+            }
+            { Region r("FV_commit"); FV_commit_batched(ader); }
         }
-        for(int b=0;b<nblocks;b++) blocks[b].FV_end();
+        { Region r("FV_end"); FV_end_batched(); }
     }
 
     void Update_solution_hydro(){
@@ -416,7 +835,8 @@ struct Mesh : public PhysicsModule {
         if(cfg.integrator==_integrator_rk_ || is_mhd)
             bti->AddTask(&Mesh::TaskSaveState, this, none);
 
-        TaskID copy = stg->AddTask(&Mesh::TaskCopyCons, this, none);
+        TaskID pois = stg->AddTask(&Mesh::TaskPoison, this, none);
+        TaskID copy = stg->AddTask(&Mesh::TaskCopyCons, this, pois);
         TaskID adv  = stg->AddTask(&Mesh::TaskAdvance,  this, copy);
         TaskID comb = stg->AddTask(&Mesh::TaskCombine,  this, adv);
         if constexpr (is_mhd)
@@ -424,6 +844,56 @@ struct Mesh : public PhysicsModule {
 
         ati->AddTask(&Mesh::TaskConsToPrim, this, none);
         acy->AddTask(&Mesh::TaskAdapt, this, none);
+    }
+
+
+    //SPD_POISON_GHOSTS=1 fills the ghost *elements* of the SD volume arrays
+    //with NaN at the top of every stage. SD couples elements only through the
+    //flux-point trace on a shared face, so nothing should ever read a volume
+    //array outside [NGH, N-NGH): if the answer survives the poison, those
+    //ghost elements are dead storage and the blocks can drop them (only the
+    //fp face arrays and the FV sub-grid need halos).
+    static bool poison_ghosts(){
+        static bool v = getenv("SPD_POISON_GHOSTS") != nullptr;
+        return v;
+    }
+
+    void poison_volume_ghosts(){
+        if(!poison_ghosts()) return;
+        const double nan_v = std::numeric_limits<double>::quiet_NaN();
+        int gx = NGHx, gy = NGHy, gz = NGHz;
+        const bool poison_active = getenv("SPD_POISON_ACTIVE") != nullptr;
+        auto poison = [&](SD_Solution S){
+            if(S.Vector.size()==0) return;
+            int nb=S.nb, Nx=S.Nx, Ny=S.Ny, Nz=S.Nz;
+            int px=S.nx, py=S.ny, pz=S.nz;
+            int nader=S.n_ader, nvar=S.n_var;
+            const bool pa = poison_active;
+            sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+                KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+                bool ghost = (i<gx || i>=Nx-gx) || (j<gy || j>=Ny-gy)
+                          || (k<gz || k>=Nz-gz);
+                if(ghost == pa) return;
+                const int boff = b*nader;
+                for(int t_id=0; t_id<nader; t_id++)
+                for(int var=0; var<nvar; var++)
+                    S.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = nan_v;
+            }, "poison_volume_ghosts");
+        };
+        poison(pv.U_sp);      poison(pv.W_sp);   poison(pv.W_cv);
+        poison(pv.U_cv);      poison(pv.U0_sp);  poison(pv.T_sweep);
+        poison(pv.U_ader_sp);
+        //Positive control: the fp face arrays are exactly where the exchanged
+        //trace lands, so poisoning their ghost slot MUST break the answer.
+        //If it does not, the poison itself is not running.
+        if(getenv("SPD_POISON_FP")){
+            poison(pv.U_ader_fp_x); poison(pv.U_ader_fp_y); poison(pv.U_ader_fp_z);
+        }
+    }
+
+    TaskStatus TaskPoison(Driver* d, int stage){
+        poison_volume_ghosts();
+        return TaskStatus::complete;
     }
 
     void sync_block_dt(){
@@ -443,11 +913,12 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskCopyCons(Driver* d, int stage){
+        Region r("TaskCopyCons");
         sync_block_dt();
-        for(int b=0;b<nblocks;b++){
-            if constexpr (is_hydro)
-                blocks[b].copy_ader(blocks[b].U_sp, blocks[b].U_ader_sp);
-            else {
+        if constexpr (is_hydro){
+            blocks[0].copy_ader(pv.U_sp, pv.U_ader_sp);
+        } else {
+            for(int b=0;b<nblocks;b++){
                 Kokkos::deep_copy(blocks[b].U_ader_sp.Vector, blocks[b].U_sp.Vector);
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
             }
@@ -463,13 +934,17 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskCombine(Driver* d, int stage){
+        Region r("TaskCombine");
         if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0){
-            for(int b=0;b<nblocks;b++){
-                combine_solution(blocks[b].U_sp, blocks[b].U0_sp, d->rk_a[stage-1]);
-                if constexpr (is_mhd){
-                    combine_solution(blocks[b].Bx_fp_x, blocks[b].B0x_fp_x, d->rk_a[stage-1]);
-                    combine_solution(blocks[b].By_fp_y, blocks[b].B0y_fp_y, d->rk_a[stage-1]);
-                    combine_solution(blocks[b].Bz_fp_z, blocks[b].B0z_fp_z, d->rk_a[stage-1]);
+            double a = d->rk_a[stage-1];
+            if constexpr (is_hydro){
+                combine_solution(pv.U_sp, pv.U0_sp, a);
+            } else {
+                for(int b=0;b<nblocks;b++){
+                    combine_solution(blocks[b].U_sp, blocks[b].U0_sp, a);
+                    combine_solution(blocks[b].Bx_fp_x, blocks[b].B0x_fp_x, a);
+                    combine_solution(blocks[b].By_fp_y, blocks[b].B0y_fp_y, a);
+                    combine_solution(blocks[b].Bz_fp_z, blocks[b].B0z_fp_z, a);
                 }
             }
         }
@@ -487,11 +962,12 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskConsToPrim(Driver* d, int stage){
-        for(int b=0;b<nblocks;b++){
-            if constexpr (is_hydro){
-                compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
-                blocks[b].transform_sp_to_cv(blocks[b].W_sp, blocks[b].W_cv);
-            } else {
+        Region r("TaskConsToPrim");
+        if constexpr (is_hydro){
+            compute_primitives(pv.U_sp, pv.W_sp);
+            transform_sp_to_cv_batched(pv.W_sp, pv.W_cv);
+        } else {
+            for(int b=0;b<nblocks;b++){
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
                 blocks[b].transform_sp_to_cv(blocks[b].W_sp, blocks[b].W_cv);
             }
@@ -507,6 +983,7 @@ struct Mesh : public PhysicsModule {
     }
 
     double ComputeDt() override {
+        Region r("ComputeDt");
         this->Dt = 1e300;
         bool diverged = false;
         for(int b=0;b<nblocks;b++){
@@ -554,23 +1031,22 @@ struct Mesh : public PhysicsModule {
             if constexpr (is_hydro)
                 M += blocks[b].fv_mass(blocks[b].W_cv, Xd[b], Yd[b], Zd[b]);
             else {
-                //Density CV average * element volume (MHD has no fv_mass helper)
-                SD_Solution& W = blocks[b].W_cv;
+                //Density CV average * element volume (MHD has no fv_mass helper).
+                //By value: a reference captured into a device lambda leaves a
+                //host pointer in the closure, which CUDA rejects outright.
+                SD_Solution W = blocks[b].W_cv;
                 int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
                 int qx=px, qy=py, qz=pz;
                 Vector fx = Xd[b].fv_faces, fy = Yd[b].fv_faces, fz = Zd[b].fv_faces;
                 bool ay=cfg.active[_y_], az=cfg.active[_z_];
                 GHOST_LOCALS;
-                double mass=0;
-                Kokkos::parallel_reduce("mesh_mhd_mass",
-                    Kokkos::MDRangePolicy<Kokkos::Rank<6>>(
-                        {NGHz,NGHy,NGHx,0,0,0},{Nz-NGHz,Ny-NGHy,Nx-NGHx,pz,py,px}),
+                double mass = sd_sum_active_cells(Nz,Ny,Nx,pz,py,px,
                     KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& sum){
                         double V = fx(I+1)-fx(I);
                         if(ay) V *= fy(J+1)-fy(J);
                         if(az) V *= fz(K+1)-fz(K);
                         sum += W.Vector(0,0,k,j,i,kk,jj,ii)*V;
-                    }, mass);
+                    });
                 M += mass;
             }
         }
@@ -666,12 +1142,13 @@ struct Mesh : public PhysicsModule {
     }
 
     void restrict_snap_child(const BlockSnap& fine, BlockSnap& coarse,
-                             int cx, int cy, int cz){
+                             int cx, int cy, int cz, int ib_mat){
         restrict_block(fine.U, coarse.U, amr_RF, cx, cy, cz);
         if constexpr (is_mhd){
-            restrict_block_face_B(fine.Bx, coarse.Bx, amr_RF, _x_, cx, cy, cz);
-            restrict_block_face_B(fine.By, coarse.By, amr_RF, _y_, cx, cy, cz);
-            restrict_block_face_B(fine.Bz, coarse.Bz, amr_RF, _z_, cx, cy, cz);
+            restrict_block_face_B_2d(fine.Bx, fine.By, fine.Bz,
+                                     coarse.Bx, coarse.By, coarse.Bz,
+                                     amr_RF, blocks[ib_mat].sp_to_cv,
+                                     blocks[ib_mat].cv_to_sp, cx, cy, cz);
         }
     }
 
@@ -755,7 +1232,7 @@ struct Mesh : public PhysicsModule {
                 BlockSnap acc = make_empty_snap(ib, "acc");
                 for(int s=0; s<n_sib; s++){
                     int cx=s&1, cy=(s>>1)&1, cz=(s>>2)&1;
-                    restrict_snap_child(snap[sibs[s]], acc, cx, cy, cz);
+                    restrict_snap_child(snap[sibs[s]], acc, cx, cy, cz, ib);
                 }
                 install_snap(ib, acc);
                 continue;
@@ -770,6 +1247,24 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    void report_divb(const char* where){
+        if constexpr (is_mhd){
+            if(!getenv("SPD_DIVB_DEBUG")) return;
+            double d = 0.0;
+            int worst = -1;
+            for(int b=0;b<nblocks;b++){
+                double v = mhd_max_divB(blocks[b].Bx_fp_x, blocks[b].By_fp_y,
+                                        blocks[b].Bz_fp_z, blocks[b].dfp_to_sp,
+                                        Xd[b].h, Yd[b].h, Zd[b].h);
+                if(v > d){ d = v; worst = b; }
+            }
+            if(Master)
+                std::cout<<"\n[divb] "<<where<<": "<<d<<" (block "<<worst
+                         <<" level "<<(worst<0?-1:forest.blocks[worst].level)
+                         <<", nblocks "<<nblocks<<")"<<std::endl;
+        }
+    }
+
     void adapt(){
         if constexpr (is_mhd){
             if(cfg.active[_z_]){
@@ -779,6 +1274,10 @@ struct Mesh : public PhysicsModule {
                 exit(1);
             }
         }
+        //SPD_ADAPT_MASS=1 brackets every regrid with the conserved mass, so a
+        //transfer that loses mass is separated from an evolution that does.
+        const bool mass_dbg = getenv("SPD_ADAPT_MASS") != nullptr;
+        double m_before = mass_dbg ? total_mass() : 0.0;
         std::vector<BlockSnap> snap(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             snap[ib] = make_empty_snap(ib, "snap");
@@ -800,11 +1299,21 @@ struct Mesh : public PhysicsModule {
 
         build_block_solvers();
         transfer_from_snapshot(key_to_ib, snap);
+        if constexpr (is_mhd) report_divb("after transfer");
         if constexpr (is_mhd){
             if(forest.max_level()==0) Sync_face_B_mhd();
             else Exchange_face_B_mhd();
         }
+        if constexpr (is_mhd) report_divb("after exchange");
         for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
+        if(mass_dbg && Master){
+            double m_after = total_mass();
+            std::cout<<std::endl<<"[adapt] step "<<this->n_step
+                     <<" nblocks "<<nblocks
+                     <<" mass "<<std::setprecision(17)<<m_before<<" -> "<<m_after
+                     <<"  rel "<<std::setprecision(6)
+                     <<(m_before!=0.0 ? (m_after-m_before)/m_before : 0.0)<<std::endl;
+        }
         recompute_dt();
         if(forest.max_level() != old_M)
             init_W_glob(Xg, Yg, Zg, x_fp_);

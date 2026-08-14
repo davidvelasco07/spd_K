@@ -127,7 +127,12 @@ struct Induction_ader : public PhysicsModule{
             n_ader = p+1;
             Kokkos::resize(xt,p+1);
             Kokkos::resize(wt,p+1);
-            gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
+            //.data() on a SetupSpace view is a device pointer under CUDA.
+            Vector_h xt_h = setup_mirror(xt);
+            Vector_h wt_h = setup_mirror(wt);
+            gauss_legendre(0.0, 1.0, p+1, xt_h.data(), wt_h.data());
+            setup_push(xt, xt_h);
+            setup_push(wt, wt_h);
         }
 
         //////////////
@@ -140,18 +145,44 @@ struct Induction_ader : public PhysicsModule{
         Kokkos::resize(cv_to_sp,p+1,p+1);
         Kokkos::resize(fp_to_cv,p+1,p+2);
 
-        lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
-        lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
-        lagrange_prime_matrix(dfp_to_sp, x_fp, x_sp, p+2, p+1);
-        integral_matrix(sp_to_cv, x_fp, x_sp, p+1, p+1);
-        integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
-        inverse(sp_to_cv, cv_to_sp, p+1);
-        //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
-        if(cfg.integrator==_integrator_ader_){
-            Kokkos::resize(ader,p+1,p+1);
-            Kokkos::resize(invader,p+1,p+1);
-            ader_matrix(ader, xt, wt, p+1);
-            inverse(ader, invader, p+1);
+        //Setup matrices live in SetupSpace, which is CudaSpace on GPU: fill a
+        //host mirror and push it, never write the device view from host code
+        //(.cursor/rules/kokkos-no-uvm.mdc). Writing them directly aborts every
+        //MHD/induction run on CUDA with an inaccessible-memory-space error.
+        {
+            Matrix_h sp_to_fp_h = setup_mirror(sp_to_fp);
+            Matrix_h fp_to_sp_h = setup_mirror(fp_to_sp);
+            Matrix_h dfp_to_sp_h = setup_mirror(dfp_to_sp);
+            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
+            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
+            Matrix_h fp_to_cv_h = setup_mirror(fp_to_cv);
+            lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
+            lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
+            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
+            integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
+            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
+            setup_push(sp_to_fp, sp_to_fp_h);
+            setup_push(fp_to_sp, fp_to_sp_h);
+            setup_push(dfp_to_sp, dfp_to_sp_h);
+            setup_push(sp_to_cv, sp_to_cv_h);
+            setup_push(cv_to_sp, cv_to_sp_h);
+            setup_push(fp_to_cv, fp_to_cv_h);
+            //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
+            if(cfg.integrator==_integrator_ader_){
+                Kokkos::resize(ader,p+1,p+1);
+                Kokkos::resize(invader,p+1,p+1);
+                Matrix_h ader_h = setup_mirror(ader);
+                Matrix_h invader_h = setup_mirror(invader);
+                Vector_h xt_h = setup_mirror(xt);
+                Vector_h wt_h = setup_mirror(wt);
+                setup_pull(xt, xt_h);
+                setup_pull(wt, wt_h);
+                ader_matrix(ader_h, xt_h, wt_h, p+1);
+                inverse(ader_h, invader_h, p+1);
+                setup_push(ader, ader_h);
+                setup_push(invader, invader_h);
+            }
         }
 
         Bx_fp_x.init("Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);

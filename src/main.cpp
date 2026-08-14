@@ -207,6 +207,16 @@ int main(int argc, char** argv){
         else if(crit=="shear") cfg.amr_criterion = 3;
         else if(crit=="bfield") cfg.amr_criterion = 4;
         else cfg.amr_criterion = 0;
+        cfg.amr_refine_threshold =
+            pin.GetOrAddReal("amr","refine_threshold",cfg.amr_refine_threshold);
+        cfg.amr_derefine_threshold =
+            pin.GetOrAddReal("amr","derefine_threshold",cfg.amr_derefine_threshold);
+        cfg.amr_bfield_threshold =
+            pin.GetOrAddReal("amr","bfield_threshold",cfg.amr_bfield_threshold);
+        cfg.amr_refine_frac =
+            pin.GetOrAddReal("amr","refine_frac",cfg.amr_refine_frac);
+        cfg.amr_derefine_frac =
+            pin.GetOrAddReal("amr","derefine_frac",cfg.amr_derefine_frac);
 
         double tlim      = pin.GetOrAddReal("time","tlim",0.1);
         //Outputs are opt-in (athenak-style): files are only written when the

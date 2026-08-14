@@ -73,6 +73,25 @@ struct RunConfig {
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
     int amr_max_level = 0;               //maximum refinement level
     int amr_criterion = 0;               //0=Lohner, 1=pressure, 2=trouble, 3=shear, 4=bfield
+    //Refine/derefine cuts for the shear criterion. shear_score is an undivided
+    //velocity difference between neighbouring cells, so it carries a factor of
+    //the cell size: halving the root resolution roughly doubles the score, and
+    //a threshold calibrated at one resolution must be rescaled for another.
+    //Too small a value tags the whole domain once vorticity has spread (0.01
+    //leaves a Kelvin-Helmholtz mesh 97% refined at the finest level by t=0.9).
+    double amr_refine_threshold = 0.1;
+    double amr_derefine_threshold = 0.05;
+    //Cut on the filtered |B| Löhner indicator, which is dimensionless and O(1)
+    //at an under-resolved feature.
+    double amr_bfield_threshold = 0.8;
+    //Fraction of the peak score a block must reach to be tagged. 1 refines only
+    //the peak block(s) and lets 2:1 balance grow a single compact patch; 0 tags
+    //every block over the threshold.
+    double amr_refine_frac = 0.0;
+    //Fraction of the peak score below which a sibling group is released, so the
+    //fine region follows the feature instead of accumulating. 0 disables it and
+    //leaves only the absolute cut at half the refine threshold.
+    double amr_derefine_frac = 0.0;
 };
 extern RunConfig cfg;
 

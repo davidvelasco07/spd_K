@@ -1,6 +1,9 @@
 #ifndef STRUCTS_HPP_
 #define STRUCTS_HPP_
 
+#include <map>
+#include <string>
+
 using namespace std;
 
 template <typename T>
@@ -80,23 +83,106 @@ class dimension{
             Vector_h fv_faces_h = setup_mirror(fv_faces);
             Vector_h fv_centers_h = setup_mirror(fv_centers);
 
+            std::vector<char> got_f(fv_nf,0), got_c(fv_nc,0);
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){
                     sd_faces_h(j,i)= (start+j-NGH + x_fp[i])*h;
-                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
+                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR){
                         fv_faces_h(i-idL+j*n_sp) = sd_faces_h(j,i);
+                        got_f[i-idL+j*n_sp] = 1;
+                    }
                 }
                 for(int i=0;i<n_sp;i++){
                     sd_centers_h(j,i)= 0.5*(sd_faces_h(j,i+1)+sd_faces_h(j,i));
-                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
+                    if((i+j*n_sp)>=idL && (i+j*n_sp)<idR){
                         fv_centers_h(i-idL+j*n_sp) = sd_centers_h(j,i);
+                        got_c[i-idL+j*n_sp] = 1;
+                    }
                 }
+            }
+            //The FV sub-grid keeps nGH ghost cells per side, but the SD grid
+            //only supplies NGH ghost elements of n_sp points each. For n_sp >=
+            //nGH every FV ghost has an SD source; at p = 0 (job/scheme=muscl)
+            //n_sp < nGH, so idL < 0 and the outermost ghost coordinate on each
+            //side has none and would stay zero. slopes_d divides by the centre
+            //spacing there, so the boundary ghost slope -- and with it the
+            //flux on the two domain boundary faces -- comes out wrong and
+            //asymmetric, which breaks conservation. The sub-grid repeats every
+            //n_sp cells with element size h, so extend it by whole elements.
+            if(active){
+                auto extend = [&](Vector_h v, std::vector<char>& got, int n){
+                    for(int d=n-1; d>=0; d--)
+                        if(!got[d] && d+n_sp < n){ v(d) = v(d+n_sp) - h; got[d] = 1; }
+                    for(int d=0; d<n; d++)
+                        if(!got[d] && d-n_sp >= 0){ v(d) = v(d-n_sp) + h; got[d] = 1; }
+                };
+                extend(fv_faces_h, got_f, fv_nf);
+                extend(fv_centers_h, got_c, fv_nc);
             }
             setup_push(sd_faces, sd_faces_h);
             setup_push(sd_centers, sd_centers_h);
             setup_push(fv_faces, fv_faces_h);
             setup_push(fv_centers, fv_centers_h);
         }	
+};
+
+//Packed multi-meshblock storage (the AthenaK layout).
+//
+//Every meshblock of a mesh carries the same element count whatever its
+//refinement level, so the per-block arrays of a given name are rectangular
+//and can live in ONE allocation indexed by a leading block axis. A block's
+//own array is then a range subview of that allocation: still LayoutRight,
+//still contiguous, and assignable to the plain per-block view type, so all
+//per-block code (ghost exchange, AMR transfer, output) is unchanged while
+//batched kernels can span every block in a single launch.
+//
+//Kokkos caps views at rank 8 and the SD arrays already use all 8, so the
+//block axis is folded into the leading extent instead of added: an SD pack
+//has leading extent nb*n_ader and is indexed [b*n_ader + t_id], an FV pack
+//has leading extent nb*n_var and is indexed [b*n_var + var]. The INDICES
+//macros add that offset, so kernel bodies are otherwise untouched.
+struct PackMeta {
+    int nb=1, nader=1, nvar=1;
+    int Nz=1, Ny=1, Nx=1, nz=1, ny=1, nx=1;
+    int iL=0, iR=1, jL=0, jR=1, kL=0, kR=1;  //FV sub-grid bounds
+};
+
+struct BlockPack {
+    int nb = 1;            //number of meshblocks in the pack
+    bool active = false;   //false => callers allocate per-block as before
+    std::map<std::string, SD_Vector> sd;
+    std::map<std::string, FV_Vector> fv;
+    std::map<std::string, PackMeta>  meta;
+
+    void reset(int n){ nb=n; active=true; sd.clear(); fv.clear(); meta.clear(); }
+
+    //Allocate the pack on first request, then hand out block ib's slice.
+    SD_Vector sd_slice(const std::string& name, int ib, int nader, int nvar,
+                       int Nz, int Ny, int Nx, int nz, int ny, int nx){
+        auto it = sd.find(name);
+        if(it == sd.end()){
+            it = sd.emplace(name,
+                SD_Vector(name, nb*nader, nvar, Nz, Ny, Nx, nz, ny, nx)).first;
+            meta[name] = PackMeta{nb,nader,nvar,Nz,Ny,Nx,nz,ny,nx};
+        }
+        return Kokkos::subview(it->second,
+            Kokkos::make_pair(ib*nader,(ib+1)*nader),
+            Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+            Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    }
+
+    FV_Vector fv_slice(const std::string& name, int ib, int nvar,
+                       int Nz, int Ny, int Nx){
+        auto it = fv.find(name);
+        if(it == fv.end()){
+            it = fv.emplace(name,
+                FV_Vector(name, nb*nvar, Nz, Ny, Nx)).first;
+            meta[name] = PackMeta{nb,1,nvar,Nz,Ny,Nx,1,1,1};
+        }
+        return Kokkos::subview(it->second,
+            Kokkos::make_pair(ib*nvar,(ib+1)*nvar),
+            Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    }
 };
 
 class SD_Solution{
@@ -113,6 +199,7 @@ class SD_Solution{
     int nz;
     int n_ader=1;
     int n_var;
+    int nb=1;   //meshblocks spanned: 1 for a block's own view, nblocks for a pack
     string label;
     SD_Solution() = default;
     SD_Solution(string name,
@@ -125,6 +212,20 @@ class SD_Solution{
         bool y,
         bool x
         ){init(name,nader,nvar,Zdim,Ydim,Xdim,z,y,x);}
+    void set_extents(int nader, int nvar,
+        dimension Zdim, dimension Ydim, dimension Xdim,
+        bool z, bool y, bool x
+        ){
+        n_var=nvar;
+        n_ader=nader;
+        Nx=Xdim.N_total;
+        Ny=Ydim.N_total;
+        Nz=Zdim.N_total;
+        nx = ( x  ?  Xdim.n_fp : Xdim.n_sp);
+        ny = ( y  ?  Ydim.n_fp : Ydim.n_sp);
+        nz = ( z  ?  Zdim.n_fp : Zdim.n_sp);
+    }
+
     void init(string name,
         int nader,
         int nvar,
@@ -135,18 +236,22 @@ class SD_Solution{
         bool y,
         bool x
         ){
-        n_var=nvar;
-        n_ader=nader;
-        Nx=Xdim.N_total;
-        Ny=Ydim.N_total;
-        Nz=Zdim.N_total;
-        nx = ( x  ?  Xdim.n_fp : Xdim.n_sp);
-        ny = ( y  ?  Ydim.n_fp : Ydim.n_sp);
-        nz = ( z  ?  Zdim.n_fp : Zdim.n_sp);
-
+        set_extents(nader,nvar,Zdim,Ydim,Xdim,z,y,x);
         Kokkos::resize(Vector,n_ader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        //cout<<name<<":"<<n_ader<<","<<nvar<<","<<Nz<<","<<Ny<<","<<Nx<<","<<nz<<","<<ny<<","<<nx<<endl;
         label=name;
+    }
+
+    //Same shape as init(), but the storage is block ib's slice of a shared
+    //pack rather than a private allocation. Bitwise-identical arithmetic:
+    //only where the data lives changes.
+    void init_packed(BlockPack& pk, int ib, string name,
+        int nader, int nvar,
+        dimension Zdim, dimension Ydim, dimension Xdim,
+        bool z, bool y, bool x
+        ){
+        set_extents(nader,nvar,Zdim,Ydim,Xdim,z,y,x);
+        Vector = pk.sd_slice(name, ib, n_ader, n_var, Nz, Ny, Nx, nz, ny, nx);
+        label = name;
     }
 
     //The host mirror is allocated lazily on the first copy(): only arrays that
@@ -185,6 +290,22 @@ class SD_Solution{
     //        return make_tuple(t_id,var,l,j,i,ll,jj,ii);
     //}
 };
+
+//Descriptor for a whole pack, shaped like a per-block SD_Solution but with
+//nb set to the block count and Vector spanning every block. Batched kernels
+//take one of these and index the leading axis as b*n_ader + t_id.
+inline SD_Solution sd_pack_view(BlockPack& pk, const std::string& name){
+    SD_Solution s;
+    auto it = pk.sd.find(name);
+    if(it == pk.sd.end()) return s;
+    const PackMeta& m = pk.meta.at(name);
+    s.Vector = it->second;
+    s.nb = m.nb; s.n_ader = m.nader; s.n_var = m.nvar;
+    s.Nz = m.Nz; s.Ny = m.Ny; s.Nx = m.Nx;
+    s.nz = m.nz; s.ny = m.ny; s.nx = m.nx;
+    s.label = name;
+    return s;
+}
 
 struct CommHelper {
   #ifdef MPI

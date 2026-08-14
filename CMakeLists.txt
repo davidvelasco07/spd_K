@@ -94,6 +94,9 @@ endif()
 add_executable(bench_layout tests/bench_layout.cpp)
 target_link_libraries(bench_layout Kokkos::kokkos)
 
+#Kokkos profiling hook (KOKKOS_TOOLS_LIBS): counts kernel launches per phase
+add_library(kp_count SHARED tools/kp_count.cpp)
+
 enable_testing()
 add_test(NAME transforms_unit COMMAND spd_K_test)
 find_package(Python3 COMPONENTS Interpreter)

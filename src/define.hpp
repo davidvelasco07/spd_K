@@ -99,6 +99,17 @@ extern int nGH_rt[3];
 
 #define FV_INDICES var,Nid[_z_],Nid[_y_],Nid[_x_]
 
+//Batched (packed multi-meshblock) counterparts. A pack folds the block
+//index into the leading axis, so the only difference from the per-block
+//macros above is the boff term; declare it with BOFF(nader) at the top of
+//a batched lambda. With nb = 1 and boff = 0 these are the macros above,
+//which is why batching does not change the arithmetic.
+#define BOFF(nader) const int boff = b*(nader)
+#define B_INDICES (boff+t_id),var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
+#define B_INDICES_L (boff+t_id),var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
+#define B_INDICES_R (boff+t_id),var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
+#define B_FV_INDICES (boff+var),Nid[_z_],Nid[_y_],Nid[_x_]
+
 //Bulk solution arrays live in device memory (CudaSpace): all per-step
 //kernels touch only these, so no host<->device traffic occurs during the
 //evolution loop. Small setup arrays (transform matrices, quadrature nodes,
@@ -126,6 +137,11 @@ typedef Kokkos::View<double*,SetupSpace>  Vector;
 typedef Kokkos::View<double**,SetupSpace>  Matrix;
 typedef Kokkos::View<double********,Layout,MemSpace>  SD_Vector;
 typedef Kokkos::View<double****,Layout,MemSpace> FV_Vector;
+
+//Neighbour tables consumed by the batched ghost exchanges: one entry per
+//block (or per block-face pair), so the block loop becomes a kernel axis.
+typedef Kokkos::View<int*,SetupSpace>  IntVector;
+typedef IntVector::host_mirror_type IntVector_h;
 
 typedef Matrix::host_mirror_type Matrix_h;
 typedef Vector::host_mirror_type Vector_h;
@@ -189,6 +205,71 @@ void flat_index3(unsigned idx,
     k  = int(idx / My) + oz;
 }
 
+//Batched (multi-meshblock) decompositions. The block index is the
+//slowest-varying component, so consecutive threads still walk contiguous
+//memory inside one block: a single launch covers every block of a pack
+//without changing the per-block access pattern.
+KOKKOS_INLINE_FUNCTION
+void flat_index7(unsigned idx,
+                 unsigned Mz, unsigned My, unsigned Mx,
+                 unsigned nz, unsigned ny, unsigned nx,
+                 int oz, int oy, int ox,
+                 int& b, int& k, int& j, int& i, int& kk, int& jj, int& ii){
+    ii = int(idx % nx);      idx /= nx;
+    jj = int(idx % ny);      idx /= ny;
+    kk = int(idx % nz);      idx /= nz;
+    i  = int(idx % Mx) + ox; idx /= Mx;
+    j  = int(idx % My) + oy; idx /= My;
+    k  = int(idx % Mz) + oz; idx /= Mz;
+    b  = int(idx);
+}
+
+KOKKOS_INLINE_FUNCTION
+void flat_index4(unsigned idx,
+                 unsigned Mz, unsigned My, unsigned Mx,
+                 int oz, int oy, int ox,
+                 int& b, int& k, int& j, int& i){
+    i  = int(idx % Mx) + ox; idx /= Mx;
+    j  = int(idx % My) + oy; idx /= My;
+    k  = int(idx % Mz) + oz; idx /= Mz;
+    b  = int(idx);
+}
+
+//Box decompositions: like flat_index3/6 but with an explicit [lo,hi) per
+//element axis, for the coarse-fine operators that work on a sub-box of a
+//block rather than the whole grid or the whole interior.
+KOKKOS_INLINE_FUNCTION
+void flat_index2(unsigned idx, unsigned My, unsigned Mx,
+                 int oy, int ox, int& j, int& i){
+    i = int(idx % Mx) + ox; idx /= Mx;
+    j = int(idx) + oy;
+}
+
+//3 element axes + 1 point axis (the fastest-varying one).
+KOKKOS_INLINE_FUNCTION
+void flat_index3p1(unsigned idx, unsigned Mz, unsigned My, unsigned Mx,
+                   unsigned n1, int oz, int oy, int ox,
+                   int& k, int& j, int& i, int& a){
+    a = int(idx % n1);       idx /= n1;
+    i = int(idx % Mx) + ox;  idx /= Mx;
+    j = int(idx % My) + oy;  idx /= My;
+    k = int(idx) + oz;
+}
+
+//3 element axes + 2 point axes; which two the caller means is its own business
+//(the CT operators sweep yz, zx and xy faces).
+KOKKOS_INLINE_FUNCTION
+void flat_index3p2(unsigned idx, unsigned Mz, unsigned My, unsigned Mx,
+                   unsigned n1, unsigned n2, int oz, int oy, int ox,
+                   int& k, int& j, int& i, int& a, int& b){
+    b = int(idx % n2);       idx /= n2;
+    a = int(idx % n1);       idx /= n1;
+    i = int(idx % Mx) + ox;  idx /= Mx;
+    j = int(idx % My) + oy;  idx /= My;
+    k = int(idx) + oz;
+}
+
+
 //Wrapper functors (instead of nested extended lambdas, which nvcc rejects)
 template <class Functor>
 struct Flat6 {
@@ -228,6 +309,44 @@ struct Flat3 {
     }
 };
 
+template <class Functor>
+struct Flat7 {
+    Functor f;
+    unsigned Mz, My, Mx, nz, ny, nx;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int b, k, j, i, kk, jj, ii;
+        flat_index7(idx, Mz, My, Mx, nz, ny, nx, oz, oy, ox, b, k, j, i, kk, jj, ii);
+        f(b, k, j, i, kk, jj, ii);
+    }
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx, double& r) const {
+        int b, k, j, i, kk, jj, ii;
+        flat_index7(idx, Mz, My, Mx, nz, ny, nx, oz, oy, ox, b, k, j, i, kk, jj, ii);
+        f(b, k, j, i, kk, jj, ii, r);
+    }
+};
+
+template <class Functor>
+struct Flat4 {
+    Functor f;
+    unsigned Mz, My, Mx;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int b, k, j, i;
+        flat_index4(idx, Mz, My, Mx, oz, oy, ox, b, k, j, i);
+        f(b, k, j, i);
+    }
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx, double& r) const {
+        int b, k, j, i;
+        flat_index4(idx, Mz, My, Mx, oz, oy, ox, b, k, j, i);
+        f(b, k, j, i, r);
+    }
+};
+
 inline unsigned flat_total(int64_t total){
     assert(total < int64_t(1) << 32);
     return unsigned(total);
@@ -245,6 +364,78 @@ Flat3<Functor> make_flat3(const Functor& f, int Mz, int My, int Mx,
                           int oz, int oy, int ox){
     return Flat3<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),oz,oy,ox};
 }
+
+template <class Functor>
+Flat7<Functor> make_flat7(const Functor& f, int Mz, int My, int Mx,
+                          int nz, int ny, int nx, int oz, int oy, int ox){
+    return Flat7<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),
+                          unsigned(nz),unsigned(ny),unsigned(nx),oz,oy,ox};
+}
+
+template <class Functor>
+Flat4<Functor> make_flat4(const Functor& f, int Mz, int My, int Mx,
+                          int oz, int oy, int ox){
+    return Flat4<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),oz,oy,ox};
+}
+
+template <class Functor>
+struct Flat2 {
+    Functor f;
+    unsigned My, Mx;
+    int oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int j, i;
+        flat_index2(idx, My, Mx, oy, ox, j, i);
+        f(j, i);
+    }
+};
+
+template <class Functor>
+struct Flat3p1 {
+    Functor f;
+    unsigned Mz, My, Mx, n1;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int k, j, i, a;
+        flat_index3p1(idx, Mz, My, Mx, n1, oz, oy, ox, k, j, i, a);
+        f(k, j, i, a);
+    }
+};
+
+template <class Functor>
+struct Flat3p2 {
+    Functor f;
+    unsigned Mz, My, Mx, n1, n2;
+    int oz, oy, ox;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const unsigned idx) const {
+        int k, j, i, a, b;
+        flat_index3p2(idx, Mz, My, Mx, n1, n2, oz, oy, ox, k, j, i, a, b);
+        f(k, j, i, a, b);
+    }
+};
+
+template <class Functor>
+Flat2<Functor> make_flat2(const Functor& f, int My, int Mx, int oy, int ox){
+    return Flat2<Functor>{f,unsigned(My),unsigned(Mx),oy,ox};
+}
+
+template <class Functor>
+Flat3p1<Functor> make_flat3p1(const Functor& f, int Mz, int My, int Mx,
+                              int n1, int oz, int oy, int ox){
+    return Flat3p1<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),
+                            unsigned(n1),oz,oy,ox};
+}
+
+template <class Functor>
+Flat3p2<Functor> make_flat3p2(const Functor& f, int Mz, int My, int Mx,
+                              int n1, int n2, int oz, int oy, int ox){
+    return Flat3p2<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),
+                            unsigned(n1),unsigned(n2),oz,oy,ox};
+}
+
 
 //Element loop over all elements and their solution/flux points.
 //Lambda signature: (int k, int j, int i, int kk, int jj, int ii)
@@ -312,6 +503,67 @@ double sd_sum_active_cells(int Nz, int Ny, int Nx, int nz, int ny, int nx,
     return sum;
 }
 
+//Loops over an explicit [lo,hi) element box. The coarse-fine transfer
+//operators touch only the part of a block that a neighbour covers, so they
+//need a box rather than "all" or "interior".
+//Lambda signature: (int j, int i)
+template <class Functor>
+void for_box2(int y0, int y1, int x0, int x1,
+              const Functor& f, const char* label="for_box2"){
+    int My=y1-y0, Mx=x1-x0;
+    int64_t total = (int64_t)My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat2(f,My,Mx,y0,x0));
+}
+
+//Lambda signature: (int k, int j, int i)
+template <class Functor>
+void for_box3(int z0, int z1, int y0, int y1, int x0, int x1,
+              const Functor& f, const char* label="for_box3"){
+    int Mz=z1-z0, My=y1-y0, Mx=x1-x0;
+    int64_t total = (int64_t)Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3(f,Mz,My,Mx,z0,y0,x0));
+}
+
+//Lambda signature: (int k, int j, int i, int a)
+template <class Functor>
+void for_box3p1(int z0, int z1, int y0, int y1, int x0, int x1, int n1,
+                const Functor& f, const char* label="for_box3p1"){
+    int Mz=z1-z0, My=y1-y0, Mx=x1-x0;
+    int64_t total = (int64_t)Mz*My*Mx*n1;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3p1(f,Mz,My,Mx,n1,z0,y0,x0));
+}
+
+//Lambda signature: (int k, int j, int i, int a, int b)
+template <class Functor>
+void for_box3p2(int z0, int z1, int y0, int y1, int x0, int x1, int n1, int n2,
+                const Functor& f, const char* label="for_box3p2"){
+    int Mz=z1-z0, My=y1-y0, Mx=x1-x0;
+    int64_t total = (int64_t)Mz*My*Mx*n1*n2;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat3p2(f,Mz,My,Mx,n1,n2,z0,y0,x0));
+}
+
+//Element box with every solution/flux point of each element.
+//Lambda signature: (int k, int j, int i, int kk, int jj, int ii)
+template <class Functor>
+void sd_for_box_cells(int z0, int z1, int y0, int y1, int x0, int x1,
+                      int nz, int ny, int nx,
+                      const Functor& f, const char* label="sd_for_box_cells"){
+    int Mz=z1-z0, My=y1-y0, Mx=x1-x0;
+    int64_t total = (int64_t)Mz*My*Mx*nz*ny*nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat6(f,Mz,My,Mx,nz,ny,nx,z0,y0,x0));
+}
+
+
 //Cell loops for the FV representation.
 //Lambda signature: (int k, int j, int i)
 template <class Functor>
@@ -370,6 +622,127 @@ void fv_for_faces(int Nz, int Ny, int Nx,
     if(total <= 0) return;
     Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
         make_flat3(f,Mz,My,Mx,nGHz,nGHy,nGHx));
+}
+
+/////////////////////////////////////////////////////////////////////
+// Batched variants: one launch spanning nb meshblocks
+//
+// Every meshblock carries the same element count regardless of its
+// refinement level (only h and the coordinates differ), so a pack of
+// blocks is rectangular and a single flattened range covers all of them.
+// The lambda takes a leading block index b; per-block arrays are reached
+// through the pack's folded leading extent (b*n_ader + t_id).
+/////////////////////////////////////////////////////////////////////
+
+//Lambda signature: (int b, int k, int j, int i, int kk, int jj, int ii)
+template <class Functor>
+void sd_for_cells_b(int nb, int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                    const Functor& f, const char* label="sd_for_cells_b"){
+    int64_t total = (int64_t)nb*Nz*Ny*Nx*nz*ny*nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat7(f,Nz,Ny,Nx,nz,ny,nx,0,0,0));
+}
+
+template <class Functor>
+void sd_for_active_cells_b(int nb, int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                           const Functor& f, const char* label="sd_for_active_cells_b"){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx*nz*ny*nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat7(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx));
+}
+
+//Lambda signature: (int b, int k, int j, int i, int kk, int jj, int ii, double& reduce)
+template <class Functor>
+double sd_min_cells_b(int nb, int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                      const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx*nz*ny*nx;
+    double min_value=1;
+    if(total <= 0) return min_value;
+    Kokkos::parallel_reduce("sd_min_cells_b", flat_range(0,flat_total(total)),
+        make_flat7(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx),
+        Kokkos::Min<double>(min_value));
+    return min_value;
+}
+
+template <class Functor>
+double sd_max_cells_b(int nb, int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                      const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx*nz*ny*nx;
+    double max_value=0;
+    if(total <= 0) return max_value;
+    Kokkos::parallel_reduce("sd_max_cells_b", flat_range(0,flat_total(total)),
+        make_flat7(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx),
+        Kokkos::Max<double>(max_value));
+    return max_value;
+}
+
+template <class Functor>
+double sd_sum_active_cells_b(int nb, int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                             const Functor& f){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx*nz*ny*nx;
+    double sum=0;
+    if(total <= 0) return sum;
+    Kokkos::parallel_reduce("sd_sum_active_cells_b", flat_range(0,flat_total(total)),
+        make_flat7(f,Mz,My,Mx,nz,ny,nx,NGHz,NGHy,NGHx), sum);
+    return sum;
+}
+
+//Lambda signature: (int b, int k, int j, int i)
+template <class Functor>
+void fv_for_cells_b(int nb, int Nz, int Ny, int Nx,
+                    const Functor& f, const char* label="fv_for_cells_b"){
+    int64_t total = (int64_t)nb*Nz*Ny*Nx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat4(f,Nz,Ny,Nx,0,0,0));
+}
+
+template <class Functor>
+void fv_for_cells_ngh_b(int nb, int Nz, int Ny, int Nx,
+                        const Functor& f, const char* label="fv_for_cells_ngh_b"){
+    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat4(f,Mz,My,Mx,NGHz,NGHy,NGHx));
+}
+
+template <class Functor>
+void fv_for_cells_2ngh_b(int nb, int Nz, int Ny, int Nx,
+                         const Functor& f, const char* label="fv_for_cells_2ngh_b"){
+    int Mz=Nz-4*NGHz, My=Ny-4*NGHy, Mx=Nx-4*NGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat4(f,Mz,My,Mx,2*NGHz,2*NGHy,2*NGHx));
+}
+
+//Lambda signature: (int b, int k, int j, int i, double& reduce)
+template <class Functor>
+double fv_sum_cells_ngh2_b(int nb, int Nz, int Ny, int Nx, const Functor& f){
+    int Mz=Nz-2*nGHz, My=Ny-2*nGHy, Mx=Nx-2*nGHx;
+    int64_t total = (int64_t)nb*Mz*My*Mx;
+    double sum=0;
+    if(total <= 0) return sum;
+    Kokkos::parallel_reduce("fv_sum_cells_ngh2_b", flat_range(0,flat_total(total)),
+        make_flat4(f,Mz,My,Mx,nGHz,nGHy,nGHx), sum);
+    return sum;
+}
+
+template <class Functor>
+void fv_for_faces_b(int nb, int Nz, int Ny, int Nx,
+                    const Functor& f, const char* label="fv_for_faces_b"){
+    int Mz=Nz-2*nGHz+(nGHz>0), My=Ny-2*nGHy+(nGHy>0), Mx=Nx-2*nGHx+(nGHx>0);
+    int64_t total = (int64_t)nb*Mz*My*Mx;
+    if(total <= 0) return;
+    Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
+        make_flat4(f,Mz,My,Mx,nGHz,nGHy,nGHx));
 }
 
 #endif

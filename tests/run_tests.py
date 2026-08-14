@@ -13,6 +13,8 @@ plus command-line overrides. Checks per configuration:
                    replacement is exactly conservative for periodic BCs)
   hydro_fv_blast : 2d blast with a real shock; detector fires, fallback
                    active, mass still conserved to round-off
+  hydro_muscl_2d : job/scheme=muscl (blend pinned to 1 on every face) on a
+                   smooth periodic wave; currently a known failure (~3e-06)
   *_rk3          : same checks with the SSP-RK3 integrator (per-stage
                    fallback correction; temporal error below the spatial
                    floor at p=3, so the ADER L1 limit applies unchanged)
@@ -24,6 +26,7 @@ plus command-line overrides. Checks per configuration:
                    chaotic amplification, so a tight tolerance is portable)
   hydro_smr_2d   : static centre patch; the mesh must stay mixed-level
   hydro_amr_2d   : dynamic AMR on a pulse; the mesh must become mixed-level
+  hydro_amr_2level_2d : same with two refinement levels
   hydro_implosion_2d : reflective-wall implosion, mass conserved
   mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
   mhd_*_smr_2d   : true-2D MHD static refinement (mixed levels + divB)
@@ -114,6 +117,36 @@ CONFIGS = {
         "checks": ["mass_strict"],
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
+    },
+    "hydro_muscl_2d": {
+        # job/scheme=muscl pins the fallback blend to 1 on every face, which is
+        # a different path from the hydro_fv_* tests: those run SD and only
+        # reach a MUSCL flux where the detector fires. Nothing exercised
+        # theta=1 everywhere until the figure-21 runs, and it does not
+        # conserve: a smooth periodic sine wave drifts ~3e-06 on one block.
+        # KNOWN FAIL.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/scheme=muscl", "mesh/p=0",
+                      "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
+                      "meshblock/nx1=32", "meshblock/nx2=32", "meshblock/nx3=1",
+                      "output/dt=0.05"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N32p0_1_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_muscl_2d_mb": {
+        # same scheme across meshblock boundaries; the per-face flux must not
+        # depend on which block computes it. KNOWN FAIL.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/scheme=muscl", "mesh/p=0",
+                      "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
+                      "meshblock/nx1=8", "meshblock/nx2=8", "meshblock/nx3=1",
+                      "output/dt=0.05"],
+        "ndim": 2,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N32p0_1_0.dat",
+        "t_end": 0.1,
     },
     "hydro_sd_3d_rk3": {
         "input": "inputs/sine_wave.athinput",
@@ -237,6 +270,21 @@ CONFIGS = {
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.1,
     },
+    "hydro_amr_2level_2d": {
+        # Two refinement levels, which is what the figure-21 Kelvin-Helmholtz
+        # runs use. This drifted ~1.4e-10 while the FV coarse-fine ghost fill
+        # ignored the sub-face index: the two sides of a level jump then read
+        # each other at the wrong transverse offset, so they blended the
+        # fallback flux differently and the interface correction could not
+        # balance it. Round-off since amr_boundary.cpp got the transverse
+        # mapping right.
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["amr/max_level=2"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N64p3_1_0.dat",
+        "t_end": 0.1,
+    },
     "mhd_orszag_tang_2d": {
         # quasi-2D OT vortex with the MOOD cascade active: shocks form by
         # t=0.15, the |B| NAD + face/edge cascade must keep the run stable,
@@ -338,16 +386,19 @@ CONFIGS = {
         "t_end": 0.01,
     },
     "mhd_orszag_tang_amr_2d": {
-        # Dynamic AMR on OT: |B| Löhner tags peak blocks; 2:1 balance grows a
-        # compact fine patch (mixed levels). Face-B prolongate + div-free
-        # projection keeps divB at round-off. Very short tlim without fallback
-        # (pure SD CT + regrid can diverge once shocks form).
+        # Dynamic AMR on OT. At 4x4 base blocks the B^2 Löhner scores agree to
+        # 0.2% across the mesh (OT is symmetric at t=0), so no threshold can
+        # separate them; refine_frac=1 tags the peak block instead and 2:1
+        # balance grows a compact fine patch, giving the mixed levels this test
+        # is about. Face-B prolongate + div-free projection keeps divB at
+        # round-off. Very short tlim without the fallback, since pure SD CT plus
+        # regrid can diverge once shocks form.
         "input": "inputs/orszag_tang.athinput",
         "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16",
                       "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
                       "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
                       "amr/max_level=1", "amr/adapt_interval=2",
-                      "amr/criterion=bfield"],
+                      "amr/criterion=bfield", "amr/refine_frac=1.0"],
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict", "divb"],
         "field": "W_cv_N32p3_1_0.dat",

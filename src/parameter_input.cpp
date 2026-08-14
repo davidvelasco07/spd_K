@@ -91,11 +91,23 @@ const std::string &ParameterInput::Fetch(const std::string &block, const std::st
 }
 
 int ParameterInput::GetInteger(const std::string &block, const std::string &name) const {
-    return std::stoi(Fetch(block, name));
+    const std::string &v = Fetch(block, name);
+    try {
+        return std::stoi(v);
+    } catch (const std::exception &e) {
+        throw std::runtime_error("ParameterInput: '" + block + "/" + name
+                                 + "' is not an integer: '" + v + "'");
+    }
 }
 
 double ParameterInput::GetReal(const std::string &block, const std::string &name) const {
-    return std::stod(Fetch(block, name));
+    const std::string &v = Fetch(block, name);
+    try {
+        return std::stod(v);
+    } catch (const std::exception &e) {
+        throw std::runtime_error("ParameterInput: '" + block + "/" + name
+                                 + "' is not a real number: '" + v + "'");
+    }
 }
 
 bool ParameterInput::GetBoolean(const std::string &block, const std::string &name) const {
