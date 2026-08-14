@@ -944,3 +944,40 @@ void gather_fp_finer(SD_Solution U, IntVector recv, IntVector send, IntVector su
         }
     }, "gather_fp_finer");
 }
+
+//======================================================================
+// FV ghost fill, same transaction tables as the flux-point gathers above.
+//
+// The FV arrays are (nvar, Nz, Ny, Nx) with no ADER or sub-point axis, and
+// the halo is a slab `ngh` cells deep rather than a single face layer, so
+// the kernel ranges over (transaction, slab cell) and the block folds into
+// the leading axis as b*nvar -- the FV pack's counterpart of the SD pack's
+// b*nader.
+//
+// Same-level is a straight copy: my ghost slab is the neighbour's last
+// (side 0) or first (side 1) `ngh` active cells. Receiver-driven, so every
+// ghost cell is written exactly once.
+//======================================================================
+void gather_fv_same(FV_Solution U, IntVector recv, IntVector send,
+                    int ntr, int dim, int side, int ngh){
+    if(ntr <= 0) return;
+    const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int nvar = U.n_var;
+    //Collapse the normal axis to the slab depth: one thread per ghost cell.
+    const int Nx = (dim==_x_ ? ngh : U.Nx);
+    const int Ny = (dim==_y_ ? ngh : U.Ny);
+    const int Nz = (dim==_z_ ? ngh : U.Nz);
+    fv_for_cells_b(ntr,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int rb = recv(b)*nvar;
+        const int sb = send(b)*nvar;
+        const int l = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        const int sl = (side==0 ? N-2*ngh+l : ngh+l);   //source: active cell
+        const int dl = (side==0 ? l         : N-ngh+l); //dest: my ghost cell
+        int Nsrc[3], Ndst[3];
+        fv_indices(Nsrc,k,j,i,sl,dim);
+        fv_indices(Ndst,k,j,i,dl,dim);
+        for(int var=0; var<nvar; var++)
+            U.Vector(rb+var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) =
+            U.Vector(sb+var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
+    }, "gather_fv_same");
+}
