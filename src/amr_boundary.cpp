@@ -1053,6 +1053,89 @@ void gather_fp_finer(SD_Solution U, IntVector recv, IntVector send, IntVector su
     }, "gather_fp_finer");
 }
 
+//NOT CORRECT YET -- not called. Wiring this in place of
+//make_scratch_like + restrict_face_overlap_sp + set_interface_flux made dt
+//collapse as soon as the first regrid created a coarse-fine face, so the
+//restricted value or one of the two destination slots is wrong. The transverse
+//mapping is copied from gather_fp_finer and restrict_face_overlap_sp, which
+//agree with each other, so suspect the normal-direction source/destination
+//pinning (se/sp vs d1/p1 and d2/p2) and the Px/Py/Pz sub-point extents along
+//the collapsed normal axis. Verify against the per-block path with
+//SPD_EXCHANGE_CHECK before wiring it again.
+//
+//Conservative flux correction at a coarse-fine face, off the fine->coarse
+//table: the coarse block's interface flux becomes the overlap-weighted average
+//of the fine fluxes covering it, or the coarse cell fails to lose exactly what
+//the fine cells gain.
+//
+//This replaces make_scratch_like + restrict_face_overlap_sp +
+//set_interface_flux per (coarse block, side, sub). Folding the three into one
+//kernel matters for more than the launch count: the scratch buffer was a fresh
+//allocation inside the correction loop, and an allocation fences the device.
+//
+//The Riemann solver stores each common flux twice, on the ghost side of the
+//interface and on the interior side, and the update reads the interior copy --
+//so both slots are written, exactly as set_interface_flux did.
+void correct_cf_flux_b(SD_Solution U, IntVector recv, IntVector send, IntVector subv,
+                       int ntr, int dim, int side, Matrix R){
+    if(ntr <= 0) return;
+    const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    const int nader=U.n_ader, nvar=U.n_var;
+    const int nx=U.nx, ny=U.ny, nz=U.nz;
+    const int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    const bool tx = actx && dim!=_x_, ty = acty && dim!=_y_, tz = actz && dim!=_z_;
+    const int NBx=U.Nx-2*NGHx, NBy=U.Ny-2*NGHy, NBz=U.Nz-2*NGHz;
+    //Source: the fine neighbour's facing interface. Destinations: my own two
+    //copies of that interface flux.
+    const int se = (side==0 ? N-2 : 1  ), sp = (side==0 ? n-1 : 0  );
+    const int d1 = (side==0 ? 0   : N-1), p1 = (side==0 ? n-1 : 0  );
+    const int d2 = (side==0 ? 1   : N-2), p2 = (side==0 ? 0   : n-1);
+    //Each transaction covers the half of the coarse face its neighbour spans.
+    const int Hx = tx ? NBx/2 : 1, Hy = ty ? NBy/2 : 1, Hz = tz ? NBz/2 : 1;
+    const int Px = tx ? nx : (dim==_x_ ? 1 : nx);
+    const int Py = ty ? ny : (dim==_y_ ? 1 : ny);
+    const int Pz = tz ? nz : (dim==_z_ ? 1 : nz);
+    GHOST_LOCALS;
+    sd_for_cells_b(ntr,Hz,Hy,Hx,Pz,Py,Px,
+        KOKKOS_LAMBDA(int b,int kq,int jq,int iq,int kk,int jj,int ii){
+        int cx,cy,cz; fv_sub_bits_d(subv(b),dim,actx,acty,actz,cx,cy,cz);
+        const int i = tx ? ghx + cx*(NBx/2) + iq : (dim==_x_ ? 0 : ghx+iq);
+        const int j = ty ? ghy + cy*(NBy/2) + jq : (dim==_y_ ? 0 : ghy+jq);
+        const int k = tz ? ghz + cz*(NBz/2) + kq : (dim==_z_ ? 0 : ghz+kq);
+        //Transversally each coarse element gathers the two fine elements that
+        //overlap it, from the neighbour covering that half.
+        const int fx = tx ? ghx+2*(i-ghx)-cx*NBx : i;
+        const int fy = ty ? ghy+2*(j-ghy)-cy*NBy : j;
+        const int fz = tz ? ghz+2*(k-ghz)-cz*NBz : k;
+        const int rb = recv(b)*nader, sb = send(b)*nader;
+        int Nid[3], nid[3];
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++){
+            double u=0;
+            for(int nn=0; nn<(tz ? 2*nz:1); nn++)
+            for(int mm=0; mm<(ty ? 2*ny:1); mm++)
+            for(int ll=0; ll<(tx ? 2*nx:1); ll++){
+                amr_indices(Nid,nid, tz?fz+nn/nz:k, ty?fy+mm/ny:j, tx?fx+ll/nx:i,
+                                     tz?nn%nz:kk,   ty?mm%ny:jj,   tx?ll%nx:ii,
+                                     se, sp, dim);
+                double s = U.Vector(sb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                                nid[_z_],nid[_y_],nid[_x_]);
+                if(tx) s *= R(ii,ll);
+                if(ty) s *= R(jj,mm);
+                if(tz) s *= R(kk,nn);
+                u += s;
+            }
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,d1,p1,dim);
+            U.Vector(rb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                 nid[_z_],nid[_y_],nid[_x_]) = u;
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,d2,p2,dim);
+            U.Vector(rb+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                 nid[_z_],nid[_y_],nid[_x_]) = u;
+        }
+    }, "correct_cf_flux_b");
+}
+
 //======================================================================
 // FV ghost fill, same transaction tables as the flux-point gathers above.
 //

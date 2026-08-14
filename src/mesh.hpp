@@ -683,6 +683,28 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //SD/fp conservative flux correction over the fine->coarse table.
+    void correct_cf_flux_batched(int dim){
+        if(forest.max_level()==0 || !cfg.active[dim]) return;
+        SD_Solution& F = dim==_x_ ? pv.F_ader_fp_x
+                       : dim==_y_ ? pv.F_ader_fp_y : pv.F_ader_fp_z;
+        //restrict_mat_for picks SP or FP weights from the transverse point
+        //count; blocks in a pack share extents, so one choice serves all.
+        const int nt = (dim==_x_ ? F.ny : F.nx);
+        Matrix R = (nt == (int)amr_RF_fp.extent(0)) ? amr_RF_fp : amr_RF;
+        for(int side=0; side<2; side++)
+            correct_cf_flux_b(F, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                              xtfi_[dim][side].sub, xtfi_[dim][side].n,
+                              dim, side, R);
+    }
+
+    //NOT yet routed to correct_cf_flux_batched: that kernel is wrong (see its
+    //comment in amr_boundary.cpp). Wiring it made dt collapse as soon as the
+    //first regrid produced a coarse-fine face.
+    void correct_cf_flux_dim(int dim){
+        correct_coarse_fine_flux(forest, blocks, dim);
+    }
+
     //Whichever implementation is selected, for one direction.
     void correct_cf_fv_flux_dim(int dim){
         if(new_xchg() && !is_mhd) correct_cf_fv_flux_batched(dim);
@@ -865,7 +887,7 @@ struct Mesh : public PhysicsModule {
         { Region r("Riemann_Solver"); Riemann_Solver_batched(); }
         if(forest.max_level()>0){
             for(int dim=0; dim<3; dim++)
-                if(cfg.active[dim]) correct_coarse_fine_flux(forest, blocks, dim);
+                if(cfg.active[dim]) correct_cf_flux_dim(dim);
         }
         //Viscosity is opt-in at runtime (athenak-style): hydro/nu>0 in the
         //input file sets Hydro_ader::viscosity. The second flux-point exchange
@@ -1158,7 +1180,7 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver();
         if(forest.max_level()>0){
             for(int dim=0; dim<3; dim++)
-                if(cfg.active[dim]) correct_coarse_fine_flux(forest, blocks, dim);
+                if(cfg.active[dim]) correct_cf_flux_dim(dim);
         }
         for(int b=0;b<nblocks;b++) blocks[b].Compute_E();
         Exchange_E_mhd();

@@ -110,7 +110,11 @@ extern void gather_fv_coarser(FV_Solution, IntVector, IntVector, IntVector,
                               int, int, int, int);
 extern void gather_fv_finer(FV_Solution, IntVector, IntVector, IntVector,
                             int, int, int, int, bool);
-//Conservative flux correction off the same fine->coarse table.
+//Conservative flux correction off the same fine->coarse table. The SD/fp one
+//folds restrict + set_interface into a single kernel, so the per-face scratch
+//allocation (which fences the device) disappears too.
+extern void correct_cf_flux_b(SD_Solution, IntVector, IntVector, IntVector,
+                              int, int, int, Matrix);
 extern void correct_cf_fv_flux_b(FV_Solution, IntVector, IntVector, IntVector,
                                  int, int, int, int, int,
                                  int, int, int, int, int, int);
