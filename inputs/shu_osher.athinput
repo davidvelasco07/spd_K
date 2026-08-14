@@ -15,8 +15,7 @@ x1_bc = gradfree
 
 <time>
 tlim = 0.47
-cfl  = 0.8
-
+cfl  = 0.4
 <output>
 dt   = 0.235
 

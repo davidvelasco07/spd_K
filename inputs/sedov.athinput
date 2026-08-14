@@ -12,8 +12,7 @@ nx3  = 1
 
 <time>
 tlim = 0.05
-cfl  = 0.8
-
+cfl  = 0.4
 <output>
 dt   = 0.025
 

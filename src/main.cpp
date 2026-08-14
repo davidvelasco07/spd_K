@@ -146,7 +146,11 @@ int main(int argc, char** argv){
         }
         set_runtime_dimensionality(ax,ay,az);
 
-        cfg.cfl      = pin.GetOrAddReal("time","cfl",0.8);
+        //SD at p=3 is unstable at cfl=0.8: dt is exactly constant until
+        //t~0.1 and then falls six orders of magnitude. Measured stable at
+        //0.4 and below (see the dt-collapse guard in driver.hpp). Higher p
+        //has a tighter limit still and has not been measured.
+        cfg.cfl      = pin.GetOrAddReal("time","cfl",0.4);
         cfg.nlim     = pin.GetOrAddInteger("time","nlim",-1);
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
         //Constant gravitational acceleration (source term); default 0 leaves
