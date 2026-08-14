@@ -36,7 +36,9 @@ void NAD(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double toleranc
     int Nx = U.Nx;
     int Ny = U.Ny;
     int Nz = U.Nz;
-    int nvar = U.n_var-1;
+    //Every component of a solution array is a physical variable now, and the
+    //mask decides which of them are limited.
+    int nvar = U.n_var;
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -108,7 +110,7 @@ void smooth_extrema(FV_Solution U, FV_Solution alpha, Vector centers, Vector fac
     int Nx = U.Nx;
     int Ny = U.Ny;
     int Nz = U.Nz;
-    int nvar = U.n_var-1;
+    int nvar = U.n_var;
     fv_for_cells_2ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         for(int var=0; var<nvar; var++){
         if(!((limit_mask>>var)&1)) continue;
@@ -148,12 +150,17 @@ void smooth_extrema(FV_Solution U, FV_Solution alpha, Vector centers, Vector fac
 }
 
 //use_sed=false skips the smooth-extrema relaxation (flags pass through)
-//and only builds the aggregate slot
-void relax_NAD(FV_Solution troubles, FV_Solution alpha_x, FV_Solution alpha_y, FV_Solution alpha_z, int limit_mask, bool use_sed){
+//and only pools the per-variable flags into the cascade level.
+//
+//`cascade` is the per-cell fallback level: 0 where the high-order candidate
+//was accepted, 1 where any limited variable was flagged. It is the only part
+//of the detection that anything downstream reads, and the only part that
+//needs a halo.
+void relax_NAD(FV_Solution troubles, FV_Solution cascade, FV_Solution alpha_x, FV_Solution alpha_y, FV_Solution alpha_z, int limit_mask, bool use_sed){
     int Nx = troubles.Nx;
     int Ny = troubles.Ny;
     int Nz = troubles.Nz;
-    int nvar = troubles.n_var-1;
+    int nvar = troubles.n_var;
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -178,7 +185,7 @@ void relax_NAD(FV_Solution troubles, FV_Solution alpha_x, FV_Solution alpha_y, F
         for(int var=0; var<nvar; var++)
             if((limit_mask>>var)&1)
                 trouble = max(trouble,troubles.Vector(var,k,j,i));
-        troubles.Vector(nvar,k,j,i) = trouble;
+        cascade.Vector(0,k,j,i) = trouble;
     });
 }
 
@@ -188,11 +195,10 @@ void relax_NAD(FV_Solution troubles, FV_Solution alpha_x, FV_Solution alpha_y, F
 //pass adds a 0.25 ring around every positive theta. The blended flux at a
 //face is then theta_face*F_MUSCL + (1-theta_face)*F_SD with
 //theta_face = max of the two adjacent cells (see fallback compute_fluxes).
-void apply_blending(FV_Solution troubles, FV_Solution theta){
-    int Nx = troubles.Nx;
-    int Ny = troubles.Ny;
-    int Nz = troubles.Nz;
-    int nvar = troubles.n_var-1; //aggregate slot
+void apply_blending(FV_Solution cascade, FV_Solution theta){
+    int Nx = cascade.Nx;
+    int Ny = cascade.Ny;
+    int Nz = cascade.Nz;
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -203,20 +209,19 @@ void apply_blending(FV_Solution troubles, FV_Solution theta){
         for(int dj=-(int)ay; dj<=(int)ay; dj++)
         for(int di=-(int)ax; di<=(int)ax; di++){
             int n0 = (di!=0) + (dj!=0) + (dk!=0);
-            th = max(th, w[n0]*troubles.Vector(nvar,k+dk,j+dj,i+di));
+            th = max(th, w[n0]*cascade.Vector(0,k+dk,j+dj,i+di));
         }
         theta.Vector(0,k,j,i) = th;
     });
 }
 
-//theta = raw trouble aggregate (used when blending is disabled)
-void theta_from_troubles(FV_Solution troubles, FV_Solution theta){
-    int Nx = troubles.Nx;
-    int Ny = troubles.Ny;
-    int Nz = troubles.Nz;
-    int nvar = troubles.n_var-1;
+//theta = raw cascade level (used when blending is disabled)
+void theta_from_cascade(FV_Solution cascade, FV_Solution theta){
+    int Nx = cascade.Nx;
+    int Ny = cascade.Ny;
+    int Nz = cascade.Nz;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        theta.Vector(0,k,j,i) = troubles.Vector(nvar,k,j,i);
+        theta.Vector(0,k,j,i) = cascade.Vector(0,k,j,i);
     });
 }
 
@@ -241,20 +246,19 @@ void blending_ring(FV_Solution theta_in, FV_Solution theta_out){
     });
 }
 
-void PAD_criteria(FV_Solution W, FV_Solution troubles){
+void PAD_criteria(FV_Solution W, FV_Solution cascade){
     int Nx = W.Nx;
     int Ny = W.Ny;
     int Nz = W.Nz;
-    int nvar = W.n_var-1;
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         double density;
         double pressure;
         density  = W.Vector(_d_,k,j,i);
         pressure = W.Vector(_p_,k,j,i);
         if(density<rho_min || density>rho_max)
-            troubles.Vector(nvar,k,j,i) = 1;
+            cascade.Vector(0,k,j,i) = 1;
         if(pressure<p_min || pressure>p_max)
-            troubles.Vector(nvar,k,j,i) = 1;
+            cascade.Vector(0,k,j,i) = 1;
     });
 }
 
@@ -262,6 +266,7 @@ void detect_troubles(
     FV_Solution W_new,
     FV_Solution W_old,
     FV_Solution troubles,
+    FV_Solution cascade,
     FV_Solution alpha_x,
     FV_Solution alpha_y,
     FV_Solution alpha_z,
@@ -284,7 +289,7 @@ void detect_troubles(
         if(cfg.active[_z_])
             smooth_extrema(W_new, alpha_z, Z_dim.fv_centers, Z_dim.fv_faces, _z_, limit_mask);
     }
-    relax_NAD(troubles, alpha_x, alpha_y, alpha_z, limit_mask, use_sed);
+    relax_NAD(troubles, cascade, alpha_x, alpha_y, alpha_z, limit_mask, use_sed);
     if(PAD)
-        PAD_criteria(W_new, troubles);
+        PAD_criteria(W_new, cascade);
 }

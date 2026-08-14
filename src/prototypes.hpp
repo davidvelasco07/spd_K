@@ -136,14 +136,17 @@ extern void fv_update_solution_b(
     FV_Solution, Matrix, FV_Solution, Matrix, FV_Solution, Matrix,
     Vector, int, double, bool);
 
-//Trouble detection
+//Trouble detection. detect_troubles takes (W_new, W_old, troubles, cascade,
+//alpha_x, alpha_y, alpha_z, ...): the per-variable flags stay block-local in
+//`troubles`, and only the pooled per-cell level in `cascade` is read
+//downstream, so only `cascade` needs a halo.
 extern void detect_troubles(
-    FV_Solution, FV_Solution, FV_Solution,
+    FV_Solution, FV_Solution, FV_Solution, FV_Solution,
     FV_Solution, FV_Solution, FV_Solution,
     dimension, dimension, dimension, bool, int);
 extern void apply_blending(FV_Solution, FV_Solution);
 extern void blending_ring(FV_Solution, FV_Solution);
-extern void theta_from_troubles(FV_Solution, FV_Solution);
+extern void theta_from_cascade(FV_Solution, FV_Solution);
 
 void fallback_fluxes(
     FV_Solution, FV_Solution,

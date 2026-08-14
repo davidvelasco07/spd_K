@@ -692,6 +692,7 @@ struct Mesh : public PhysicsModule {
         compute_primitives(pv.U_new, pv.W_new);
         for(int b=0;b<nblocks;b++)
             detect_troubles(blocks[b].W_new,blocks[b].W_old,blocks[b].troubles,
+                            blocks[b].cascade,
                             blocks[b].alpha_x,blocks[b].alpha_y,blocks[b].alpha_z,
                             Xd[b],Yd[b],Zd[b],1,(1<<_d_)|(1<<_p_));
     }
@@ -735,8 +736,8 @@ struct Mesh : public PhysicsModule {
             { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
             { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
             { Region r("FV_detect"); FV_detect_batched(); }
-            if(!cfg.muscl_only){ Region r("Exchange_troubles");
-                                 Exchange_fv_field(&Block::troubles); }
+            if(!cfg.muscl_only){ Region r("Exchange_cascade");
+                                 Exchange_fv_field(&Block::cascade); }
             { Region r("FV_theta"); FV_theta_batched(); }
             if(!cfg.muscl_only){ Region r("Exchange_theta");
                                  Exchange_fv_field(&Block::theta); }

@@ -58,7 +58,8 @@ struct Hydro_ader : public PhysicsModule{
     FV_Solution W_new;
     FV_Solution U_old;
     FV_Solution W_old;
-    FV_Solution troubles;
+    FV_Solution troubles;  //per-variable trouble flags, block-local
+    FV_Solution cascade;   //per-cell fallback level, the only flag data exchanged
     FV_Solution theta;     //fractional blend factor per cell
     FV_Solution theta_tmp;
     FV_Solution F_x;
@@ -220,6 +221,7 @@ struct Hydro_ader : public PhysicsModule{
             alloc(U_old,"U_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(W_old,"W_old",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(troubles,"troubles",nvar,Z_dim,Y_dim,X_dim,0,0,0);
+            alloc(cascade,"cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(theta,"theta",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(theta_tmp,"theta_tmp",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(F_x,"F_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
@@ -535,8 +537,10 @@ struct Hydro_ader : public PhysicsModule{
             f<<std::setprecision(17)<<t<<" "
              <<fv_mass(W_cv,Xdim_,Ydim_,Zdim_)<<endl;
         }
-        if(cfg.fallback)
+        if(cfg.fallback){
             Write(troubles,n_output);
+            Write(cascade,n_output);
+        }
         Write(F_ader_fp_x,n_output);
         Write(W_cv,n_output++);
     }
@@ -648,7 +652,7 @@ struct Hydro_ader : public PhysicsModule{
         //Following the reference implementation, only density and
         //pressure enter the NAD/SED checks (uniform or zero fields,
         //like transverse velocities, have no meaningful relative band)
-        detect_troubles(W_new,W_old,troubles,
+        detect_troubles(W_new,W_old,troubles,cascade,
             alpha_x,alpha_y,alpha_z,
             X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
     }
@@ -663,11 +667,11 @@ struct Hydro_ader : public PhysicsModule{
             return;
         }
         if(cfg.blending){
-            apply_blending(troubles,theta_tmp);
+            apply_blending(cascade,theta_tmp);
             blending_ring(theta_tmp,theta);
         }
         else
-            theta_from_troubles(troubles,theta);
+            theta_from_cascade(cascade,theta);
     }
 
     //Blend MUSCL fluxes into the troubled faces and redo the update.
@@ -713,10 +717,11 @@ struct Hydro_ader : public PhysicsModule{
             apply_fv_boundaries(comm,U_old);
             apply_fv_boundaries(comm,U_new);
             FV_detect(X_dim,Y_dim,Z_dim);
-            //Ghost flags must be periodic images so that the blending
+            //Ghost levels must be periodic images so that the blending
             //stencils near the domain boundary see the same data as their
-            //periodic partners
-            if(!cfg.muscl_only) apply_fv_boundaries(comm,troubles);
+            //periodic partners. Only the pooled level is read downstream, so
+            //this is a one-component halo rather than the whole flag array.
+            if(!cfg.muscl_only) apply_fv_boundaries(comm,cascade);
             FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical

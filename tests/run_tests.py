@@ -60,6 +60,10 @@ GOLDEN_DIR = os.path.join(ROOT, "tests", "goldens")
 N, P = 8, 3
 n = P + 1
 
+# Components per hydro solution array: rho, vx, vy, vz, e (NVAR in define.hpp).
+# Configurations with a different layout (induction) set "nvar" themselves.
+NVAR = 5
+
 CONFIGS = {
     "hydro_sd_3d": {
         "input": "inputs/sine_wave.athinput",
@@ -431,7 +435,7 @@ def n_from_field(field):
     return int(m.group(1)) if m else N
 
 
-def shape_for(n_cells, ndim, nvar=6):
+def shape_for(n_cells, ndim, nvar=NVAR):
     """Element/point shape of the SD output arrays for a given ndim and N."""
     Ne = lambda active, nc: nc + 2 * NGH if active else 1
     np_ = lambda active: n if active else 1
@@ -443,7 +447,7 @@ def shape_for(n_cells, ndim, nvar=6):
             np_(a[2]), np_(a[1]), np_(a[0]))
 
 
-def shape(ndim, nvar=6):
+def shape(ndim, nvar=NVAR):
     return shape_for(N, ndim, nvar)
 
 
@@ -626,7 +630,7 @@ def check_golden(outdir, cfg, regen, active_only=False):
         return False, f"golden size mismatch {a.size} vs {b.size}"
     if active_only:
         nc = n_from_field(cfg["field"])
-        nvar = cfg.get("nvar", 6)
+        nvar = cfg.get("nvar", NVAR)
         shp = shape_for(nc, cfg["ndim"], nvar)
         sl = tuple(slice(NGH, -NGH) if s > 1 else slice(None) for s in shp[2:5])
         s = (slice(None),) * 2 + sl

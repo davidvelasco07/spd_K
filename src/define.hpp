@@ -33,10 +33,16 @@
 
 #define DIM (X+Y+Z)
 
-//rho, vx, vy, vz, e + one bookkeeping slot (FV trouble flag aggregate).
-//All velocity components are carried regardless of the runtime
-//dimensionality, so the variable indices below are fixed.
-#define NVAR (2+DIM+1)
+//rho, vx, vy, vz, e. All velocity components are carried regardless of the
+//runtime dimensionality, so the variable indices below are fixed.
+//
+//The FV trouble-flag aggregate used to ride along here as a sixth slot, which
+//put a non-physics component in every SD, ADER, flux and boundary array: a
+//sixth of all that traffic carried no physics, and because the SD path never
+//writes it, on GPU it held NaN. It now lives in its own per-cell array
+//(`cascade`), which is also the shape the MHD module's MOOD cascade index
+//already had.
+#define NVAR (2+DIM)
 
 #define _x_ 0
 #define _y_ 1
