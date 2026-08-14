@@ -133,6 +133,38 @@ void apply_domain_bc_fp(SD_Solution U, int dim, int side){
     mirror_face_to_ghost(U, dim, side);
 }
 
+//FV counterpart: fill a block's ghost slab at a physical domain boundary.
+//The gathers only ever write ghosts that have a neighbour, so without this
+//the ghost slab of a boundary block keeps whatever was last in it.
+//
+//Gradfree only, matching apply_domain_bc_fp. Reflective is NOT handled here
+//and must not be: the mesh path has no reflective support anywhere (the
+//uniform neighbour tables turn it into a periodic wrap), so a silent mirror
+//here would paper over half of a wrong answer. main.cpp rejects a
+//multiblock run with any other boundary type.
+//
+//Semantics match the single-block path in boundary.cpp: ghost cell l takes
+//the interior cell nGH+l on the low side, N-2*nGH+l on the high side.
+void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh){
+    if(cfg.bc[dim] != _gradfree_) return;
+    const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int nvar = U.n_var;
+    const int Nx = (dim==_x_ ? ngh : U.Nx);
+    const int Ny = (dim==_y_ ? ngh : U.Ny);
+    const int Nz = (dim==_z_ ? ngh : U.Nz);
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
+        const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
+        const int sl = (side==0 ? ngh+l : N-2*ngh+l);  //nearest interior cell
+        const int dl = (side==0 ? l     : N-ngh+l);    //my ghost cell
+        int Nsrc[3], Ndst[3];
+        fv_indices(Nsrc,k,j,i,sl,dim);
+        fv_indices(Ndst,k,j,i,dl,dim);
+        for(int var=0; var<nvar; var++)
+            U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) =
+            U.Vector(var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
+    }, "apply_domain_bc_fv");
+}
+
 //Overwrite the shared interface flux on a block's boundary face. The Riemann
 //solver stores each common flux twice -- once on the ghost side of the
 //interface and once on the interior side -- and the update reads the interior
@@ -696,6 +728,9 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
             if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
             fv_restrict_finer(U, f0, f1, f2, f3, nf, dim, side);
         }
+        //Physical boundaries, as gather_all_fp does for the flux points.
+        for(int ib : g.bc_ib)
+            apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim]);
     }
 }
 
