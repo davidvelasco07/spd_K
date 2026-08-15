@@ -477,6 +477,64 @@ void restrict_face_fv_sub(FV_Solution C, FV_Solution F, int dim,
     }, "restrict_face_fv_sub");
 }
 
+//One same-level interface, projected onto its shared average. The two copies
+//live at my_face of U and nb_face of N; both are read before either is written,
+//so passing the same block twice (a periodic wrap onto itself) is safe.
+static void symmetrize_face_fv_pair(FV_Solution U, FV_Solution N, int dim,
+                                    int my_face, int nb_face,
+                                    int Ncx, int Ncy, int Ncz){
+    const bool tx = cfg.active[_x_] && dim!=_x_;
+    const bool ty = cfg.active[_y_] && dim!=_y_;
+    const bool tz = cfg.active[_z_] && dim!=_z_;
+    const int nvar = U.n_var;
+    GHOST_LOCALS;
+    //Transverse extent is the active cells -- the ones whose divergence reads
+    //this face. The normal axis is collapsed to one; fv_indices puts each
+    //side's own face index back in.
+    const int x0 = tx ? sghx : 0, x1 = tx ? sghx+Ncx : 1;
+    const int y0 = ty ? sghy : 0, y1 = ty ? sghy+Ncy : 1;
+    const int z0 = tz ? sghz : 0, z1 = tz ? sghz+Ncz : 1;
+    FV_Vector u = U.Vector, n = N.Vector;
+    for_box3(z0,z1,y0,y1,x0,x1, KOKKOS_LAMBDA(int k, int j, int i){
+        int Nm[3], Nn[3];
+        fv_indices(Nm,k,j,i,my_face,dim);
+        fv_indices(Nn,k,j,i,nb_face,dim);
+        for(int var=0; var<nvar; var++){
+            const double avg = 0.5*(u(var,Nm[_z_],Nm[_y_],Nm[_x_])
+                                  + n(var,Nn[_z_],Nn[_y_],Nn[_x_]));
+            u(var,Nm[_z_],Nm[_y_],Nm[_x_]) = avg;
+            n(var,Nn[_z_],Nn[_y_],Nn[_x_]) = avg;
+        }
+    }, "symmetrize_face_fv_pair");
+}
+
+//A same-level block interface is stored twice: as the high face of the lower
+//block and as the low face of the upper one. The two copies agree only while
+//both sides pick the same flux, and the fallback blend (theta varies across an
+//interface) and the MOOD cascade are per-cell decisions -- so the face can end
+//up double-valued, and whatever the copies disagree by is exactly what leaks
+//between the two blocks. Project each pair onto its average, which is the
+//unique flux both sides then see. This is spd's symmetrize_same_level_fv_flux.
+template<typename Block>
+void symmetrize_same_level_fv_flux(BlockForest& forest, std::vector<Block>& blocks, int dim){
+    if(!cfg.active[dim]) return;
+    GHOST_LOCALS;
+    //Every same-level interface appears exactly once as some block's LOW face
+    //(side 0) with a SAME neighbour -- periodic wraps included -- so one pass
+    //over that group covers each face once and needs no seen-set.
+    const FaceGroups& g = forest.face_groups[dim][0];
+    for(size_t q=0; q<g.same_ib.size(); q++){
+        const int ib = g.same_ib[q], jb = g.same_jb[q];
+        SD_Solution S = blocks[ib].W_cv;
+        const int Ncx=(S.Nx-2*NGHx)*S.nx, Ncy=(S.Ny-2*NGHy)*S.ny, Ncz=(S.Nz-2*NGHz)*S.nz;
+        const int lo = (dim==_x_?sghx:dim==_y_?sghy:sghz);
+        const int hi = lo + (dim==_x_?Ncx:dim==_y_?Ncy:Ncz);
+        symmetrize_face_fv_pair(block_Ffv<Block>(blocks[ib], dim),
+                                block_Ffv<Block>(blocks[jb], dim),
+                                dim, lo, hi, Ncx, Ncy, Ncz);
+    }
+}
+
 //At a coarse-fine face the coarse block's FV flux has to equal the
 //overlap-weighted average of the fine fluxes covering it, or the coarse cell
 //fails to lose exactly what the fine cells gain. The high-order fluxes were
@@ -573,6 +631,42 @@ void correct_cf_fv_flux_b(FV_Solution C, IntVector recv, IntVector send,
             C.Vector(rb+var,k,j,i) = u;
         }
     }, "correct_cf_fv_flux_b");
+}
+
+//Same symmetrization as symmetrize_same_level_fv_flux, run off the same-level
+//transaction table instead of a host loop over interfaces: the table already
+//carries exactly one entry per (upper block, lower neighbour), which is the
+//unit of work here. Both sides live in one pack, so the pair is two offsets
+//into the same array.
+//
+//One kernel per dim, constant in the block count.
+void symmetrize_same_level_fv_flux_b(FV_Solution C, IntVector recv, IntVector send,
+                                     int ntr, int dim, int lo, int hi,
+                                     int Ncx, int Ncy, int Ncz){
+    if(ntr <= 0) return;
+    const int nvar = C.n_var;
+    GHOST_LOCALS;
+    const bool tx = cfg.active[_x_] && dim!=_x_;
+    const bool ty = cfg.active[_y_] && dim!=_y_;
+    const bool tz = cfg.active[_z_] && dim!=_z_;
+    const int Qx = tx ? Ncx : 1, Qy = ty ? Ncy : 1, Qz = tz ? Ncz : 1;
+    fv_for_cells_b(ntr,Qz,Qy,Qx, KOKKOS_LAMBDA(int b,int kq,int jq,int iq){
+        const int i = tx ? sghx+iq : 0;
+        const int j = ty ? sghy+jq : 0;
+        const int k = tz ? sghz+kq : 0;
+        //recv owns the LOW face of the interface; send is its low-side
+        //neighbour, which holds the matching HIGH face.
+        int Nl[3], Nh[3];
+        fv_indices(Nl,k,j,i,lo,dim);
+        fv_indices(Nh,k,j,i,hi,dim);
+        const int rb = recv(b)*nvar, sb = send(b)*nvar;
+        for(int var=0; var<nvar; var++){
+            const double avg = 0.5*(C.Vector(rb+var,Nl[_z_],Nl[_y_],Nl[_x_])
+                                  + C.Vector(sb+var,Nh[_z_],Nh[_y_],Nh[_x_]));
+            C.Vector(rb+var,Nl[_z_],Nl[_y_],Nl[_x_]) = avg;
+            C.Vector(sb+var,Nh[_z_],Nh[_y_],Nh[_x_]) = avg;
+        }
+    }, "symmetrize_same_level_fv_flux_b");
 }
 
 static void fv_copy_slab(FV_Solution U, FV_Solution src, int dim, int side, int ngh){
@@ -858,6 +952,8 @@ template void correct_coarse_fine_flux<Hydro_ader>(BlockForest&, std::vector<Hyd
 template void correct_coarse_fine_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_emf<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_emf<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void symmetrize_same_level_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void symmetrize_same_level_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
@@ -1053,15 +1149,12 @@ void gather_fp_finer(SD_Solution U, IntVector recv, IntVector send, IntVector su
     }, "gather_fp_finer");
 }
 
-//NOT CORRECT YET -- not called. Wiring this in place of
-//make_scratch_like + restrict_face_overlap_sp + set_interface_flux made dt
-//collapse as soon as the first regrid created a coarse-fine face, so the
-//restricted value or one of the two destination slots is wrong. The transverse
-//mapping is copied from gather_fp_finer and restrict_face_overlap_sp, which
-//agree with each other, so suspect the normal-direction source/destination
-//pinning (se/sp vs d1/p1 and d2/p2) and the Px/Py/Pz sub-point extents along
-//the collapsed normal axis. Verify against the per-block path with
-//SPD_EXCHANGE_CHECK before wiring it again.
+//The earlier "not correct yet" note blamed this kernel; it was wrong. The
+//normal-direction pinning here matches set_interface_flux for both sides and
+//the transverse mapping matches restrict_face_overlap_sp. The defect was in the
+//caller, which chose amr_RF_fp over amr_RF whenever the transverse point counts
+//happened to coincide -- the reference always restricts with amr_RF. With that
+//fixed the two paths are bit-identical.
 //
 //Conservative flux correction at a coarse-fine face, off the fine->coarse
 //table: the coarse block's interface flux becomes the overlap-weighted average

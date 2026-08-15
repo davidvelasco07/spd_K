@@ -151,9 +151,38 @@ CONFIGS = {
                       "time/tlim=0.02", "output/dt=0.02",
                       "fallback/style=cascade"],
         "ndim": 2,
-        "checks": ["mass_strict"],
+        "checks": ["mass_strict", "golden"],
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
+        "golden_name": "hydro_cascade_blast",
+        "golden_rtol": 1e-6,
+    },
+    "hydro_cascade_blast_mb_2d": {
+        # The same MOOD blast on a 4x4 uniform forest. A uniform forest is the
+        # same discretisation as one block -- every interface is same-level, so
+        # nothing about the cascade may depend on where the block edges fall --
+        # and it must reproduce the single-block golden.
+        #
+        # This is the check that pins block-interface handling in the cascade.
+        # The cascade selects one flux per face from the pooled levels, and the
+        # level is a per-cell decision, so without a single-valued face flux
+        # (coarse-fine restriction plus same-level symmetrization) the two sides
+        # of a block edge can disagree and the run silently diverges from the
+        # single-block answer. spd covers this with
+        # test_mood_amr_matches_uniform_forest; spd_K had no equivalent.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx3=1",
+                      "meshblock/nx1=2", "meshblock/nx2=2",
+                      "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02",
+                      "fallback/style=cascade"],
+        "ndim": 2,
+        "checks": ["mass_strict", "golden_active"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+        "golden_name": "hydro_cascade_blast",
+        "golden_rtol": 1e-6,
     },
     "hydro_sod_1d": {
         # gradfree outflow reference. Mass is not conserved by construction

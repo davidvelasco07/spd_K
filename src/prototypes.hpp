@@ -55,6 +55,12 @@ extern void prolongate_block_face_B(SD_Solution BxC, SD_Solution ByC, SD_Solutio
 //Zero per-element FV/SD divergence of face-constant B (2D) by adjusting +x faces.
 extern void project_face_B_divfree_2d(SD_Solution Bx, SD_Solution By);
 extern void gather_block(SD_Solution, SD_Solution, int, int, int);
+//Admissibility limiter for the prolongated fine state (hydro conserved vars):
+//an element whose interpolation implies rho<=0 or p<=0 collapses to its own
+//(conserved) mean. Returns the number of elements limited.
+extern int limit_prolongation(SD_Solution Ucv,
+                              Vector fx, Vector fy, Vector fz,
+                              double gamma, int* n_unfixable);
 extern void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
@@ -72,6 +78,9 @@ extern void compute_conservatives(SD_Solution, SD_Solution);
 extern void compute_primitives(SD_Solution, SD_Solution);
 extern void compute_fluxes(SD_Solution, SD_Solution, int, int, int);
 extern double compute_dt(SD_Solution, double, double, double, double nu=0.0);
+//Whole-pack timestep: block is a kernel axis, so one launch covers every block
+//(and every refinement level) instead of one launch per block.
+extern double compute_dt_b(SD_Solution, Vector hx, Vector hy, Vector hz, double nu);
 extern void compute_gradient(SD_Solution, SD_Solution, double, Matrix, int);
 extern void compute_viscous_flux(SD_Solution, SD_Solution, int, SD_Solution, int, SD_Solution, int, Matrix, double, double, int);
 
@@ -118,6 +127,9 @@ extern void correct_cf_flux_b(SD_Solution, IntVector, IntVector, IntVector,
 extern void correct_cf_fv_flux_b(FV_Solution, IntVector, IntVector, IntVector,
                                  int, int, int, int, int,
                                  int, int, int, int, int, int);
+extern void symmetrize_same_level_fv_flux_b(FV_Solution, IntVector, IntVector,
+                                            int, int, int, int,
+                                            int, int, int);
 extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
                               int, int, int, Matrix);
 extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,

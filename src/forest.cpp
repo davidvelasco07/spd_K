@@ -224,6 +224,7 @@ void BlockForest::rebuild_neighbors(){
 }
 
 void BlockForest::build_fast_paths(){
+    dropped_faces = 0;
     for(int d=0; d<3; d++)
     for(int s=0; s<2; s++){
         same_jb[d][s].clear();
@@ -266,6 +267,13 @@ void BlockForest::build_fast_paths(){
                     //L+1 and two at L+2). Those groups are dropped here and the
                     //final, balanced rebuild replaces them before any exchange
                     //or flux correction reads them.
+                    bool grouped = false;
+                    //This branch also takes a plain SAME face (it is not BC and
+                    //not COARSER), so only a face that really fronts finer
+                    //neighbours can be a drop.
+                    bool any_finer = false;
+                    for(const auto &e : entries)
+                        if(e.rel == NEIGH_FINER) any_finer = true;
                     if(all_finer && (int)entries.size()==n_sub){
                         std::vector<int> row(n_sub, -1);
                         for(const auto &e : entries)
@@ -275,8 +283,11 @@ void BlockForest::build_fast_paths(){
                         if(ok){
                             g.fi_ib.push_back(ib);
                             g.fi_jb.push_back(row);
+                            grouped = true;
                         }
                     }
+                    //Counted, not silently discarded: see dropped_faces.
+                    if(any_finer && !grouped) dropped_faces++;
                 }
             }
             if(all_same) same_jb[dim][side] = jbs;
@@ -394,8 +405,44 @@ void BlockForest::derefine_blocks(const std::vector<std::vector<int>> &groups){
     derefine_blocks_keys(keys_of(groups));
 }
 
+//A derefinement that enforce_2to1_balance() would immediately undo is not a
+//derefinement: it is a block teardown, a neighbour rebuild and a refine cascade
+//that end where they started, repeated every adapt forever. Refuse it up front.
+//
+//athenak does the same thing at the tree (MeshBlockTree::Derefine walks the
+//neighbour directions and returns without acting if the child facing this block
+//is itself refined). spd does NOT -- it derefines, then rebalances, and so has
+//the same latent churn; it just never parks in a state that triggers it.
+//
+//The test is written against the same face-neighbour table balance uses, so it
+//predicts exactly what balance would do: the group collapses to level L-1, so a
+//neighbour outside the group deeper than L is a 2-level jump.
+//
+//It judges the forest as it stands, which makes it conservative for a region
+//coarsening by more than one level at once: the deepest groups go first, and a
+//shallower group blocked only by a neighbour that is itself about to derefine
+//has to wait for the next adapt. Coarsening then peels one level per adapt
+//interval, which is the rate athenak imposes anyway via refinement_interval.
+bool BlockForest::derefine_allowed(const std::vector<int> &ibs) const {
+    if(ibs.empty()) return false;
+    const int L = blocks[ibs[0]].level;
+    for(int ib : ibs){
+        for(int dim=0; dim<3; dim++){
+            if(!active[dim]) continue;
+            for(int side=0; side<2; side++)
+                for(const auto &e : blocks[ib].neighbors[dim][side]){
+                    if(e.jb < 0) continue;
+                    if(std::find(ibs.begin(), ibs.end(), e.jb) != ibs.end()) continue;
+                    if(blocks[e.jb].level > L) return false;
+                }
+        }
+    }
+    return true;
+}
+
 void BlockForest::derefine_blocks_keys(
         const std::vector<std::vector<BlockKey>> &key_groups){
+    derefine_refused = 0;
     int n_sib = 1;
     for(int d=0; d<3; d++) if(active[d]) n_sib *= 2;
     for(const auto &kg : key_groups){
@@ -410,7 +457,11 @@ void BlockForest::derefine_blocks_keys(
         //the refine pass runs first: a sibling can have been refined away in the
         //meantime. A partly present group is no longer a derefinable set, so drop
         //it and let the next regrid retag.
-        if((int)ibs.size() == n_sib) derefine_block_mutate(ibs);
+        if((int)ibs.size() != n_sib) continue;
+        //Last line of defence: a caller that skipped the filter still cannot
+        //push the forest into a state balance has to repair.
+        if(!derefine_allowed(ibs)){ derefine_refused++; continue; }
+        derefine_block_mutate(ibs);
     }
     rebuild_neighbors();
 }

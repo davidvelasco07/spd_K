@@ -337,8 +337,8 @@ struct Hydro_ader : public PhysicsModule{
     }
 
     TaskStatus TaskConsToPrim(Driver* d, int stage){
-        compute_primitives(U_sp,W_sp);
-        transform_sp_to_cv(W_sp,W_cv);
+        compute_primitives(U_sp,W_sp);   //W_sp still feeds the AMR criteria
+        cons_to_prim_cv();
         return TaskStatus::complete;
     }
 
@@ -365,7 +365,7 @@ struct Hydro_ader : public PhysicsModule{
             else
                 ADER_step(comm,X_dim,Y_dim,Z_dim);
             compute_primitives(U_sp,W_sp);
-            transform_sp_to_cv(W_sp,W_cv);
+            cons_to_prim_cv();
             t+=dt;
             n_step++;
             dt=compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
@@ -457,6 +457,24 @@ struct Hydro_ader : public PhysicsModule{
         #else
         transform_a_to_b(U_cv, U_sp, T_sweep, cv_to_sp);
         #endif
+    }
+
+    //W_cv is the primitive state of the conserved CELL AVERAGE:
+    //primitives(sp_to_cv(U_sp)), not sp_to_cv(primitives(U_sp)). The conserved
+    //average is what the scheme actually carries and what has to be admissible,
+    //so the primitives are taken from it; averaging the primitives instead
+    //applies a nonlinear map before the average and is a different quantity
+    //(density agrees -- it is linear and shared by both sets -- which is why
+    //the mass checks never saw the difference).
+    //
+    //NOTE: primitives(average) and average(primitives) differ at O(h^2)
+    //because the map is nonlinear, so this conversion is second order however
+    //large p is. If that is ever shown to cap the achievable order, add the
+    //PLUTO-style fourth-order correction (a Laplacian term in the conversion)
+    //rather than going back to averaging the primitives.
+    void cons_to_prim_cv(){
+        transform_sp_to_cv(U_sp, U_cv);
+        compute_primitives(U_cv, W_cv);
     }
 
     void transform_sp_to_cv(SD_Solution U_sp, SD_Solution U_cv){

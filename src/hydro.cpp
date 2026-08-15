@@ -160,6 +160,40 @@ void compute_primitives(
     }, "compute_primitives_fv");
 }
 
+//Same timestep reduction over the whole pack. The block is an index inside the
+//kernel, not a host loop around it: one launch instead of one per block, which
+//on an AMR forest is the difference between O(1) and O(leaf count) launches per
+//step (measured 165k launches over 1049 steps on a 2-level KH run). Per-block
+//element size comes from the geometry pack, so blocks at different refinement
+//levels reduce together.
+double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
+    int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz, nb=W.nb;
+    int nader=W.n_ader;
+    double gm=cfg.gamma, cfl=cfg.cfl;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    double min_value = sd_min_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii,double& reduce){
+        //SD packs fold the block into the leading (n_ader) axis -- BOFF(nader)
+        //in the batched transforms -- not into the variable axis.
+        const int boff = b*nader;
+        const double dx=hx(b), dy=hy(b), dz=hz(b);
+        double c_max=0, dx_min=1;
+        double c_s = sound_speed(W.Vector(boff,0,k,j,i,kk,jj,ii),
+                                 W.Vector(boff,_p_,k,j,i,kk,jj,ii),gm);
+        if(ax){ c_max += (abs(W.Vector(boff,_vx_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dx); }
+        if(ay){ c_max += (abs(W.Vector(boff,_vy_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dy); }
+        if(az){ c_max += (abs(W.Vector(boff,_vz_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dz); }
+        double dt_min = cfl*dx_min/c_max/px;
+        if(nu>0.0){
+            double dx_sub = dx_min/px;
+            double dt_visc = 0.25*cfl*dx_sub*dx_sub/nu;
+            dt_min = dt_min < dt_visc ? dt_min : dt_visc;
+        }
+        reduce = reduce < dt_min ? reduce : dt_min;
+    });
+    return min_value;
+}
+
 KOKKOS_INLINE_FUNCTION
 void fluxes(double* u, double* w, double* f, int _v1_, int _v2_, int _v3_){
     f[   0] = u[   0]*w[_v1_];

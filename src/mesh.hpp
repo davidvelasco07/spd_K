@@ -265,12 +265,12 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++){
             if constexpr (is_hydro){
                 compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
-                blocks[b].transform_sp_to_cv(blocks[b].W_sp, blocks[b].W_cv);
+                blocks[b].cons_to_prim_cv();
                 this->Dt = std::min(this->Dt,
                     compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h, nu_));
             } else {
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
-                blocks[b].transform_sp_to_cv(blocks[b].W_sp, blocks[b].W_cv);
+                blocks[b].cons_to_prim_cv();
                 this->Dt = std::min(this->Dt,
                     mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h));
             }
@@ -433,6 +433,8 @@ struct Mesh : public PhysicsModule {
         auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), other);
         double worst = 0.0;
         long nbad = 0, face_only = 0, corner = 0;
+        long nan_active = 0;
+        int nan_shown = 0;
         long nnan = 0, nan_forest = 0, nan_packed = 0, nan_both = 0;
         long nan_face = 0, nan_corner = 0;
         //Per-variable split. The last slot is the FV trouble-flag aggregate,
@@ -484,6 +486,10 @@ struct Mesh : public PhysicsModule {
                 f[4]=(int)i; f[5]=(int)kk; f[6]=(int)jj; f[7]=(int)ii;
             }
         }
+        if((nbad || nnan) && nnan && Master)
+            std::cout<<"        NaN by location: active="<<nan_active
+                     <<" face-ghost="<<nan_face<<" corner-ghost="<<nan_corner
+                     <<std::endl;
         if((nbad || nnan) && reported < 4 && Master){
             reported++;
             std::cout<<std::endl<<"[xchk] dim="<<dim<<" step="<<this->n_step;
@@ -538,6 +544,8 @@ struct Mesh : public PhysicsModule {
         auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), other);
         double worst = 0.0;
         long nbad = 0, slab_only = 0, corner = 0, nnan = 0;
+        long nan_active = 0, nan_face = 0, nan_corner = 0;
+        int nan_shown = 0;
         int f[4] = {-1,-1,-1,-1};
         constexpr int MAXV = 16;
         long nan_var[MAXV] = {0}, bad_var[MAXV] = {0};
@@ -558,6 +566,23 @@ struct Mesh : public PhysicsModule {
             if(std::isnan(av) || std::isnan(bv)){
                 nnan++;
                 if(var < MAXV) nan_var[var]++;
+                //Where the NaN sits: an unfilled ghost is a different bug from
+                //an active cell that computed one. gz is 0 in 2D, so the z test
+                //never fires there.
+                const bool xg = ((int)i<gx || (int)i>=P.Nx-gx);
+                const bool yg = ((int)j<gy || (int)j>=P.Ny-gy);
+                const bool zg = (gz>0) && ((int)k<gz || (int)k>=P.Nz-gz);
+                if(!xg && !yg && !zg) nan_active++;
+                else if((int)(xg+yg+zg) >= 2) nan_corner++;
+                else nan_face++;
+                if(nan_shown < 8){
+                    nan_shown++;
+                    std::cout<<"        [nan] block "<<(P.n_var>0 ? (int)v/P.n_var : 0)
+                             <<" var "<<var<<" (k,j,i)=("<<k<<","<<j<<","<<i<<")"
+                             <<(!xg && !yg && !zg ? " ACTIVE"
+                                : ((int)(xg+yg+zg)>=2 ? " corner-ghost" : " face-ghost"))
+                             <<"  fwd="<<av<<" pkd="<<bv<<std::endl;
+                }
                 continue;
             }
             const double d = std::abs(av - bv);
@@ -570,6 +595,10 @@ struct Mesh : public PhysicsModule {
                 f[0]=(int)v; f[1]=(int)k; f[2]=(int)j; f[3]=(int)i;
             }
         }
+        if((nbad || nnan) && nnan && Master)
+            std::cout<<"        NaN by location: active="<<nan_active
+                     <<" face-ghost="<<nan_face<<" corner-ghost="<<nan_corner
+                     <<std::endl;
         if((nbad || nnan) && reported < 4 && Master){
             reported++;
             //The leading axis is block*n_var + var, so it names the block.
@@ -688,27 +717,70 @@ struct Mesh : public PhysicsModule {
         if(forest.max_level()==0 || !cfg.active[dim]) return;
         SD_Solution& F = dim==_x_ ? pv.F_ader_fp_x
                        : dim==_y_ ? pv.F_ader_fp_y : pv.F_ader_fp_z;
-        //restrict_mat_for picks SP or FP weights from the transverse point
-        //count; blocks in a pack share extents, so one choice serves all.
-        const int nt = (dim==_x_ ? F.ny : F.nx);
-        Matrix R = (nt == (int)amr_RF_fp.extent(0)) ? amr_RF_fp : amr_RF;
+        //The per-block reference (correct_coarse_fine_flux) always restricts
+        //with amr_RF. Selecting amr_RF_fp here on a transverse-count match was
+        //a caller-side bug: the two have the same extent whenever the flux- and
+        //solution-point counts coincide, so this silently picked the wrong
+        //weights and the correction stopped being the reference's.
+        Matrix R = amr_RF;
         for(int side=0; side<2; side++)
             correct_cf_flux_b(F, xtfi_[dim][side].recv, xtfi_[dim][side].send,
                               xtfi_[dim][side].sub, xtfi_[dim][side].n,
                               dim, side, R);
     }
 
-    //NOT yet routed to correct_cf_flux_batched: that kernel is wrong (see its
-    //comment in amr_boundary.cpp). Wiring it made dt collapse as soon as the
-    //first regrid produced a coarse-fine face.
+    //Same dispatch as the FV counterpart. The batched kernel is verified
+    //bit-identical to the forest path (dt trace over a 516-step 2-level AMR
+    //run, plus every amr/smr config), and it removes the per-face scratch
+    //allocation that fenced the device: on a 2-level KH run it took the launch
+    //count from 974k to 486k, with restrict_face_overlap_sp (197k) gone and the
+    //allocation traffic down 95-98%.
     void correct_cf_flux_dim(int dim){
-        correct_coarse_fine_flux(forest, blocks, dim);
+        if(new_xchg() && !is_mhd) correct_cf_flux_batched(dim);
+        else                      correct_coarse_fine_flux(forest, blocks, dim);
     }
 
     //Whichever implementation is selected, for one direction.
     void correct_cf_fv_flux_dim(int dim){
         if(new_xchg() && !is_mhd) correct_cf_fv_flux_batched(dim);
         else                      correct_coarse_fine_fv_flux(forest, blocks, dim);
+    }
+
+    //Same-level FV flux symmetrization over the side-0 same-level table.
+    void symmetrize_fv_flux_batched(int dim){
+        if(!cfg.active[dim]) return;
+        FV_Solution& C = fv_flux_pack(dim);
+        const SD_Solution& S = pv.W_cv;
+        const int Ncx=(S.Nx-2*NGHx)*S.nx, Ncy=(S.Ny-2*NGHy)*S.ny, Ncz=(S.Nz-2*NGHz)*S.nz;
+        GHOST_LOCALS;
+        const int lo = (dim==_x_?sghx:dim==_y_?sghy:sghz);
+        const int hi = lo + (dim==_x_?Ncx:dim==_y_?Ncy:Ncz);
+        symmetrize_same_level_fv_flux_b(C, xt_[dim][0].recv, xt_[dim][0].send,
+                                        xt_[dim][0].n, dim, lo, hi, Ncx, Ncy, Ncz);
+    }
+
+    //Whichever implementation is selected, for one direction.
+    void symmetrize_fv_flux_dim(int dim){
+        if(new_xchg() && !is_mhd) symmetrize_fv_flux_batched(dim);
+        else                      symmetrize_same_level_fv_flux(forest, blocks, dim);
+    }
+
+    //Single-valued FV fluxes at every block interface: the coarse side of a
+    //level jump takes the restriction of the fine fluxes covering it, and a
+    //same-level pair takes its shared average. spd's _enforce_flux_consistency.
+    //
+    //This has to run before the flux is *used*, not just before it is
+    //committed. The cascade builds a candidate update from the assembled flux
+    //and then runs the DMP test on that candidate to decide what to demote, so
+    //a flux that is still double-valued at a block interface biases the very
+    //test driving the cascade: cells demote on the mismatch rather than on the
+    //solution, the next revision inherits a worse candidate, and dt collapses.
+    void enforce_fv_flux_consistency(){
+        if(forest.max_level()>0)
+            for(int dim=0; dim<3; dim++)
+                if(cfg.active[dim]) correct_cf_fv_flux_dim(dim);
+        for(int dim=0; dim<3; dim++)
+            if(cfg.active[dim]) symmetrize_fv_flux_dim(dim);
     }
 
     //All relations for one direction of an FV field, as batched gathers over
@@ -1044,6 +1116,12 @@ struct Mesh : public PhysicsModule {
             for(int rev=0; rev<cfg.max_revs; rev++){
                 { Region r("FV_cascade_candidate");
                   cascade_assemble_pack();
+                  //The candidate the DMP test judges must come from a
+                  //single-valued flux, or the test reads the interface
+                  //mismatch as trouble. Idempotent, so re-running it every
+                  //revision is safe: the cascade level only ever rises, and
+                  //assign_face_cell leaves untouched faces alone.
+                  enforce_fv_flux_consistency();
                   FV_candidate_batched(ader); }
                 //SED limits against a two-cell stencil of the candidate, so
                 //each revision needs its own U_new halo.
@@ -1060,12 +1138,7 @@ struct Mesh : public PhysicsModule {
                 { Region r("Exchange_cascade"); Exchange_fv_field_max(&Block::cascade,&pv.cascade); }
             }
             { Region r("FV_cascade_assemble"); cascade_assemble_pack(); }
-            if(forest.max_level()>0){
-                Region r("correct_cf_fv_flux");
-                for(int dim=0; dim<3; dim++)
-                    if(cfg.active[dim])
-                        correct_cf_fv_flux_dim(dim);
-            }
+            { Region r("enforce_fv_flux_consistency"); enforce_fv_flux_consistency(); }
             { Region r("FV_commit"); FV_commit_batched(ader); }
         }
         { Region r("FV_end"); FV_end_batched(); }
@@ -1341,12 +1414,13 @@ struct Mesh : public PhysicsModule {
     TaskStatus TaskConsToPrim(Driver* d, int stage){
         Region r("TaskConsToPrim");
         if constexpr (is_hydro){
-            compute_primitives(pv.U_sp, pv.W_sp);
-            transform_sp_to_cv_batched(pv.W_sp, pv.W_cv);
+            compute_primitives(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
+            transform_sp_to_cv_batched(pv.U_sp, pv.U_cv);
+            compute_primitives(pv.U_cv, pv.W_cv);
         } else {
             for(int b=0;b<nblocks;b++){
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
-                blocks[b].transform_sp_to_cv(blocks[b].W_sp, blocks[b].W_cv);
+                blocks[b].cons_to_prim_cv();
             }
         }
         return TaskStatus::complete;
@@ -1363,14 +1437,29 @@ struct Mesh : public PhysicsModule {
         Region r("ComputeDt");
         this->Dt = 1e300;
         bool diverged = false;
-        for(int b=0;b<nblocks;b++){
-            double db;
-            if constexpr (is_hydro)
-                db = compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h, nu_);
-            else
-                db = mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h);
-            if(!std::isfinite(db)) diverged = true;
-            this->Dt = std::min(this->Dt, db);
+        if constexpr (is_hydro){
+            //One launch for the whole pack: the block is an index in the
+            //reduction, not a host loop around it. On an AMR forest the loop
+            //cost one launch per leaf per step.
+            this->Dt = compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p, nu_);
+            //SPD_DT_CHECK=1 cross-checks the packed reduction against the
+            //per-block loop it replaced.
+            if(getenv("SPD_DT_CHECK")){
+                double ref = 1e300;
+                for(int b=0;b<nblocks;b++)
+                    ref = std::min(ref, compute_dt(blocks[b].W_cv,
+                                    Xd[b].h, Yd[b].h, Zd[b].h, nu_));
+                if(Master && std::fabs(ref-this->Dt) > 1e-14*std::fabs(ref))
+                    std::cout<<"[dtchk] step "<<this->n_step<<" packed "
+                             <<std::setprecision(17)<<this->Dt<<" loop "<<ref
+                             <<" nb "<<nblocks<<std::endl;
+            }
+        } else {
+            for(int b=0;b<nblocks;b++){
+                double db = mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h);
+                if(!std::isfinite(db)) diverged = true;
+                this->Dt = std::min(this->Dt, db);
+            }
         }
         if(diverged || !std::isfinite(this->Dt)){
             if(Master)
@@ -1400,6 +1489,25 @@ struct Mesh : public PhysicsModule {
             prolongate_to_finest(ib, child, out, Xd_b, Yd_b, Zd_b,
                 ox*2+cx*NBx, oy*2+cy*NBy, oz*2+cz*NBz, steps-1);
         }
+    }
+
+    //Smallest cell-average of one primitive over every block. The adapt
+    //transfer is conservative in rho, rho*v and E, so total_mass() cannot see
+    //a bad regrid -- but the pressure those conserved values imply can still
+    //come out negative at a shock, and that is what this catches.
+    double min_primitive(int var){
+        double m = 1e300;
+        for(int b=0;b<nblocks;b++){
+            SD_Solution W = blocks[b].W_cv;
+            int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
+            double mb = sd_min_cells(Nz,Ny,Nx,pz,py,px,
+                KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& r){
+                    double v = W.Vector(0,var,k,j,i,kk,jj,ii);
+                    if(v < r) r = v;
+                });
+            m = std::min(m, mb);
+        }
+        return m;
     }
 
     double total_mass(){
@@ -1544,19 +1652,26 @@ struct Mesh : public PhysicsModule {
     void finish_block_ic(int ib){
         if constexpr (is_hydro){
             compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
-            blocks[ib].transform_sp_to_cv(blocks[ib].W_sp, blocks[ib].W_cv);
+            blocks[ib].cons_to_prim_cv();
         } else {
             mhd_compute_primitives(blocks[ib].U_sp, blocks[ib].W_sp);
             mhd_B_to_U(blocks[ib].W_sp, blocks[ib].Bx_fp_x, blocks[ib].By_fp_y,
                        blocks[ib].Bz_fp_z, blocks[ib].Tx_, blocks[ib].Ty_,
                        blocks[ib].Tz_, blocks[ib].fp_to_sp);
             mhd_compute_conservatives(blocks[ib].W_sp, blocks[ib].U_sp);
-            blocks[ib].transform_sp_to_cv(blocks[ib].W_sp, blocks[ib].W_cv);
+            blocks[ib].cons_to_prim_cv();
         }
     }
 
+    //Elements the prolongation limiter had to collapse, last transfer, and
+    //those whose own mean was still inadmissible (which this unit cannot fix).
+    int prolong_limited = 0;
+    int prolong_unfixable = 0;
+
     void transfer_from_snapshot(std::map<BlockForest::BlockKey,int>& key_to_ib,
                                 std::vector<BlockSnap>& snap){
+        prolong_limited = 0;
+        prolong_unfixable = 0;
         auto find_ancestor = [&](BlockForest::BlockKey key,
                                  std::vector<std::array<int,3>>& chain)->int{
             BlockForest::BlockKey k = key;
@@ -1590,6 +1705,18 @@ struct Mesh : public PhysicsModule {
                 BlockSnap dst = make_empty_snap(ib, "pro_dst");
                 prolongate_snap(cur, dst, chain[0][0], chain[0][1], chain[0][2], ib);
                 install_snap(ib, dst);
+                //The interpolation is unlimited, so at a discontinuity it can
+                //hand the new fine block a state no update can recover from.
+                if constexpr (is_hydro){
+                    blocks[ib].transform_sp_to_cv(blocks[ib].U_sp, blocks[ib].U_cv);
+                    const int nlim = limit_prolongation(blocks[ib].U_cv,
+                        Xd[ib].fv_faces, Yd[ib].fv_faces, Zd[ib].fv_faces,
+                        cfg.gamma, &prolong_unfixable);
+                    prolong_limited += nlim;
+                    if(nlim)
+                        blocks[ib].transform_cv_to_sp(blocks[ib].U_cv,
+                                                      blocks[ib].U_sp);
+                }
                 continue;
             }
             int n_sib = 1;
@@ -1654,7 +1781,38 @@ struct Mesh : public PhysicsModule {
         //SPD_ADAPT_MASS=1 brackets every regrid with the conserved mass, so a
         //transfer that loses mass is separated from an evolution that does.
         const bool mass_dbg = getenv("SPD_ADAPT_MASS") != nullptr;
+        //Tag first: it only reads the blocks, and a regrid that turns out to be
+        //a no-op should not have paid for a snapshot of every block.
+        std::vector<int> to_refine;
+        std::vector<std::vector<int>> to_derefine;
+        tag_blocks(forest, blocks, to_refine, to_derefine,
+                   cfg.amr_max_level, cfg.amr_criterion);
+        //SPD_NO_DEREFINE=1 keeps every refinement once it is made, which
+        //separates a bad derefine (restriction) from a bad refine
+        //(prolongation) when a regrid-driven run goes unstable.
+        if(getenv("SPD_NO_DEREFINE")) to_derefine.clear();
+        const size_t n_ref = to_refine.size(), n_deref_tagged = to_derefine.size();
+        //Drop the groups enforce_2to1_balance() would refine straight back
+        //before anything is spent on them. The criterion keeps proposing them
+        //every adapt -- it scores the solution, it does not know the balance
+        //rule -- so without this the regrid tears down 24 blocks, rebuilds the
+        //neighbour tables, refines them again and transfers the whole forest,
+        //to arrive exactly where it started.
+        {
+            std::vector<std::vector<int>> keep;
+            for(auto &g : to_derefine)
+                if(forest.derefine_allowed(g)) keep.push_back(std::move(g));
+            to_derefine.swap(keep);
+        }
+        const size_t n_deref = to_derefine.size();
+        if(to_refine.empty() && to_derefine.empty()) return;
+
         double m_before = mass_dbg ? total_mass() : 0.0;
+        double p_before = 0.0, d_before = 0.0;
+        if(mass_dbg && is_hydro){
+            p_before = min_primitive(_p_);
+            d_before = min_primitive(_d_);
+        }
         std::vector<BlockSnap> snap(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             snap[ib] = make_empty_snap(ib, "snap");
@@ -1662,17 +1820,22 @@ struct Mesh : public PhysicsModule {
         }
         auto key_to_ib = snapshot_keys();
 
-        std::vector<int> to_refine;
-        std::vector<std::vector<int>> to_derefine;
-        tag_blocks(forest, blocks, to_refine, to_derefine,
-                   cfg.amr_max_level, cfg.amr_criterion);
-        if(to_refine.empty() && to_derefine.empty()) return;
-
         int old_M = forest.max_level();
         auto deref_keys = forest.keys_of(to_derefine);
         if(!to_refine.empty()) forest.refine_blocks(to_refine);
+        const int nb_ref = forest.Nblocks();
         if(!deref_keys.empty()) forest.derefine_blocks_keys(deref_keys);
+        const int nb_deref = forest.Nblocks();
         forest.enforce_2to1_balance();
+        const int nb_bal = forest.Nblocks();
+
+        //The forest the next step runs on must have every level jump in a
+        //group; a dropped face silently skips both its ghost fill and its
+        //flux correction.
+        if(forest.dropped_faces && Master)
+            std::cout<<std::endl<<"WARNING: step "<<this->n_step<<": "
+                     <<forest.dropped_faces<<" coarse-fine face(s) left ungrouped"
+                     <<" after enforce_2to1_balance"<<std::endl;
 
         build_block_solvers();
         transfer_from_snapshot(key_to_ib, snap);
@@ -1685,11 +1848,23 @@ struct Mesh : public PhysicsModule {
         for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
         if(mass_dbg && Master){
             double m_after = total_mass();
+            //nblocks through each stage: a derefine that balance immediately
+            //puts back shows up here as deref-> dropping and balance-> restoring.
             std::cout<<std::endl<<"[adapt] step "<<this->n_step
                      <<" nblocks "<<nblocks
+                     <<" (ref "<<n_ref<<"->"<<nb_ref
+                     <<", deref "<<n_deref<<"/"<<n_deref_tagged<<"->"<<nb_deref
+                     <<", bal->"<<nb_bal<<")"
                      <<" mass "<<std::setprecision(17)<<m_before<<" -> "<<m_after
                      <<"  rel "<<std::setprecision(6)
-                     <<(m_before!=0.0 ? (m_after-m_before)/m_before : 0.0)<<std::endl;
+                     <<(m_before!=0.0 ? (m_after-m_before)/m_before : 0.0);
+            if(is_hydro)
+                std::cout<<"  minP "<<p_before<<" -> "<<min_primitive(_p_)
+                         <<"  minRho "<<d_before<<" -> "<<min_primitive(_d_)
+                         <<"  prolong_limited "<<prolong_limited
+                         <<(prolong_unfixable ? "  UNFIXABLE " : "")
+                         <<(prolong_unfixable ? std::to_string(prolong_unfixable) : "");
+            std::cout<<std::endl;
         }
         recompute_dt();
         if(forest.max_level() != old_M)

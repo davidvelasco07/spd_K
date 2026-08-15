@@ -38,11 +38,16 @@ def load_rho(path, var=0):
     m = re.search(r"_N(\d+)p(\d+)_", os.path.basename(path))
     N, p = int(m.group(1)), int(m.group(2))
     n = p + 1
-    Ne, shp = N + 2 * NGH, None
-    shp = (1, NVAR, 1, Ne, Ne, 1, n, n)
+    Ne = N + 2 * NGH
     raw = np.fromfile(path)
-    if raw.size != int(np.prod(shp)):
-        raise ValueError(f"{path}: size {raw.size} != expected {np.prod(shp)}")
+    # Infer the variable count from the file rather than assuming NVAR: the FV
+    # trouble aggregate moved out of NVAR (commit 3e9e963), so dumps written
+    # before and after that carry 6 and 5 variables respectively.
+    per_var = Ne * Ne * n * n
+    if raw.size % per_var:
+        raise ValueError(f"{path}: size {raw.size} is not a multiple of {per_var}")
+    nvar = raw.size // per_var
+    shp = (1, nvar, 1, Ne, Ne, 1, n, n)
     A = raw.reshape(shp, order=dump_order(os.path.dirname(path)))
     U = A[0, var, 0, NGH:-NGH, NGH:-NGH, 0]      # (Ny, Nx, ny, nx)
     Ny, Nx, ny, nx = U.shape

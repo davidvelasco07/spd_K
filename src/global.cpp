@@ -1,4 +1,5 @@
 //#include "sd3d.hpp"
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
 #include "define.hpp"
@@ -50,7 +51,17 @@ void set_runtime_dimensionality(bool ax, bool ay, bool az){
     NGH_rt[_x_] = ax ? NGH : 0;
     NGH_rt[_y_] = ay ? NGH : 0;
     NGH_rt[_z_] = az ? NGH : 0;
-    nGH_rt[_x_] = ax ? nGH : 0;
-    nGH_rt[_y_] = ay ? nGH : 0;
-    nGH_rt[_z_] = az ? nGH : 0;
+    //FV halo width. The MOOD cascade re-runs detection once per revision and
+    //each revision's stencil reaches one cell further, so a halo sized for a
+    //single detection pass is too narrow for the cascade (athenak sizes ghosts
+    //from the revision count for the same reason). SPD_FV_GHOST overrides it so
+    //the width can be measured before it is wired to fallback/max_revs.
+    int g = nGH;
+    if(const char* e = getenv("SPD_FV_GHOST")){
+        const int v = atoi(e);
+        if(v >= nGH) g = v;
+    }
+    nGH_rt[_x_] = ax ? g : 0;
+    nGH_rt[_y_] = ay ? g : 0;
+    nGH_rt[_z_] = az ? g : 0;
 }

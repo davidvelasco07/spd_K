@@ -365,7 +365,7 @@ struct MHD_ader : public PhysicsModule {
         // magnetic energy of the actual (divergence-free) B field.
         mhd_B_to_U(W_sp,Bx_fp_x,By_fp_y,Bz_fp_z,Tx_,Ty_,Tz_,fp_to_sp);
         mhd_compute_conservatives(W_sp,U_sp);
-        transform_sp_to_cv(W_sp,W_cv);
+        cons_to_prim_cv();
 
         Dt = mhd_compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h);
         if(standalone_){
@@ -436,7 +436,7 @@ struct MHD_ader : public PhysicsModule {
 
     TaskStatus TaskConsToPrim(Driver* d, int stage){
         mhd_compute_primitives(U_sp,W_sp);
-        transform_sp_to_cv(W_sp,W_cv);
+        cons_to_prim_cv();
         return TaskStatus::complete;
     }
 
@@ -532,6 +532,24 @@ struct MHD_ader : public PhysicsModule {
         update_B_solution(By_fp_y,Ez_ep_xy,Ex_ep_yz,dfp_to_sp,wt,Zdim_.h,Xdim_.h,dt,_y_);
         if(cfg.active[_z_])
             update_B_solution(Bz_fp_z,Ex_ep_yz,Ey_ep_zx,dfp_to_sp,wt,Xdim_.h,Ydim_.h,dt,_z_);
+    }
+
+    //W_cv is the primitive state of the conserved CELL AVERAGE:
+    //primitives(sp_to_cv(U_sp)), not sp_to_cv(primitives(U_sp)). The conserved
+    //average is what the scheme actually carries and what has to be admissible,
+    //so the primitives are taken from it; averaging the primitives instead
+    //applies a nonlinear map before the average and is a different quantity
+    //(density agrees -- it is linear and shared by both sets -- which is why
+    //the mass checks never saw the difference).
+    //
+    //NOTE: primitives(average) and average(primitives) differ at O(h^2)
+    //because the map is nonlinear, so this conversion is second order however
+    //large p is. If that is ever shown to cap the achievable order, add the
+    //PLUTO-style fourth-order correction (a Laplacian term in the conversion)
+    //rather than going back to averaging the primitives.
+    void cons_to_prim_cv(){
+        transform_sp_to_cv(U_sp, U_cv);
+        mhd_compute_primitives(U_cv, W_cv);
     }
 
     void transform_cv_to_sp(SD_Solution U_cv_, SD_Solution U_sp_){

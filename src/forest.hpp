@@ -65,6 +65,14 @@ class BlockForest {
     std::array<std::array<std::vector<int>, 2>, 3> same_jb; // nullptr -> empty = mixed
     std::array<std::array<FaceGroups, 2>, 3> face_groups;
 
+    //Faces build_fast_paths could not put in any group: a face fronting finer
+    //neighbours that do not form a complete set of 2^(ndim-1) children, or one
+    //fronting a mix of relations. Such a face gets no ghost fill and no flux
+    //correction -- silently. That is legal only on the intermediate, still
+    //unbalanced forests inside adapt(); on the forest a step actually runs on
+    //it means the level jump at that face is unhandled.
+    int dropped_faces = 0;
+
     int Nblocks() const { return (int)blocks.size(); }
     int max_level() const {
         int m = 0;
@@ -83,6 +91,12 @@ class BlockForest {
     void rebuild_neighbors();
     void refine_blocks(const std::vector<int> &ibs);
     void derefine_blocks(const std::vector<std::vector<int>> &groups);
+    //True when collapsing this sibling group to its parent leaves the forest
+    //2:1 balanced. False means enforce_2to1_balance() would refine it straight
+    //back, so the derefinement is pure churn -- see derefine_allowed's comment.
+    bool derefine_allowed(const std::vector<int> &ibs) const;
+    //Groups derefine_blocks_keys skipped for that reason, last call.
+    int derefine_refused = 0;
     int enforce_2to1_balance();
     void refine_to_levels(const std::vector<RefinementRegion> &regions);
 
@@ -138,6 +152,8 @@ template<typename Block>
 void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Block>&, int dim);
+template<typename Block>
+void symmetrize_same_level_fv_flux(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void forest_exchange_fv(BlockForest&, std::vector<Block>&,
                         FV_Solution Block::*, int dim);

@@ -92,6 +92,140 @@ void prolongate_block(SD_Solution C, SD_Solution F, Matrix P, int cx, int cy, in
     }, "prolongate_block");
 }
 
+//Admissibility of one conserved control-volume state, phrased exactly as
+//pad_cell/PAD_criteria: density and pressure inside the shared PAD bounds.
+//Comparisons are written so a NaN fails rather than passes.
+KOKKOS_INLINE_FUNCTION
+bool pad_admissible(const double* u, double gm){
+    const double rho = u[_d_];
+    if(!(rho >= rho_min) || !(rho <= rho_max)) return false;
+    const double ekin = 0.5*(u[_vx_]*u[_vx_] + u[_vy_]*u[_vy_]
+                           + u[_vz_]*u[_vz_]) / rho;
+    const double pres = (u[_e_] - ekin)*(gm - 1.0);
+    return (pres >= p_min) && (pres <= p_max);
+}
+
+//prolongate_block is an unlimited Lagrange interpolation, and it is applied to
+//the CONSERVED variables independently. Across a discontinuity that manufactures
+//new extrema: rho, rho*v and E each stay within their own interpolation error,
+//but the pressure they imply, (E - |rho v|^2/2rho)(gamma-1), is a nonlinear
+//combination and can come out negative even though every coarse value it came
+//from was admissible. Measured on the sharp 10->0.1 blast, one regrid took the
+//minimum pressure from +0.0999 to -1.067; nothing downstream repairs it,
+//because the fallback limits the *update*, not the state it is handed.
+//
+//So limit the prolongation the way the cascade limits a flux: keep the
+//high-order result wherever it is admissible, and drop an element that is not
+//to its own mean.
+//
+//Both the mean and the admissibility test are taken on the CV (cell-average)
+//representation, weighted by the fv_faces sub-cell widths -- exactly the
+//quadrature fv_mass uses -- so the element's conserved content is unchanged
+//and the transfer stays exactly conservative. Getting this wrong is silent:
+//weighting the solution-point values instead (sp_to_cv is not the identity)
+//drifts mass ~1e-5 per limited regrid, and the Gauss-Legendre wx vector is the
+//ADER *temporal* rule while the spatial points are Chebyshev, which drifts too.
+//The kernel works purely on the CV array; the caller maps the result back to
+//the solution points. Only a *constant* element is the same in both
+//representations -- a theta-blend is not -- so writing blended CV values
+//straight into U_sp desynchronises them and drifts mass ~1e-5.
+//
+//Returns the number of elements limited.
+int limit_prolongation(SD_Solution C,
+                       Vector fx, Vector fy, Vector fz, double gm,
+                       int* n_unfixable){
+    const int Nx=C.Nx, Ny=C.Ny, Nz=C.Nz;
+    const int nx=C.nx, ny=C.ny, nz=C.nz;
+    const int nader=C.n_ader, nvar=C.n_var;
+    const int qx=nx, qy=ny, qz=nz;
+    const bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    const int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    const int64_t total = (int64_t)nader*Mz*My*Mx;
+    if(total <= 0) return 0;
+    GHOST_LOCALS;
+    SD_Vector V = C.Vector;      //cell averages: mean, test and conservation
+    int n_lim = 0, n_bad_mean = 0;
+    Kokkos::parallel_reduce("limit_prolongation",
+        flat_range(0, flat_total(total)),
+        KOKKOS_LAMBDA(const unsigned idx, int& lim, int& badmean){
+            unsigned r = idx;
+            //ghx/ghy/ghz are the GHOST_LOCALS copies: NGHx & co. are runtime
+            //host globals and are not addressable from device code.
+            const int i = ghx + (int)(r % Mx); r /= Mx;
+            const int j = ghy + (int)(r % My); r /= My;
+            const int k = ghz + (int)(r % Mz); r /= Mz;
+            const int t = (int)r;
+            double mean[NVAR];
+            for(int var=0; var<nvar; var++) mean[var] = 0.0;
+            double vol = 0.0;
+            bool bad = false;
+            for(int kk=0; kk<nz; kk++)
+            for(int jj=0; jj<ny; jj++)
+            for(int ii=0; ii<nx; ii++){
+                double wq = fx(I+1)-fx(I);
+                if(ay) wq *= fy(J+1)-fy(J);
+                if(az) wq *= fz(K+1)-fz(K);
+                vol += wq;
+                double u[NVAR];
+                for(int var=0; var<nvar; var++){
+                    u[var] = V(t,var,k,j,i,kk,jj,ii);
+                    mean[var] += wq*u[var];
+                }
+                //Same admissibility rule as pad_cell (PAD_criteria): the
+                //bounds are the shared rho_min/rho_max/p_min/p_max, not a
+                //hand-rolled positivity test, so the transfer and the MOOD
+                //detector agree on what "admissible" means. Per control
+                //volume, which is the granularity the cascade limits at.
+                if(!pad_admissible(u, gm)) bad = true;
+            }
+            if(!bad || !(vol > 0.0)) return;
+            for(int var=0; var<nvar; var++) mean[var] /= vol;
+            //The element mean is a convex combination of this element's CVs,
+            //so it is admissible whenever enough of them are. It is NOT
+            //guaranteed: the donor value that always is, is the parent
+            //element's mean, but that unit is 2^ndim fine elements wide.
+            //Count the cases so the need for that escalation is measured
+            //rather than assumed.
+            if(!pad_admissible(mean, gm)) badmean++;
+            //Shrink the element toward its own mean by the least amount that
+            //makes every control volume admissible (Zhang & Shu). Detection is
+            //per control volume -- theta is set by the worst one -- but the
+            //correction redistributes instead of overwriting, so the element
+            //mean, and with it the conserved content, is untouched. An
+            //admissible CV is barely moved; only a blanket theta=0 would be the
+            //full collapse. Overwriting the bad CVs alone is NOT an option: it
+            //changes their integral with nothing to compensate, and costs
+            //1.2e-4 of the total mass on this problem.
+            double theta = 1.0;
+            for(int kk=0; kk<nz; kk++)
+            for(int jj=0; jj<ny; jj++)
+            for(int ii=0; ii<nx; ii++){
+                double u2[NVAR], ut[NVAR];
+                for(int var=0; var<nvar; var++) u2[var]=V(t,var,k,j,i,kk,jj,ii);
+                if(pad_admissible(u2, gm)) continue;
+                //Largest admissible t in [0,1]; t=0 is the mean, which is
+                //admissible whenever this element can be fixed at all.
+                double lo=0.0, hi=1.0;
+                for(int it=0; it<40; it++){
+                    const double mid = 0.5*(lo+hi);
+                    for(int var=0; var<nvar; var++)
+                        ut[var] = mean[var] + mid*(u2[var]-mean[var]);
+                    if(pad_admissible(ut, gm)) lo = mid; else hi = mid;
+                }
+                if(lo < theta) theta = lo;
+            }
+            for(int kk=0; kk<nz; kk++)
+            for(int jj=0; jj<ny; jj++)
+            for(int ii=0; ii<nx; ii++)
+                for(int var=0; var<nvar; var++)
+                    V(t,var,k,j,i,kk,jj,ii) =
+                        mean[var] + theta*(V(t,var,k,j,i,kk,jj,ii)-mean[var]);
+            lim++;
+        }, Kokkos::Sum<int>(n_lim), Kokkos::Sum<int>(n_bad_mean));
+    if(n_unfixable) *n_unfixable += n_bad_mean;
+    return n_lim;
+}
+
 //Adjoint of prolongate_block: write the coarse subregion covered by fine
 //child (cx,cy,cz). Coarse element c (block-local, within the child's half)
 //gathers its two overlapping fine elements 2c+sub through columns
