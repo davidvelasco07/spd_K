@@ -134,8 +134,6 @@ extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
                               int, int, int, Matrix);
 extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,
                             int, int, int, Matrix);
-extern void block_boundary_sd_b(SD_Solution, IntVector, IntVector,
-                                IntVector, IntVector, int);
 extern void block_boundary_fv_b(FV_Solution, IntVector, IntVector,
                                 IntVector, IntVector, int);
 //Make the shared interface face of a face-staggered field identical on both

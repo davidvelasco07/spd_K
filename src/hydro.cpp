@@ -918,6 +918,11 @@ void level_fluxes_b(
     double dt,
     bool muscl
     ){
+    //A block's coordinates are taken as a raw row pointer below, which is a row
+    //only while rows are contiguous. Defaulting the layout gave LayoutLeft on
+    //CudaSpace and this walked into other blocks' data (see the Matrix typedef).
+    static_assert(std::is_same<Matrix::array_layout, Kokkos::LayoutRight>::value,
+                  "level_fluxes_b takes row pointers into a Matrix; it needs LayoutRight");
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var;
     double gm = cfg.gamma;
     bool ay=cfg.active[_y_], az=cfg.active[_z_];

@@ -149,7 +149,16 @@ extern int nGH_rt[3];
 using ExecSpace = MemSpace::execution_space;
 
 typedef Kokkos::View<double*,SetupSpace>  Vector;
-typedef Kokkos::View<double**,SetupSpace>  Matrix;
+//Layout is EXPLICIT here, not defaulted. A View without a layout takes the
+//memory space's preferred one -- LayoutRight on the host, LayoutLeft on
+//CudaSpace -- so a packed Matrix silently changed shape between backends.
+//level_fluxes_b hands each block its own coordinates as a raw row pointer
+//(cxm.data() + b*extent(1)), which is only a row while rows are contiguous:
+//on GPU that arithmetic walked the same column of successive blocks instead,
+//fed non-monotonic coordinates into the MUSCL slopes, and NaN'd every level-1
+//flux. Keeping Matrix LayoutRight also matches the bulk arrays below and makes
+//host and device agree, which is what the CPU-vs-GPU comparisons assume.
+typedef Kokkos::View<double**,Layout,SetupSpace>  Matrix;
 typedef Kokkos::View<double********,Layout,MemSpace>  SD_Vector;
 typedef Kokkos::View<double****,Layout,MemSpace> FV_Vector;
 

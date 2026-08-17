@@ -659,11 +659,7 @@ struct Mesh : public PhysicsModule {
                 SD_Vector pre("xchk_pre",  P.Vector.layout());
                 SD_Vector packed("xchk_pk", P.Vector.layout());
                 Kokkos::deep_copy(pre, P.Vector);
-                if(new_xchg()){
-                    gather_all_fp(dim);
-                } else {
-                    block_boundary_sd_b(P,nbrL_[dim],nbrR_[dim],typL_[dim],typR_[dim],dim);
-                }
+                gather_all_fp(dim);
                 Kokkos::deep_copy(packed, P.Vector);
                 Kokkos::deep_copy(P.Vector, pre);
                 forest_exchange_fp(forest, blocks, dim);
@@ -671,16 +667,23 @@ struct Mesh : public PhysicsModule {
             }
             return;   //the forest result is left in place
         }
+        //The transaction tables cover the uniform case too (one same-level
+        //transaction per block face), so they are the single batched path.
+        //
+        //This used to take block_boundary_sd_b on a uniform forest. That kernel
+        //is correct on the host and silently exchanges NOTHING under CUDA: with
+        //SPD_EXCHANGE_CHECK it leaves 0 of 102400 entries changed where the
+        //forest path changes 10240, and a decodable pattern shows every ghost
+        //still holding its pre-exchange value. Every multiblock GPU run was
+        //therefore missing its flux-point halo -- for all three fallback styles,
+        //which is why "uniform forest == one block" held exactly on CPU and not
+        //on GPU. The mechanism inside that kernel is not understood (captures,
+        //loop bounds and destination indices all read back correct on device),
+        //so it is removed rather than left as a default anyone can select.
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
-            if(new_xchg()){
-                gather_all_fp(dim);
-            } else if(forest.max_level()==0 && !no_pack()){
-                block_boundary_sd_b(fp_pack(dim),nbrL_[dim],nbrR_[dim],
-                                    typL_[dim],typR_[dim],dim);
-            } else {
-                forest_exchange_fp(forest, blocks, dim);
-            }
+            if(no_pack()) forest_exchange_fp(forest, blocks, dim);
+            else          gather_all_fp(dim);
         }
     }
 

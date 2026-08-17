@@ -160,55 +160,6 @@ void block_boundary_sd(
     });
 }
 
-//Batched counterpart: one kernel fills the dim-interface ghosts of every
-//block in the pack. nbrL/nbrR give each block's neighbour block index and
-//typL/typR its per-side boundary type, so the host-side block loop that
-//used to issue one launch per block becomes the leading kernel axis.
-void block_boundary_sd_b(
-    SD_Solution U,
-    IntVector nbrL,
-    IntVector nbrR,
-    IntVector typL,
-    IntVector typR,
-    int dim){
-    int nb = U.nb;
-    int Nx = dim==_x_ ? 1 : U.Nx;
-    int Ny = dim==_y_ ? 1 : U.Ny;
-    int Nz = dim==_z_ ? 1 : U.Nz;
-    int px = dim==_x_ ? 1 : U.nx;
-    int py = dim==_y_ ? 1 : U.ny;
-    int pz = dim==_z_ ? 1 : U.nz;
-    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
-    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
-    int nader = U.n_ader;
-    int nvar  = U.n_var;
-    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
-        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
-        const int boff  = b*nader;
-        const int boffL = nbrL(b)*nader;
-        const int boffR = nbrR(b)*nader;
-        const int tL = typL(b), tR = typR(b);
-        for(int t_id=0; t_id<nader; t_id++){
-        for(int var=0; var<nvar; var++){
-        int Nid[3];
-        int nid[3];
-        double v;
-        if(tL == _gradfree_)
-            v = value(U,boff +t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
-        else
-            v = value(U,boffL+t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
-        indices(Nid,nid,k,j,i,kk,jj,ii,  0,n-1,dim);
-        U.Vector(B_INDICES) = v;
-        if(tR == _gradfree_)
-            v = value(U,boff +t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
-        else
-            v = value(U,boffR+t_id,var,k,j,i,kk,jj,ii,  1,  0,dim);
-        indices(Nid,nid,k,j,i,kk,jj,ii,N-1,  0,dim);
-        U.Vector(B_INDICES) = v;
-        }}
-    }, "block_boundary_sd");
-}
-
 //Face-staggered fields store the shared block-interface face in BOTH blocks'
 //active region (left's last-active right face == right's first-active left
 //face). Each block overwrites its left active face from the left neighbour so
