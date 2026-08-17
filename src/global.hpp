@@ -81,6 +81,11 @@ struct RunConfig {
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
     int amr_max_level = 0;               //maximum refinement level
     int amr_criterion = 0;               //0=Lohner, 1=pressure, 2=trouble, 3=shear, 4=bfield
+    //Bound the p>=1 Lagrange prolongation by a discrete maximum principle taken
+    //from the coarse neighbourhood, on top of the PAD limiter. Off keeps the
+    //unlimited interpolation, which rings at sharp interfaces; on can clip
+    //legitimate sub-element structure, so it is a switch, not a constant.
+    bool amr_prolong_dmp = false;
     //Refine/derefine cuts for the shear criterion. shear_score is an undivided
     //velocity difference between neighbouring cells, so it carries a factor of
     //the cell size: halving the root resolution roughly doubles the score, and

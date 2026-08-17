@@ -215,6 +215,7 @@ int main(int argc, char** argv){
 
         cfg.adapt_interval = pin.GetOrAddInteger("amr","adapt_interval",0);
         cfg.amr_max_level  = pin.GetOrAddInteger("amr","max_level",0);
+        cfg.amr_prolong_dmp = pin.GetOrAddBoolean("amr","prolong_dmp",false);
         string crit = pin.GetOrAddString("amr","criterion","lohner");
         if(crit=="pressure") cfg.amr_criterion = 1;
         else if(crit=="trouble") cfg.amr_criterion = 2;

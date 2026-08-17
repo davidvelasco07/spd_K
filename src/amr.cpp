@@ -290,6 +290,165 @@ int limit_prolongation(SD_Solution C,
     return n_lim;
 }
 
+//Discrete-maximum-principle limiter for the p >= 1 prolongation.
+//
+//prolongate_block is exact on degree-p data but UNLIMITED, so across a sharp
+//interface it rings: the fine element overshoots the coarse data it came from
+//without ever violating PAD, so limit_prolongation (which fires only on
+//inadmissible pressure/density) lets it through. On the fig-21 KH that ringing
+//is what fills the SDFB AMR roll cores with fine-scale texture the uniform run
+//does not have.
+//
+//The bound is taken from the COARSE neighbourhood, which is still recoverable
+//from the fine block: prolongation is conservative per parent, so a parent's
+//mean is the mean of its 2^ndim children, and adjacent PAIRS of fine elements
+//per active direction share a parent (NB is even, so the pairing starts at the
+//first active element). Group the fine elements that way, and the group means
+//ARE the coarse element means. Bounds are min/max of the group means over the
+//group and its face-neighbour groups, clamped to the block interior -- the fine
+//block's ghosts hold nothing meaningful at this point in the regrid.
+//
+//The correction is the same Zhang & Shu shrink limit_prolongation uses, toward
+//each ELEMENT's own mean, so every element mean -- and with it the block's
+//conserved content -- is untouched. Bounds are widened to include the element
+//mean before solving for theta, so theta = 0 is always feasible and an element
+//whose mean legitimately sits outside the group range is limited rather than
+//mangled.
+//
+//MEASURED VERDICT (2026-08-17, fig-21 SDFB p=3): this criterion OVER-CLIPS and is
+//off by default (amr/prolong_dmp). On a refine-everything KH regrid it limited
+//14,656 of 16,384 elements -- 89%, i.e. almost all of them on smooth data -- and
+//made the error injected by the regrid 46x WORSE (rms 2.6e-04 -> 1.2e-02). The
+//t=1.2 rms improves slightly (0.217 -> 0.200) only because the solution is
+//uniformly more diffusive, which is damage, not accuracy.
+//
+//The reason is structural: a degree-p element's control volumes LEGITIMATELY
+//overshoot the neighbouring element MEANS -- that overshoot is the sub-element
+//resolution p buys -- so bounding CVs by group means cannot distinguish real
+//structure from interpolation ringing. A usable bound needs the coarse
+//element's own CV range, or a smoothness test (SED) on the coarse data; either
+//way the coarse source has to reach the limiter, which it does not today.
+//Kept as scaffolding for that, and as the record of why the cheap version fails.
+//
+//Returns the number of elements limited.
+int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz){
+    const int Nx=Ucv.Nx, Ny=Ucv.Ny, Nz=Ucv.Nz;
+    const int nx=Ucv.nx, ny=Ucv.ny, nz=Ucv.nz;
+    const int nader=Ucv.n_ader, nvar=Ucv.n_var;
+    const int qx=nx, qy=ny, qz=nz;
+    const bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    const int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    //elements per parent group, per direction
+    const int ex=2, ey=(ay?2:1), ez=(az?2:1);
+    const int Gx=Mx/ex, Gy=My/ey, Gz=Mz/ez;
+    const int64_t total = (int64_t)nader*Gz*Gy*Gx;
+    if(total <= 0 || Gx*ex != Mx || Gy*ey != My || Gz*ez != Mz) return 0;
+    GHOST_LOCALS;
+    SD_Vector V = Ucv.Vector;
+    int n_lim = 0;
+    Kokkos::parallel_reduce("limit_prolongation_dmp",
+        flat_range(0, flat_total(total)),
+        KOKKOS_LAMBDA(const unsigned idx, int& lim){
+            unsigned r = idx;
+            const int gi = (int)(r % Gx); r /= Gx;
+            const int gj = (int)(r % Gy); r /= Gy;
+            const int gk = (int)(r % Gz); r /= Gz;
+            const int t  = (int)r;
+            //mean of one parent group, in element indices [b*, b*+e)
+            auto gmean = [&](int bgi,int bgj,int bgk,double* m)->bool{
+                if(bgi<0||bgi>=Gx||bgj<0||bgj>=Gy||bgk<0||bgk>=Gz) return false;
+                for(int var=0; var<nvar; var++) m[var]=0.0;
+                double vol=0.0;
+                for(int dk=0; dk<ez; dk++)
+                for(int dj=0; dj<ey; dj++)
+                for(int di=0; di<ex; di++){
+                    const int i = ghx + bgi*ex + di;
+                    const int j = ghy + bgj*ey + dj;
+                    const int k = ghz + bgk*ez + dk;
+                    for(int kk=0; kk<nz; kk++)
+                    for(int jj=0; jj<ny; jj++)
+                    for(int ii=0; ii<nx; ii++){
+                        double wq = fx(I+1)-fx(I);
+                        if(ay) wq *= fy(J+1)-fy(J);
+                        if(az) wq *= fz(K+1)-fz(K);
+                        vol += wq;
+                        for(int var=0; var<nvar; var++)
+                            m[var] += wq*V(t,var,k,j,i,kk,jj,ii);
+                    }
+                }
+                if(!(vol>0.0)) return false;
+                for(int var=0; var<nvar; var++) m[var] /= vol;
+                return true;
+            };
+            double lo[NVAR], hi[NVAR], m[NVAR];
+            if(!gmean(gi,gj,gk,m)) return;
+            for(int var=0; var<nvar; var++){ lo[var]=m[var]; hi[var]=m[var]; }
+            const int off[6][3] = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
+            for(int f=0; f<6; f++){
+                if(!ay && off[f][1]) continue;
+                if(!az && off[f][2]) continue;
+                double mn[NVAR];
+                if(!gmean(gi+off[f][0],gj+off[f][1],gk+off[f][2],mn)) continue;
+                for(int var=0; var<nvar; var++){
+                    if(mn[var]<lo[var]) lo[var]=mn[var];
+                    if(mn[var]>hi[var]) hi[var]=mn[var];
+                }
+            }
+            //limit each element of the group against those bounds
+            for(int dk=0; dk<ez; dk++)
+            for(int dj=0; dj<ey; dj++)
+            for(int di=0; di<ex; di++){
+                const int i = ghx + gi*ex + di;
+                const int j = ghy + gj*ey + dj;
+                const int k = ghz + gk*ez + dk;
+                double em[NVAR]; double vol=0.0;
+                for(int var=0; var<nvar; var++) em[var]=0.0;
+                for(int kk=0; kk<nz; kk++)
+                for(int jj=0; jj<ny; jj++)
+                for(int ii=0; ii<nx; ii++){
+                    double wq = fx(I+1)-fx(I);
+                    if(ay) wq *= fy(J+1)-fy(J);
+                    if(az) wq *= fz(K+1)-fz(K);
+                    vol += wq;
+                    for(int var=0; var<nvar; var++)
+                        em[var] += wq*V(t,var,k,j,i,kk,jj,ii);
+                }
+                if(!(vol>0.0)) continue;
+                for(int var=0; var<nvar; var++) em[var] /= vol;
+                //theta = 0 must be feasible: widen to admit this element's mean
+                double elo[NVAR], ehi[NVAR];
+                for(int var=0; var<nvar; var++){
+                    elo[var] = lo[var] < em[var] ? lo[var] : em[var];
+                    ehi[var] = hi[var] > em[var] ? hi[var] : em[var];
+                }
+                double theta = 1.0;
+                for(int kk=0; kk<nz; kk++)
+                for(int jj=0; jj<ny; jj++)
+                for(int ii=0; ii<nx; ii++)
+                for(int var=0; var<nvar; var++){
+                    const double u = V(t,var,k,j,i,kk,jj,ii);
+                    const double d = u - em[var];
+                    if(d > 0.0 && u > ehi[var]){
+                        const double th = (ehi[var]-em[var])/d;
+                        if(th < theta) theta = th;
+                    } else if(d < 0.0 && u < elo[var]){
+                        const double th = (elo[var]-em[var])/d;
+                        if(th < theta) theta = th;
+                    }
+                }
+                if(theta >= 1.0) continue;
+                for(int kk=0; kk<nz; kk++)
+                for(int jj=0; jj<ny; jj++)
+                for(int ii=0; ii<nx; ii++)
+                for(int var=0; var<nvar; var++)
+                    V(t,var,k,j,i,kk,jj,ii) =
+                        em[var] + theta*(V(t,var,k,j,i,kk,jj,ii)-em[var]);
+                lim++;
+            }
+        }, Kokkos::Sum<int>(n_lim));
+    return n_lim;
+}
+
 //Adjoint of prolongate_block: write the coarse subregion covered by fine
 //child (cx,cy,cz). Coarse element c (block-local, within the child's half)
 //gathers its two overlapping fine elements 2c+sub through columns

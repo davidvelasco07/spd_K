@@ -59,6 +59,7 @@ extern void gather_block(SD_Solution, SD_Solution, int, int, int);
 //Admissibility limiter for the prolongated fine state (hydro conserved vars):
 //an element whose interpolation implies rho<=0 or p<=0 collapses to its own
 //(conserved) mean. Returns the number of elements limited.
+extern int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz);
 extern int limit_prolongation(SD_Solution Ucv,
                               Vector fx, Vector fy, Vector fz,
                               double gamma, int* n_unfixable);

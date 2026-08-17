@@ -1737,7 +1737,15 @@ struct Mesh : public PhysicsModule {
                 //hand the new fine block a state no update can recover from.
                 if constexpr (is_hydro){
                     blocks[ib].transform_sp_to_cv(blocks[ib].U_sp, blocks[ib].U_cv);
-                    const int nlim = limit_prolongation(blocks[ib].U_cv,
+                    //At p >= 1 the Lagrange prolongation is unlimited and rings
+                    //at a sharp interface without ever violating PAD, so the
+                    //PAD-only limiter below cannot see it. The DMP pass bounds
+                    //the fine elements by the coarse neighbourhood first.
+                    int nlim = 0;
+                    if(cfg.amr_prolong_dmp && Xd[0].p > 0)
+                        nlim += limit_prolongation_dmp(blocks[ib].U_cv,
+                            Xd[ib].fv_faces, Yd[ib].fv_faces, Zd[ib].fv_faces);
+                    nlim += limit_prolongation(blocks[ib].U_cv,
                         Xd[ib].fv_faces, Yd[ib].fv_faces, Zd[ib].fv_faces,
                         cfg.gamma, &prolong_unfixable);
                     prolong_limited += nlim;
