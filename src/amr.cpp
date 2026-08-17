@@ -92,6 +92,70 @@ void prolongate_block(SD_Solution C, SD_Solution F, Matrix P, int cx, int cy, in
     }, "prolongate_block");
 }
 
+KOKKOS_INLINE_FUNCTION
+double amr_minmod(double a, double b){
+    if(a*b <= 0.0) return 0.0;
+    return (fabs(a) < fabs(b)) ? a : b;
+}
+
+//Limited-linear prolongation, for p = 0 only.
+//
+//At p = 0 an element carries a single value and amr_P degenerates to a 2x1
+//matrix built from a constant basis -- i.e. piecewise-constant injection, which
+//throws away all sub-cell information and is only 1st order. That is the seed
+//behind the AMR-vs-uniform divergence on Kelvin-Helmholtz: measured over one
+//refine, injection puts an error of rms 5.3e-3 into the solution with 100% of it
+//at the 2-cell scale, against 2.6e-4 for the genuine degree-3 polynomial at
+//p = 3, and KH amplifies whatever seed it is given exponentially.
+//
+//Instead reconstruct a minmod-limited linear profile from the coarse neighbours
+//and evaluate it at the child centres, which sit at -+1/4 of a coarse cell from
+//the parent centre. This is the cell-centred prolongation athenak uses. Two
+//properties are what make it safe here:
+//  - conservative: the two children's offsets are symmetric about the parent, so
+//    the linear term cancels in their mean and the parent value is recovered
+//    exactly (in 2D/3D each direction cancels independently);
+//  - no new extrema: minmod keeps every child between neighbouring coarse
+//    values, so an admissible neighbourhood stays admissible per variable.
+//Per-variable bounds on the CONSERVED state do not imply positive pressure,
+//which is why limit_prolongation still runs downstream.
+//
+//Reads the coarse block's neighbours, so the ghosts must be current for the
+//state being transferred -- adapt() exchanges U_sp before capturing snapshots.
+void prolongate_block_lim(SD_Solution C, SD_Solution F, int cx, int cy, int cz){
+    int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
+    int nader=F.n_ader, nvar=F.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    int NBx=Nx-2*NGHx, NBy=Ny-2*NGHy, NBz=Nz-2*NGHz;
+    GHOST_LOCALS;
+    sd_for_box_cells(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,1,1,1,
+        KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        (void)kk; (void)jj; (void)ii;
+        const int gx = cx*NBx + (i-ghx);
+        const int gy = cy*NBy + (j-ghy);
+        const int gz = cz*NBz + (k-ghz);
+        const int cex = ax ? ghx+gx/2 : i;
+        const int cey = ay ? ghy+gy/2 : j;
+        const int cez = az ? ghz+gz/2 : k;
+        //child centre offset from the parent centre, in coarse cells
+        const double dx = ax ? ((gx&1) ? 0.25 : -0.25) : 0.0;
+        const double dy = ay ? ((gy&1) ? 0.25 : -0.25) : 0.0;
+        const double dz = az ? ((gz&1) ? 0.25 : -0.25) : 0.0;
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+            const double u = C.Vector(t_id,var,cez,cey,cex,0,0,0);
+            double v = u;
+            if(ax) v += dx*amr_minmod(C.Vector(t_id,var,cez,cey,cex+1,0,0,0)-u,
+                                      u-C.Vector(t_id,var,cez,cey,cex-1,0,0,0));
+            if(ay) v += dy*amr_minmod(C.Vector(t_id,var,cez,cey+1,cex,0,0,0)-u,
+                                      u-C.Vector(t_id,var,cez,cey-1,cex,0,0,0));
+            if(az) v += dz*amr_minmod(C.Vector(t_id,var,cez+1,cey,cex,0,0,0)-u,
+                                      u-C.Vector(t_id,var,cez-1,cey,cex,0,0,0));
+            F.Vector(t_id,var,k,j,i,0,0,0) = v;
+        }}
+    }, "prolongate_block_lim");
+}
+
 //Admissibility of one conserved control-volume state, phrased exactly as
 //pad_cell/PAD_criteria: density and pressure inside the shared PAD bounds.
 //Comparisons are written so a NaN fails rather than passes.

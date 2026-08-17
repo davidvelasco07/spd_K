@@ -28,6 +28,8 @@ plus command-line overrides. Checks per configuration:
   hydro_smr_2d   : static centre patch; the mesh must stay mixed-level
   hydro_amr_2d   : dynamic AMR on a pulse; the mesh must become mixed-level
   hydro_amr_2level_2d : same with two refinement levels
+  hydro_amr_muscl_2d : dynamic AMR at p=0; the only cover for the
+                   limited-linear prolongation (p>=1 uses the amr_P matrix)
   hydro_implosion_2d : reflective-wall implosion, mass conserved
   mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
   mhd_*_smr_2d   : true-2D MHD static refinement (mixed levels + divB)
@@ -379,6 +381,23 @@ CONFIGS = {
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_amr_muscl_2d": {
+        # Dynamic AMR at p = 0 (job/scheme=muscl). This is the only config that
+        # exercises prolongate_block_lim: every other AMR test runs at p = 3 and
+        # so takes the amr_P matrix path. At p = 0 amr_P degenerates to
+        # piecewise-constant injection, and the limited-linear reconstruction
+        # that replaces it reads the coarse block's NEIGHBOURS -- a new coupling
+        # the matrix path does not have, and one that has to stay exactly
+        # conservative through a regrid. mass_strict is the sharp test of that;
+        # the minmod limiter also has to leave the pulse admissible.
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["mesh/p=0", "job/scheme=muscl"],
+        "env": {"SPD_NEW_XCHG": "1"},
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N32p0_1_0.dat",
         "t_end": 0.1,
     },
     "hydro_amr_2level_2d": {

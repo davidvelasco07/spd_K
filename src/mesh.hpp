@@ -1638,9 +1638,14 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //p = 0 carries no sub-element polynomial for amr_P to interpolate, so the
+    //matrix path is piecewise-constant injection there; take the limited-linear
+    //reconstruction instead (see prolongate_block_lim). p >= 1 keeps the
+    //Lagrange operator, which is exact on degree-p data.
     void prolongate_snap(const BlockSnap& src, BlockSnap& dst,
                          int cx, int cy, int cz, int ib_mat){
-        prolongate_block(src.U, dst.U, amr_P, cx, cy, cz);
+        if(Xd[0].p == 0) prolongate_block_lim(src.U, dst.U, cx, cy, cz);
+        else             prolongate_block(src.U, dst.U, amr_P, cx, cy, cz);
         if constexpr (is_mhd){
             prolongate_block_face_B(src.Bx, src.By, src.Bz,
                                     dst.Bx, dst.By, dst.Bz,
@@ -1836,6 +1841,13 @@ struct Mesh : public PhysicsModule {
             p_before = min_primitive(_p_);
             d_before = min_primitive(_d_);
         }
+        //At p = 0 the transfer reconstructs a limited slope from each coarse
+        //block's neighbours, so the ghosts the snapshots carry have to describe
+        //this state and not the last stage's. Free for p >= 1, whose matrix
+        //prolongation reads the element only.
+        if(Xd[0].p == 0)
+            for(int dim=0; dim<3; dim++)
+                if(cfg.active[dim]) Exchange_sd_field(&Block::U_sp, dim);
         std::vector<BlockSnap> snap(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             snap[ib] = make_empty_snap(ib, "snap");

@@ -28,7 +28,8 @@ extern void combine_solution(SD_Solution, SD_Solution, double);
 extern void transfer_matrices(Matrix, Matrix, double*, int);
 extern void build_overlap_restrict_matrices(Matrix R_sp[2], Matrix R_cv[2],
                                             double* x_sp, double* x_fp, int p);
-extern void prolongate_block(SD_Solution, SD_Solution, Matrix, int, int, int);
+extern void prolongate_block_lim(SD_Solution C, SD_Solution F, int cx, int cy, int cz);
+void prolongate_block(SD_Solution, SD_Solution, Matrix, int, int, int);
 extern void restrict_block(SD_Solution, SD_Solution, Matrix, int, int, int);
 extern void restrict_face_overlap_sp(const SD_Solution** fine_faces, int n_sub,
                                      SD_Solution coarse_face, Matrix R, int dim);
