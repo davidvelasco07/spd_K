@@ -191,6 +191,16 @@ extern int  update_cascade(FV_Solution flagged, FV_Solution cascade, int n_casca
 extern void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
                              FV_Solution cascade, int dim);
 
+void fallback_fluxes_b(
+    FV_Solution U,
+    FV_Solution theta,
+    Matrix cxm, Matrix fxm, FV_Solution F_x,
+    Matrix cym, Matrix fym, FV_Solution F_y,
+    Matrix czm, Matrix fzm, FV_Solution F_z,
+    int ader,
+    Vector w,
+    double dt);
+
 void fallback_fluxes(
     FV_Solution, FV_Solution,
     Vector, Vector, FV_Solution,

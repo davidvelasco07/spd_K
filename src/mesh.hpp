@@ -384,8 +384,18 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //Batched exchanges (transaction tables) are the DEFAULT. The per-block
+    //forest path is O(leaf count) launches per relation per direction, which on
+    //an AMR forest is the whole cost: profiled on the fig-21 MUSCL lane (512^2
+    //finest, 3 levels, 540 steps) the two FV halo exchanges alone were 6.42M of
+    //7.81M launches -- 82% -- at 11,900 launches per step. Routing them through
+    //the tables took the run from 7,810,161 launches / 131.5 s to 605,961 /
+    //28.5 s: 12.9x fewer launches, 4.6x faster.
+    //
+    //SPD_OLD_XCHG=1 restores the per-block path; the two must agree exactly, so
+    //it stays as the A/B reference behind SPD_EXCHANGE_CHECK.
     static bool new_xchg(){
-        static bool v = getenv("SPD_NEW_XCHG") != nullptr;
+        static bool v = getenv("SPD_OLD_XCHG") == nullptr;
         return v;
     }
 
@@ -1062,6 +1072,18 @@ struct Mesh : public PhysicsModule {
         if(cfg.active[_z_]) assign_face_flux_b(pv.F_z, pv.F1_z, pv.F2_z, pv.cascade, _z_);
     }
 
+    //Blend the fallback flux into every face over the whole pack. This was the
+    //last per-block host loop in the blend update; once the halo exchanges were
+    //batched it dominated what remained (447,840 of 605,961 launches on the
+    //fig-21 MUSCL profile).
+    void FV_blend_batched(int ader){
+        fallback_fluxes_b(pv.W_old, pv.theta,
+            fvxc_p, fvx_p, pv.F_x,
+            fvyc_p, fvy_p, pv.F_y,
+            fvzc_p, fvz_p, pv.F_z,
+            ader, blocks[0].wt, dt);
+    }
+
     void FV_theta_batched(){
         if(cfg.muscl_only){
             Kokkos::deep_copy(pv.theta.Vector, 1.0);
@@ -1088,9 +1110,7 @@ struct Mesh : public PhysicsModule {
             { Region r("FV_theta"); FV_theta_batched(); }
             if(!cfg.muscl_only){ Region r("Exchange_theta");
                                  Exchange_fv_field(&Block::theta,&pv.theta); }
-            { Region r("FV_blend");
-              for(int b=0;b<nblocks;b++)
-                  blocks[b].FV_blend(ader,Xd[b],Yd[b],Zd[b]); }
+            { Region r("FV_blend"); FV_blend_batched(ader); }
             if(forest.max_level()>0){
                 Region r("correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)

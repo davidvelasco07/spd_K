@@ -946,6 +946,49 @@ void level_fluxes_b(
     });
 }
 
+//Same over a whole pack: one launch per direction instead of one per block.
+//
+//FV_blend was the last per-block host loop left in the blend update, and once
+//the halo exchanges were batched it became 74% of all remaining launches on an
+//AMR forest (447,840 of 605,961 on the fig-21 MUSCL profile). Geometry rides in
+//as packed Matrices exactly as level_fluxes_b takes it; compute_fluxes already
+//carried the (off, toff) offsets this needs.
+void fallback_fluxes_b(
+    FV_Solution U,
+    FV_Solution theta,
+    Matrix cxm, Matrix fxm, FV_Solution F_x,
+    Matrix cym, Matrix fym, FV_Solution F_y,
+    Matrix czm, Matrix fzm, FV_Solution F_z,
+    int ader,
+    Vector w,
+    double dt
+    ){
+    static_assert(std::is_same<Matrix::array_layout, Kokkos::LayoutRight>::value,
+                  "fallback_fluxes_b takes row pointers into a Matrix; it needs LayoutRight");
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var, tnv=theta.n_var;
+    double gm = cfg.gamma;
+    bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    FV_Vector u=U.Vector, th=theta.Vector;
+    FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
+    const double *cxd=cxm.data(), *fxd=fxm.data();
+    const double *cyd=cym.data(), *fyd=fym.data();
+    const double *czd=czm.data(), *fzd=fzm.data();
+    const int ncx=cxm.extent(1), nfx=fxm.extent(1);
+    const int ncy=cym.extent(1), nfy=fym.extent(1);
+    const int ncz=czm.extent(1), nfz=fzm.extent(1);
+    Vector wv = w;
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const double sdt = wv[ader]*dt;
+        const int off = b*nvar, toff = b*tnv;
+        const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
+        const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
+        const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
+        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+    }, "fallback_fluxes_b");
+}
+
 void fallback_fluxes(
     FV_Solution U,
     FV_Solution theta,
