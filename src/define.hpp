@@ -21,8 +21,17 @@
 #define p_min 1E-10
 #define p_max 1E10
 
+//Default ghost widths: NGH SD elements and nGH FV sub-grid cells per side.
+//These are the DEFAULTS ONLY -- set_runtime_dimensionality turns them into the
+//per-direction runtime widths NGH_rt/nGH_rt below, and everything that sizes or
+//indexes a halo must read those. Using NGH/nGH directly reintroduces the second
+//source of truth that let the exchange and the arrays disagree.
 #define NGH 1
 #define nGH 2
+
+//The two cells adjacent to a face. A reconstruction stencil size, unrelated to
+//any ghost width; see compute_fluxes/level_flux in hydro.cpp.
+#define FACE_CELLS 2
 
 //All three directions are always compiled; dimensionality is a runtime
 //choice made from the input file (inactive directions have one point,
@@ -581,24 +590,38 @@ void fv_for_cells(int Nz, int Ny, int Nx,
         make_flat3(f,Nz,Ny,Nx,0,0,0));
 }
 
+//The two detection loops keep a STENCIL MARGIN, not a ghost width: _ngh leaves
+//room for the one-cell reads of NAD/PAD/the blending ring, _2ngh for the
+//two-cell reads of smooth extrema detection. The margin is a property of the
+//stencil and must not follow the halo width -- a wider halo only means these
+//run over more ghost layers, whose results the active-only update_cascade and
+//the following exchange discard. (They were written as NGH and 2*NGH, which
+//read as ghost widths and happened to equal 1 and 2.)
+#define FV_STENCIL_MARGIN 1
+#define FV_SED_MARGIN     2
+
 template <class Functor>
 void fv_for_cells_ngh(int Nz, int Ny, int Nx,
                       const Functor& f, const char* label="fv_for_cells_ngh"){
-    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    const int mz=FV_STENCIL_MARGIN*(nGHz>0), my=FV_STENCIL_MARGIN*(nGHy>0),
+              mx=FV_STENCIL_MARGIN*(nGHx>0);
+    int Mz=Nz-2*mz, My=Ny-2*my, Mx=Nx-2*mx;
     int64_t total = (int64_t)Mz*My*Mx;
     if(total <= 0) return;
     Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
-        make_flat3(f,Mz,My,Mx,NGHz,NGHy,NGHx));
+        make_flat3(f,Mz,My,Mx,mz,my,mx));
 }
 
 template <class Functor>
 void fv_for_cells_2ngh(int Nz, int Ny, int Nx,
                        const Functor& f, const char* label="fv_for_cells_2ngh"){
-    int Mz=Nz-4*NGHz, My=Ny-4*NGHy, Mx=Nx-4*NGHx;
+    const int mz=FV_SED_MARGIN*(nGHz>0), my=FV_SED_MARGIN*(nGHy>0),
+              mx=FV_SED_MARGIN*(nGHx>0);
+    int Mz=Nz-2*mz, My=Ny-2*my, Mx=Nx-2*mx;
     int64_t total = (int64_t)Mz*My*Mx;
     if(total <= 0) return;
     Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
-        make_flat3(f,Mz,My,Mx,2*NGHz,2*NGHy,2*NGHx));
+        make_flat3(f,Mz,My,Mx,mz,my,mx));
 }
 
 //Sum-reduction over FV cells inside the nGH ghost frame.
@@ -709,24 +732,29 @@ void fv_for_cells_b(int nb, int Nz, int Ny, int Nx,
         make_flat4(f,Nz,Ny,Nx,0,0,0));
 }
 
+//Stencil margins, as in the unbatched pair above.
 template <class Functor>
 void fv_for_cells_ngh_b(int nb, int Nz, int Ny, int Nx,
                         const Functor& f, const char* label="fv_for_cells_ngh_b"){
-    int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    const int mz=FV_STENCIL_MARGIN*(nGHz>0), my=FV_STENCIL_MARGIN*(nGHy>0),
+              mx=FV_STENCIL_MARGIN*(nGHx>0);
+    int Mz=Nz-2*mz, My=Ny-2*my, Mx=Nx-2*mx;
     int64_t total = (int64_t)nb*Mz*My*Mx;
     if(total <= 0) return;
     Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
-        make_flat4(f,Mz,My,Mx,NGHz,NGHy,NGHx));
+        make_flat4(f,Mz,My,Mx,mz,my,mx));
 }
 
 template <class Functor>
 void fv_for_cells_2ngh_b(int nb, int Nz, int Ny, int Nx,
                          const Functor& f, const char* label="fv_for_cells_2ngh_b"){
-    int Mz=Nz-4*NGHz, My=Ny-4*NGHy, Mx=Nx-4*NGHx;
+    const int mz=FV_SED_MARGIN*(nGHz>0), my=FV_SED_MARGIN*(nGHy>0),
+              mx=FV_SED_MARGIN*(nGHx>0);
+    int Mz=Nz-2*mz, My=Ny-2*my, Mx=Nx-2*mx;
     int64_t total = (int64_t)nb*Mz*My*Mx;
     if(total <= 0) return;
     Kokkos::parallel_for(label, flat_range(0,flat_total(total)),
-        make_flat4(f,Mz,My,Mx,2*NGHz,2*NGHy,2*NGHx));
+        make_flat4(f,Mz,My,Mx,mz,my,mx));
 }
 
 //Lambda signature: (int b, int k, int j, int i, double& reduce)

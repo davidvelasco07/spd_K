@@ -51,15 +51,23 @@ class dimension{
             L = box_lenght;
             h = L/N_global;
             N = N_elements;
+            //Ghost widths come from the runtime globals, never from the
+            //compile-time NGH/nGH: the exchange and the physical BCs fill
+            //NGH_rt/nGH_rt layers, and sizing the arrays from anything else
+            //lets a widened halo write over interior cells.
+            const int NG = NGH_rt[dim];
+            const int g  = nGH_rt[dim];
             if(active){
                 n_sp = p+1;
                 n_fp = p+2;
-                N_total = (N+2*NGH);
+                N_total = (N+2*NG);
                 n_cells = N_total*n_sp;
                 n_faces = n_cells+1;
-                fv_ncells = N*n_sp+2*nGH;
+                fv_ncells = N*n_sp+2*g;
                 fv_nfaces = fv_ncells+1;
-                idL = n_sp-nGH;
+                //FV cell c is SD solution point c+idL, so the first active FV
+                //cell (index g) lands on the first active SD point (NG*n_sp).
+                idL = NG*n_sp-g;
                 idR = fv_ncells+idL;
             }else{
                 n_sp = 1;
@@ -86,7 +94,7 @@ class dimension{
             std::vector<char> got_f(fv_nf,0), got_c(fv_nc,0);
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){
-                    sd_faces_h(j,i)= (start+j-NGH + x_fp[i])*h;
+                    sd_faces_h(j,i)= (start+j-NG + x_fp[i])*h;
                     if((i+j*n_sp)>=idL && (i+j*n_sp)<idR){
                         fv_faces_h(i-idL+j*n_sp) = sd_faces_h(j,i);
                         got_f[i-idL+j*n_sp] = 1;
@@ -100,15 +108,19 @@ class dimension{
                     }
                 }
             }
-            //The FV sub-grid keeps nGH ghost cells per side, but the SD grid
-            //only supplies NGH ghost elements of n_sp points each. For n_sp >=
-            //nGH every FV ghost has an SD source; at p = 0 (job/scheme=muscl)
-            //n_sp < nGH, so idL < 0 and the outermost ghost coordinate on each
-            //side has none and would stay zero. slopes_d divides by the centre
-            //spacing there, so the boundary ghost slope -- and with it the
-            //flux on the two domain boundary faces -- comes out wrong and
-            //asymmetric, which breaks conservation. The sub-grid repeats every
-            //n_sp cells with element size h, so extend it by whole elements.
+            //The FV sub-grid keeps g ghost cells per side, but the SD grid only
+            //supplies NG ghost elements of n_sp points each. For g <= NG*n_sp
+            //every FV ghost has an SD source; past that idL < 0 and the
+            //outermost ghost coordinates have none and would stay zero. Two
+            //ways in: p = 0 (job/scheme=muscl) has n_sp = 1 < g at the default
+            //width, and widening the halo (SPD_FV_GHOST) does it at any p.
+            //slopes_d divides by the centre spacing there, so the boundary
+            //ghost slope -- and with it the flux on the two domain boundary
+            //faces -- comes out wrong and asymmetric, which breaks
+            //conservation. The sub-grid repeats every n_sp cells with element
+            //size h, so extend it by whole elements. Only the coordinates need
+            //this: no ghost cell takes its *data* from SD (fv_update_solution
+            //writes active cells only; the exchange fills the ghosts).
             if(active){
                 auto extend = [&](Vector_h v, std::vector<char>& got, int n){
                     for(int d=n-1; d>=0; d--)

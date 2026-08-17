@@ -367,34 +367,38 @@ void boundaries(
     int Nz = BC.Nz-(a_dim==_z_)*(alignment-shift);
     int type = BC.type;
     int N = BC.N;
-    
+    //Runtime halo width: nGH_rt is the one source of truth for how many ghost
+    //layers exist, and BC.Nx/Ny/Nz were sized from it. Reading the compile-time
+    //nGH here would source the wrong interior layers as soon as the two differ.
+    int ngh = nGH_rt[dim];
+
     int nvar  = U.n_var;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         for(int var=0; var<nvar; var++){
         int Nid[3];
         int l;
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
-        if(type == _periodic_){ 
-            fv_indices(Nid,k,j,i,N-2*nGH+l-shift,dim);
+        if(type == _periodic_){
+            fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
-            fv_indices(Nid,k,j,i,    nGH+l+shift,dim);
+            fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         else if(type == _gradfree_){
-            fv_indices(Nid,k,j,i,    nGH+l+shift,dim);
+            fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
-            fv_indices(Nid,k,j,i,N-2*nGH+l-shift,dim);
+            fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
         else if(type == _reflective_){
-            //Mirror the first/last nGH interior cells across the wall with
+            //Mirror the first/last ngh interior cells across the wall with
             //the normal velocity (momentum) sign-flipped. Only used for
             //cell-centered fields (shift = 0); flag arrays (nvar = 1) are
             //mirrored without any sign change.
             double sgn = (var == 1+dim) ? -1.0 : 1.0;
-            fv_indices(Nid,k,j,i,2*nGH-1-l,dim);
+            fv_indices(Nid,k,j,i,2*ngh-1-l,dim);
             BC.BoundaryL(var,k,j,i) = sgn*U.Vector(FV_INDICES);
-            fv_indices(Nid,k,j,i,N-nGH-1-l,dim);
+            fv_indices(Nid,k,j,i,N-ngh-1-l,dim);
             BC.BoundaryR(var,k,j,i) = sgn*U.Vector(FV_INDICES);
         }
         #ifdef MPI
@@ -413,7 +417,7 @@ void boundaries(
         l = dim==_x_ ? i : (dim==_y_ ? j : k);
         fv_indices(Nid,k,j,i,      l,dim);
         U.Vector(FV_INDICES) = BC.BoundaryL(var,k,j,i);
-        fv_indices(Nid,k,j,i,N-nGH+l,dim);
+        fv_indices(Nid,k,j,i,N-ngh+l,dim);
         U.Vector(FV_INDICES) = BC.BoundaryR(var,k,j,i);
         }
     });

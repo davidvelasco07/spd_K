@@ -65,10 +65,9 @@ int main(int argc, char** argv){
         CommHelper comm;
         cpu_rank = comm.me;
         Master = cpu_rank==0;
-        set_runtime_dimensionality(true,true,true);
-
         int p = 3;
         int N = 4;
+        set_runtime_dimensionality(true,true,true,p);
 
         double *x = malloc_host<double>(p);
         double *w = malloc_host<double>(p);

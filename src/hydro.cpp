@@ -753,9 +753,12 @@ void compute_fluxes(
     double gm
     ){
     //wL/wR hold only the D-direction faces of the two cells adjacent to the
-    //face (l = -1, 0); with D compile-time everything stays in registers
-    double wL[2*NGH][NVAR];
-    double wR[2*NGH][NVAR];
+    //face (l = -1, 0); with D compile-time everything stays in registers.
+    //FACE_CELLS is the size of that pair, not a ghost width -- it was spelled
+    //2*NGH, which reads as one and would silently resize these (and move the
+    //wL[0]/wR[1] picks off the adjacent cells) if the SD halo ever grew.
+    double wL[FACE_CELLS][NVAR];
+    double wR[FACE_CELLS][NVAR];
     double uL[NVAR];
     double uR[NVAR];
     double fL[NVAR];
@@ -764,7 +767,7 @@ void compute_fluxes(
     int v1 = choose(D,_vx_,_vy_,_vz_);
     int v2 = choose(D,_vy_,_vz_,_vx_);
     int v3 = choose(D,_vz_,_vx_,_vy_);
-    for(int l=-NGH; l<NGH; l++)
+    for(int l=-1; l<1; l++)
         slopes_d<D>(
             W,
             x_c,
@@ -777,8 +780,8 @@ void compute_fluxes(
             k + (D==_z_ ? l:0),
             j + (D==_y_ ? l:0),
             i + (D==_x_ ? l:0),
-            (wL[l+NGH]),
-            (wR[l+NGH]),
+            (wL[l+1]),
+            (wR[l+1]),
             dt,
             ay,
             az,
@@ -837,14 +840,14 @@ void level_flux(
     int v2 = choose(D,_vy_,_vz_,_vx_);
     int v3 = choose(D,_vz_,_vx_,_vy_);
     if(muscl){
-        double wL[2*NGH][NVAR];
-        double wR[2*NGH][NVAR];
-        for(int l=-NGH; l<NGH; l++)
+        double wL[FACE_CELLS][NVAR];
+        double wR[FACE_CELLS][NVAR];
+        for(int l=-1; l<1; l++)
             slopes_d<D>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
-                        (wL[l+NGH]),(wR[l+NGH]),dt,ay,az,gm);
+                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
         //Face between cell -1 and cell 0: the lower cell supplies the L state
         //at its upper face, the upper cell the R state at its lower face.
         conservatives(wL[0],uL,gm);

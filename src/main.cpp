@@ -144,7 +144,7 @@ int main(int argc, char** argv){
             if(Master) cout<<"ERROR: the x-direction must be active (nx1>1)"<<endl;
             exit(1);
         }
-        set_runtime_dimensionality(ax,ay,az);
+        set_runtime_dimensionality(ax,ay,az,p);
 
         //SD at p=3 is unstable at cfl=0.8: dt is exactly constant until
         //t~0.1 and then falls six orders of magnitude. Measured stable at

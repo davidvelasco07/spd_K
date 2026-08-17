@@ -11,7 +11,7 @@ string output_folder(){
 void Write(SD_Solution U, int n){
   Kokkos::fence(); //device work must finish before the host reads the data
   int p = U.nx-1;
-  int N = U.Nx-2*NGH;
+  int N = U.Nx-2*NGHx;
   string filename =  output_folder()+U.label+"_N"+to_string(N)+"p"+to_string(p)+"_"+to_string(n)+"_"+to_string(cpu_rank)+".dat";
   //cout<<N<<","<<p<<endl;
   #ifdef KOKKOS_ENABLE_CUDA

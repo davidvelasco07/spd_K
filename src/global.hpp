@@ -119,7 +119,12 @@ extern Matrix amr_RF_fp;
 extern Vector amr_x_fp;
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
-void set_runtime_dimensionality(bool ax, bool ay, bool az);
+//Sets cfg.active/ndim and the per-direction ghost widths NGH_rt/nGH_rt. Needs
+//the polynomial degree because the FV halo is drawn from the SD ghost elements
+//(n_sp = p+1 sub-cells each), so p decides how wide an FV halo the SD grid can
+//source. Must run before any dimension/Block is constructed -- they size their
+//arrays from these globals.
+void set_runtime_dimensionality(bool ax, bool ay, bool az, int p);
 
 //SSP (Shu-Osher) Runge-Kutta: every stage is a forward-Euler step with the
 //full dt followed by the convex combination U <- a*U0 + (1-a)*U with the
