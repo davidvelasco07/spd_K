@@ -23,6 +23,9 @@ integrator = rk3
 <hydro>
 gamma = 1.6666666666667
 
+<mhd>
+rsolver = hlld
+
 <fallback>
 max_revs = 3
 tolerance = 1e-5

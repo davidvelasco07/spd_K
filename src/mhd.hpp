@@ -6,11 +6,11 @@
 // Coupled fluid + constrained-transport spectral-difference scheme, ported from the
 // Python reference (spd/MHD, spd/induction/induction_sd_scheme.py). The 8-variable
 // cell-centered state (rho, vx, vy, vz, P/E, Bx, By, Bz) is advanced with high-order SD
-// fluxes and an MHD LLF Riemann solver, while the divergence-free magnetic field is
-// carried on cell faces and evolved by CT from edge EMFs. The edge EMF couples the
-// face B (interpolated to edges) with the fluid velocity/state (interpolated from the
-// cell-centered primitives to the same edge points) through an LLF electric-field
-// Riemann solver based on the fast magnetosonic speed.
+// fluxes and an MHD Riemann solver (LLF or Miyoshi–Kusano HLLD; see cfg.rsolver /
+// mhd/rsolver), while the divergence-free magnetic field is carried on cell faces and
+// evolved by CT from edge EMFs. The edge EMF couples the face B (interpolated to edges)
+// with the fluid velocity/state (interpolated from the cell-centered primitives to the
+// same edge points) through a matching electric-field Riemann solver.
 //
 // SSP-RK time integration only in this first port (ADER MHD deferred). The module
 // registers its tasks into the Driver's stage lists (see driver.hpp).
@@ -22,6 +22,7 @@ using namespace std;
 // [rho, vx, vy, vz, P/E, Bx, By, Bz]); all velocity and field components are
 // always carried, independent of the runtime dimensionality.
 #define NMHD 8
+#define NUCT 5   // face UCT coeffs: aL, dL, dR, vt1, vt2 (Mignone & Del Zanna)
 #define _mrho_ 0
 #define _mvx_  1
 #define _mvy_  2
@@ -41,7 +42,11 @@ extern void mhd_compute_primitives(SD_Solution U, SD_Solution W);
 extern void mhd_compute_primitives(FV_Solution U, FV_Solution W);
 extern void mhd_floor_cv(SD_Solution U_cv, FV_Solution B_cv);
 extern void mhd_compute_fluxes(SD_Solution W, SD_Solution F, int dim);
-extern void mhd_riemann_solver(SD_Solution U, SD_Solution F, int dim);
+extern void mhd_riemann_solver(SD_Solution U, SD_Solution F, int dim,
+                               SD_Solution Bn={}, SD_Solution UCT={});
+extern void mhd_face_B_to_fp(SD_Solution U_fp, SD_Solution B_fp, int dim);
+extern void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
+                           Matrix sp_to_fp, int edim);
 extern double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz);
 
 // CT coupling kernels (mhd.cpp): edge EMF from fluid velocity + face B
@@ -58,24 +63,40 @@ extern void mhd_compute_B_sp_from_fp(SD_Solution Bcc, SD_Solution Bx, SD_Solutio
 extern void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_z,
                            Vector x_sp, Vector w_sp);
 extern void mhd_Initialize_A(SD_Solution A, Matrix Xs, Matrix Ys, Matrix Zs, int dim);
+extern void mhd_jet_inflow_apply(SD_Solution W, SD_Solution U,
+                                 Matrix faces_x, Matrix faces_y,
+                                 Vector x_sp, Vector w_sp);
 
 // Diagnostics (mhd.cpp)
 extern double mhd_max_divB(SD_Solution Bx, SD_Solution By, SD_Solution Bz,
                            Matrix dfp_to_sp, double dx, double dy, double dz);
 
-// MOOD trouble detection (mhd.cpp): |B|-based NAD on control-volume averages + PAD
-extern void mhd_detection_vars(FV_Solution U, FV_Solution det);
-extern void mhd_NAD(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles, double tol);
+// MOOD trouble detection (mhd.cpp): NAD on control-volume averages (rho, gas p,
+// and B as components or |B| per cfg.mood_nad_b) + magnetic PAD. Tolerance scale
+// is cfg.mood_nad_scale (relative|delta|grange|gcfl).
+extern int  mhd_detection_vars(FV_Solution U, FV_Solution det);
+extern void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar,
+                                    double* gscale, double dt,
+                                    double dx, double dy, double dz,
+                                    bool apply_cfl=true);
+extern void mhd_NAD(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles,
+                    double tol, int nvar, const double* gscale);
 extern void mhd_PAD(FV_Solution U, FV_Solution troubles);
 extern void mhd_detect_troubles(FV_Solution U_new, FV_Solution U_old,
                                 FV_Solution det_new, FV_Solution det_old,
                                 FV_Solution troubles, bool PAD);
 
 // Low-order FV operators + MOOD cascade assembly (mhd.cpp)
-extern void mhd_fv_fluxes(FV_Solution W, FV_Solution F,
+extern void mhd_face_B_to_fv(SD_Solution B, FV_Solution Bfv, int dim);
+extern void mhd_fv_fluxes(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                           Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                           int dim, bool muscl);
 extern void mhd_four_state_E(FV_Solution E, FV_Solution W,
+                             Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
+                             int dim, bool muscl);
+extern void mhd_uct_corner_E(FV_Solution E, FV_Solution Bx, FV_Solution By, FV_Solution Bz,
+                             FV_Solution UCTx, FV_Solution UCTy, FV_Solution UCTz,
+                             int Nz, int Ny, int Nx,
                              Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                              int dim, bool muscl);
 extern void mhd_assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
@@ -111,6 +132,8 @@ struct MHD_ader : public PhysicsModule {
     Matrix cv_to_sp;
     Matrix fp_to_cv;
 
+    Vector xx, wx;   // GL quadrature on [0,1] for IC / jet inflow projection
+
     // Fluid state (8-var, cell-centered)
     SD_Solution U_sp;
     SD_Solution W_sp;
@@ -122,6 +145,7 @@ struct MHD_ader : public PhysicsModule {
     SD_Solution U_ader_fp_x, F_ader_fp_x;
     SD_Solution U_ader_fp_y, F_ader_fp_y;
     SD_Solution U_ader_fp_z, F_ader_fp_z;
+    SD_Solution UCT_fp_x, UCT_fp_y, UCT_fp_z;  // face HLLD UCT coeffs (NUCT)
     Boundaries BC_fp_x, BC_fp_y, BC_fp_z;
 
     // Face-staggered magnetic field + CT scratch
@@ -144,15 +168,21 @@ struct MHD_ader : public PhysicsModule {
     //================================================================
     // Fluid FV state (8-var cell averages, ghosted for reconstruction)
     FV_Solution U_old_fv, U_new_fv, W_fv;
-    FV_Solution det_old, det_new;        // (rho, p, |B|, aggregate)
+    FV_Solution det_old, det_new;        // NAD vars: rho,p,+B(+v) per mood_nad_*
     FV_Solution troubles;                // per-cell MOOD flag
     FV_Solution cascade;                 // ghosted per-cell cascade index
     FV_Boundaries BCu_x, BCu_y, BCu_z;   // 8-var halo (U_old_fv / W_fv)
     FV_Boundaries BCs_x, BCs_y, BCs_z;   // 1-var halo (troubles / cascade)
+    // Transverse halos for face-B and UCT coeffs (edge recon is cell-centered in
+    // the transverse directions). Named BCb_<comp>_<dir> / BCu_uct_<comp>_<dir>.
+    FV_Boundaries BCb_x_y, BCb_x_z, BCb_y_x, BCb_y_z, BCb_z_x, BCb_z_y;
+    FV_Boundaries BCu_x_y, BCu_x_z, BCu_y_x, BCu_y_z, BCu_z_x, BCu_z_y;
     // Per-level face fluxes (level 0 doubles as the assembled flux: the cascade
     // assembly overwrites demoted faces in place). face_integral scratch reuses
     // U_ader_fp_* (dead after the Riemann solve).
     FV_Solution F0_x,F1_x,F2_x, F0_y,F1_y,F2_y, F0_z,F1_z,F2_z;
+    // Per-level UCT face coefficients (aL,dL,dR,vt1,vt2) for HLLD corner EMF.
+    FV_Solution UCT1_x,UCT2_x, UCT1_y,UCT2_y, UCT1_z,UCT2_z;
     // Face-staggered B: FV-face working copy (SD layout) + FV cell/face arrays
     SD_Solution Bxf, Byf, Bzf;           // FV-face representation of the face field
     SD_Solution TB_x, TB_y, TB_z;        // scratch for sp<->cv face transforms
@@ -194,15 +224,17 @@ struct MHD_ader : public PhysicsModule {
         n_step = 0;
         t = 0;
 
-        Kokkos::resize(wt,1);
-        Kokkos::deep_copy(wt,1.0);
+        wt = Vector("wt", 1);
+        Vector_h wt_h = setup_mirror(wt);
+        wt_h(0) = 1.0;
+        setup_push(wt, wt_h);
 
-        Kokkos::resize(sp_to_fp,p+2,p+1);
-        Kokkos::resize(fp_to_sp,p+1,p+2);
-        Kokkos::resize(dfp_to_sp,p+1,p+2);
-        Kokkos::resize(sp_to_cv,p+1,p+1);
-        Kokkos::resize(cv_to_sp,p+1,p+1);
-        Kokkos::resize(fp_to_cv,p+1,p+2);
+        sp_to_fp = Matrix("sp_to_fp", p+2, p+1);
+        fp_to_sp = Matrix("fp_to_sp", p+1, p+2);
+        dfp_to_sp = Matrix("dfp_to_sp", p+1, p+2);
+        sp_to_cv = Matrix("sp_to_cv", p+1, p+1);
+        cv_to_sp = Matrix("cv_to_sp", p+1, p+1);
+        fp_to_cv = Matrix("fp_to_cv", p+1, p+2);
         lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
         lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
         lagrange_prime_matrix(dfp_to_sp, x_fp, x_sp, p+2, p+1);
@@ -210,10 +242,13 @@ struct MHD_ader : public PhysicsModule {
         integral_matrix(fp_to_cv, x_fp, x_fp, p+1, p+2);
         inverse(sp_to_cv, cv_to_sp, p+1);
 
-        Vector xx, wx;
-        Kokkos::resize(xx,p+1);
-        Kokkos::resize(wx,p+1);
-        gauss_legendre(0.0, 1.0, p+1, xx.data(), wx.data());
+        xx = Vector("xx", p+1);
+        wx = Vector("wx", p+1);
+        Vector_h xx_h = setup_mirror(xx);
+        Vector_h wx_h = setup_mirror(wx);
+        gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
+        setup_push(xx, xx_h);
+        setup_push(wx, wx_h);
 
         U_sp.init("U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         W_sp.init("W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -232,6 +267,9 @@ struct MHD_ader : public PhysicsModule {
         U_ader_fp_z.init("U_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
         F_ader_fp_z.init("F_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
         BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
+        UCT_fp_x.init("UCT_fp_x",1,NUCT,Z_dim,Y_dim,X_dim,0,0,1);
+        UCT_fp_y.init("UCT_fp_y",1,NUCT,Z_dim,Y_dim,X_dim,0,1,0);
+        UCT_fp_z.init("UCT_fp_z",1,NUCT,Z_dim,Y_dim,X_dim,1,0,0);
 
         Bx_fp_x.init("Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
         By_fp_y.init("By_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
@@ -260,8 +298,8 @@ struct MHD_ader : public PhysicsModule {
             U_old_fv.init("U_old_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
             U_new_fv.init("U_new_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
             W_fv.init("W_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
-            det_old.init("det_old",4,Z_dim,Y_dim,X_dim,0,0,0);
-            det_new.init("det_new",4,Z_dim,Y_dim,X_dim,0,0,0);
+            det_old.init("det_old",8,Z_dim,Y_dim,X_dim,0,0,0);
+            det_new.init("det_new",8,Z_dim,Y_dim,X_dim,0,0,0);
             troubles.init("troubles",1,Z_dim,Y_dim,X_dim,0,0,0);
             cascade.init("cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
             BCu_x.init(X_dim,cfg.bc[_x_],NMHD,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
@@ -277,6 +315,9 @@ struct MHD_ader : public PhysicsModule {
             F2_y.init("F2_y",NMHD,Z_dim,Y_dim,X_dim,0,1,0);
             F0_z.init("F0_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0); F1_z.init("F1_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
             F2_z.init("F2_z",NMHD,Z_dim,Y_dim,X_dim,1,0,0);
+            UCT1_x.init("UCT1_x",NUCT,Z_dim,Y_dim,X_dim,0,0,1); UCT2_x.init("UCT2_x",NUCT,Z_dim,Y_dim,X_dim,0,0,1);
+            UCT1_y.init("UCT1_y",NUCT,Z_dim,Y_dim,X_dim,0,1,0); UCT2_y.init("UCT2_y",NUCT,Z_dim,Y_dim,X_dim,0,1,0);
+            UCT1_z.init("UCT1_z",NUCT,Z_dim,Y_dim,X_dim,1,0,0); UCT2_z.init("UCT2_z",NUCT,Z_dim,Y_dim,X_dim,1,0,0);
             Bxf.init("Bxf",1,1,Z_dim,Y_dim,X_dim,0,0,1);
             Byf.init("Byf",1,1,Z_dim,Y_dim,X_dim,0,1,0);
             Bzf.init("Bzf",1,1,Z_dim,Y_dim,X_dim,1,0,0);
@@ -286,6 +327,18 @@ struct MHD_ader : public PhysicsModule {
             Bx_old.init("Bx_old",1,Z_dim,Y_dim,X_dim,0,0,1); Bx_new.init("Bx_new",1,Z_dim,Y_dim,X_dim,0,0,1);
             By_old.init("By_old",1,Z_dim,Y_dim,X_dim,0,1,0); By_new.init("By_new",1,Z_dim,Y_dim,X_dim,0,1,0);
             Bz_old.init("Bz_old",1,Z_dim,Y_dim,X_dim,1,0,0); Bz_new.init("Bz_new",1,Z_dim,Y_dim,X_dim,1,0,0);
+            BCb_x_y.init(Y_dim,cfg.bc[_y_],1,Bx_old.Nz,nGHy,Bx_old.Nx);
+            BCb_x_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Bx_old.Ny,Bx_old.Nx);
+            BCb_y_x.init(X_dim,cfg.bc[_x_],1,By_old.Nz,By_old.Ny,nGHx);
+            BCb_y_z.init(Z_dim,cfg.bc[_z_],1,nGHz,By_old.Ny,By_old.Nx);
+            BCb_z_x.init(X_dim,cfg.bc[_x_],1,Bz_old.Nz,Bz_old.Ny,nGHx);
+            BCb_z_y.init(Y_dim,cfg.bc[_y_],1,Bz_old.Nz,nGHy,Bz_old.Nx);
+            BCu_x_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_x.Nz,nGHy,UCT1_x.Nx);
+            BCu_x_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_x.Ny,UCT1_x.Nx);
+            BCu_y_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_y.Nz,UCT1_y.Ny,nGHx);
+            BCu_y_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_y.Ny,UCT1_y.Nx);
+            BCu_z_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_z.Nz,UCT1_z.Ny,nGHx);
+            BCu_z_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_z.Nz,nGHy,UCT1_z.Nx);
             B_old_cv.init("B_old_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
             B_new_cv.init("B_new_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
 
@@ -358,7 +411,14 @@ struct MHD_ader : public PhysicsModule {
         return TaskStatus::complete;
     }
 
+    void apply_jet_inflow(){
+        if(cfg.problem!=_ic_mhd_jet_) return;
+        mhd_jet_inflow_apply(W_sp,U_sp,Xdim_.sd_faces,Ydim_.sd_faces,xx,wx);
+        Kokkos::deep_copy(U_ader_sp.Vector,U_sp.Vector);
+    }
+
     TaskStatus TaskAdvance(Driver* d, int stage){
+        apply_jet_inflow();
         Solve_faces(comm_);
         Solve_E(comm_);
         if(cfg.fallback){
@@ -378,6 +438,7 @@ struct MHD_ader : public PhysicsModule {
             if(cfg.active[_z_])
                 update_B_solution(Bz_fp_z,Ex_ep_yz,Ey_ep_zx,dfp_to_sp,wt,Xdim_.h,Ydim_.h,dt,_z_);
         }
+        apply_jet_inflow();
         return TaskStatus::complete;
     }
 
@@ -416,15 +477,19 @@ struct MHD_ader : public PhysicsModule {
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_x,sp_to_fp,_x_);
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_y,sp_to_fp,_y_);
         if(az) transform_a_to_b_1d(U_ader_sp,U_ader_fp_z,sp_to_fp,_z_);
+        mhd_face_B_to_fp(U_ader_fp_x,Bx_fp_x,_x_);
+        mhd_face_B_to_fp(U_ader_fp_y,By_fp_y,_y_);
+        if(az) mhd_face_B_to_fp(U_ader_fp_z,Bz_fp_z,_z_);
         mhd_compute_fluxes(U_ader_fp_x,F_ader_fp_x,_x_);
         mhd_compute_fluxes(U_ader_fp_y,F_ader_fp_y,_y_);
         if(az) mhd_compute_fluxes(U_ader_fp_z,F_ader_fp_z,_z_);
         boundaries(comm,BC_fp_x,U_ader_fp_x);
         boundaries(comm,BC_fp_y,U_ader_fp_y);
         if(az) boundaries(comm,BC_fp_z,U_ader_fp_z);
-        mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_);
-        mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_);
-        if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_);
+        bool use_uct = (cfg.rsolver==_rsolver_hlld_);
+        mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_,Bx_fp_x,use_uct?UCT_fp_x:SD_Solution{});
+        mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_,By_fp_y,use_uct?UCT_fp_y:SD_Solution{});
+        if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_,Bz_fp_z,use_uct?UCT_fp_z:SD_Solution{});
     }
 
     void Solve_E(CommHelper comm){
@@ -438,14 +503,23 @@ struct MHD_ader : public PhysicsModule {
             mhd_compute_E(Ex_ep_yz,W_sp,By_fp_y,Bz_fp_z,U_sp,sp_to_fp,_x_);
         }
         apply_E_boundaries(comm);
-        //Edge Riemann (LLF-E); v_index 3/4 per the induction/Python convention
-        if(az) mhd_E_riemann_solver(Ey_ep_zx,_x_,4);
-        mhd_E_riemann_solver(Ez_ep_xy,_x_,3);
-        mhd_E_riemann_solver(Ez_ep_xy,_y_,4);
-        if(az){
-            mhd_E_riemann_solver(Ex_ep_yz,_y_,3);
-            mhd_E_riemann_solver(Ex_ep_yz,_z_,4);
-            mhd_E_riemann_solver(Ey_ep_zx,_z_,3);
+        if(cfg.rsolver==_rsolver_hlld_){
+            // SD UCT edge EMF: one MDZ formula for 1D (mid-face IF) and 2D (corners).
+            mhd_uct_edge_E(Ez_ep_xy,UCT_fp_x,UCT_fp_y,sp_to_fp,_z_);
+            if(az){
+                mhd_uct_edge_E(Ey_ep_zx,UCT_fp_z,UCT_fp_x,sp_to_fp,_y_);
+                mhd_uct_edge_E(Ex_ep_yz,UCT_fp_y,UCT_fp_z,sp_to_fp,_x_);
+            }
+        }else{
+            // LLF: two sequential 1D edge sweeps (v_index 3/4).
+            if(az) mhd_E_riemann_solver(Ey_ep_zx,_x_,4);
+            mhd_E_riemann_solver(Ez_ep_xy,_x_,3);
+            mhd_E_riemann_solver(Ez_ep_xy,_y_,4);
+            if(az){
+                mhd_E_riemann_solver(Ex_ep_yz,_y_,3);
+                mhd_E_riemann_solver(Ex_ep_yz,_z_,4);
+                mhd_E_riemann_solver(Ey_ep_zx,_z_,3);
+            }
         }
     }
 
@@ -477,8 +551,8 @@ struct MHD_ader : public PhysicsModule {
     // Levels 1 (MUSCL) and 2 (first order) are built on the ghosted FV
     // primitive field W_fv. Each revision assembles a single-valued flux per
     // face and E per edge from the pooled cascade index, forms the candidate
-    // fluid + CT cell averages, detects troubles (|B| NAD on control-volume
-    // averages + magnetic PAD), and demotes still-troubled cells. Because the
+    // fluid + CT cell averages, detects troubles (NAD on rho/p/B + magnetic PAD),
+    // and demotes still-troubled cells. Because the
     // assembled flux (edge E) is single-valued, conservation (divB=0) is
     // preserved at every level.
     /////////////////////////////////////////////////////////////////////
@@ -491,6 +565,29 @@ struct MHD_ader : public PhysicsModule {
         boundaries(comm,BCs_x,S,_center_,0);
         boundaries(comm,BCs_y,S,_center_,0);
         if(cfg.active[_z_]) boundaries(comm,BCs_z,S,_center_,0);
+    }
+    // Transverse-only ghosts of the staggered face field / UCT coeffs for UCT corner E.
+    void mood_halo_face_B(CommHelper comm){
+        bool az=cfg.active[_z_];
+        boundaries(comm,BCb_y_x,By_old,_center_,0);
+        if(az) boundaries(comm,BCb_z_x,Bz_old,_center_,0);
+        boundaries(comm,BCb_x_y,Bx_old,_center_,0);
+        if(az) boundaries(comm,BCb_z_y,Bz_old,_center_,0);
+        if(az){
+            boundaries(comm,BCb_x_z,Bx_old,_center_,0);
+            boundaries(comm,BCb_y_z,By_old,_center_,0);
+        }
+    }
+    void mood_halo_uct(CommHelper comm, FV_Solution UCTx, FV_Solution UCTy, FV_Solution UCTz){
+        bool az=cfg.active[_z_];
+        boundaries(comm,BCu_y_x,UCTy,_center_,0);
+        if(az) boundaries(comm,BCu_z_x,UCTz,_center_,0);
+        boundaries(comm,BCu_x_y,UCTx,_center_,0);
+        if(az) boundaries(comm,BCu_z_y,UCTz,_center_,0);
+        if(az){
+            boundaries(comm,BCu_x_z,UCTx,_center_,0);
+            boundaries(comm,BCu_y_z,UCTy,_center_,0);
+        }
     }
     // FV-face working copies (SD layout) of the current stage face field.
     void mood_reset_face_B(){
@@ -560,19 +657,35 @@ struct MHD_ader : public PhysicsModule {
         mhd_set_candidate_B(U_old_fv,B_old_cv);
         mood_halo_U(comm,U_old_fv);
         mhd_compute_primitives(U_old_fv,W_fv);
-        //Old-state detection band (rho, p, |B|) is fixed for all revisions; build
+        //Old-state detection band (rho, p, B) is fixed for all revisions; build
         //it once from the haloed old state (ghosts feed the NAD neighbourhood).
-        mhd_detection_vars(U_old_fv,det_old);
+        int n_det = mhd_detection_vars(U_old_fv,det_old);
+        //Global NAD scales (grange/gcfl) frozen for the stage from the old state.
+        double gscale[8]={};
+        mhd_nad_compute_gscales(det_old,W_fv,n_det,gscale,dt,
+                                Xdim_.h,Ydim_.h,Zdim_.h);
 
         //--- low-order levels (same ghosted W for the fluxes and the edge E) -----
+        //Bx/By/Bz_old hold the stage face field on the FV face lattice: the low-order
+        //Riemann solves take the normal component from there instead of reconstructing
+        //it, so it stays single-valued and divergence-free. mood_ct_update refills them
+        //from the same source before applying the curl.
+        mhd_face_B_to_fv(Bxf,Bx_old,_x_);
+        mhd_face_B_to_fv(Byf,By_old,_y_);
+        if(az) mhd_face_B_to_fv(Bzf,Bz_old,_z_);
+        bool use_uct = (cfg.rsolver==_rsolver_hlld_);
+        if(use_uct) mood_halo_face_B(comm);
         for(int dim=0; dim<3; dim++){
             //Flux sweep only along active directions
             if(cfg.active[dim]){
                 FV_Solution &F1=(dim==_x_?F1_x:(dim==_y_?F1_y:F1_z));
                 FV_Solution &F2=(dim==_x_?F2_x:(dim==_y_?F2_y:F2_z));
-                mhd_fv_fluxes(W_fv,F1,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                FV_Solution &Bn=(dim==_x_?Bx_old:(dim==_y_?By_old:Bz_old));
+                FV_Solution &U1=(dim==_x_?UCT1_x:(dim==_y_?UCT1_y:UCT1_z));
+                FV_Solution &U2=(dim==_x_?UCT2_x:(dim==_y_?UCT2_y:UCT2_z));
+                mhd_fv_fluxes(W_fv,F1,Bn,U1,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
                               Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true);
-                mhd_fv_fluxes(W_fv,F2,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                mhd_fv_fluxes(W_fv,F2,Bn,U2,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
                               Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
             }
             //An E family needs both of its transverse directions active
@@ -582,36 +695,71 @@ struct MHD_ader : public PhysicsModule {
             if(cfg.active[d1] && cfg.active[d2]){
                 FV_Solution &E1=(dim==_x_?E1x:(dim==_y_?E1y:E1z));
                 FV_Solution &E2=(dim==_x_?E2x:(dim==_y_?E2y:E2z));
-                mhd_four_state_E(E1,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                if(use_uct){
+                    //Halo UCT after all face sweeps for this level pair; do once
+                    //outside the dim loop below after both MUSCL and FO fills.
+                }else{
+                    mhd_four_state_E(E1,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                                     Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true);
+                    mhd_four_state_E(E2,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                                     Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
+                }
+            }
+        }
+        if(use_uct){
+            //UCT coeffs need transverse ghosts before the corner composition.
+            mood_halo_uct(comm,UCT1_x,UCT1_y,UCT1_z);
+            mood_halo_uct(comm,UCT2_x,UCT2_y,UCT2_z);
+            for(int dim=0; dim<3; dim++){
+                int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
+                int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
+                if(!(cfg.active[d1] && cfg.active[d2])) continue;
+                FV_Solution &E1=(dim==_x_?E1x:(dim==_y_?E1y:E1z));
+                FV_Solution &E2=(dim==_x_?E2x:(dim==_y_?E2y:E2z));
+                mhd_uct_corner_E(E1,Bx_old,By_old,Bz_old,UCT1_x,UCT1_y,UCT1_z,
+                                 W_fv.Nz,W_fv.Ny,W_fv.Nx,
+                                 Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
                                  Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true);
-                mhd_four_state_E(E2,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                mhd_uct_corner_E(E2,Bx_old,By_old,Bz_old,UCT2_x,UCT2_y,UCT2_z,
+                                 W_fv.Nz,W_fv.Ny,W_fv.Nx,
+                                 Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
                                  Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
             }
         }
 
         //--- cascade loop (fallback/max_revs detection/revision sweeps) ----------
-        Kokkos::deep_copy(cascade.Vector,0.0);
-        for(int rev=0; rev<cfg.max_revs; rev++){
+        if(cfg.mood_force_level>=0){
+            //Diagnostic: lock every cell at a fixed cascade level and skip
+            //detection (pure MUSCL or first-order CT update on the subcell mesh).
+            Kokkos::deep_copy(cascade.Vector,(double)cfg.mood_force_level);
+            mood_halo_scalar(comm,cascade);
             mood_assemble();
-            mood_fluid_update(false);      // candidate fluid cell averages
-            mood_ct_update();              // candidate CT cell averages (B_new_cv)
-            mhd_set_candidate_B(U_new_fv,B_new_cv);
-            //Detection: |B| NAD (candidate vs fixed old band) + magnetic PAD
-            mhd_detection_vars(U_new_fv,det_new);
-            mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance);
-            mhd_PAD(U_new_fv,troubles);
-            int demoted = mhd_update_cascade(troubles,cascade,2);
-            #ifdef MPI
-            int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
-            #endif
-            if(demoted==0) break;
-            mood_halo_scalar(comm,cascade);   // neighbour demotions feed the pooling
-        }
+            mood_fluid_update(true);
+            mood_ct_update();
+        }else{
+            Kokkos::deep_copy(cascade.Vector,0.0);
+            for(int rev=0; rev<cfg.max_revs; rev++){
+                mood_assemble();
+                mood_fluid_update(false);      // candidate fluid cell averages
+                mood_ct_update();              // candidate CT cell averages (B_new_cv)
+                mhd_set_candidate_B(U_new_fv,B_new_cv);
+                //Detection: NAD (B components or |B|) vs fixed old band + magnetic PAD
+                mhd_detection_vars(U_new_fv,det_new);
+                mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance,n_det,gscale);
+                mhd_PAD(U_new_fv,troubles);
+                int demoted = mhd_update_cascade(troubles,cascade,2);
+                #ifdef MPI
+                int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
+                #endif
+                if(demoted==0) break;
+                mood_halo_scalar(comm,cascade);   // neighbour demotions feed the pooling
+            }
 
-        //--- final commit -------------------------------------------------------
-        mood_assemble();
-        mood_fluid_update(true);           // commit U_cv
-        mood_ct_update();                  // commit the FV-face field into Bxf/Byf/Bzf
+            //--- final commit -------------------------------------------------------
+            mood_assemble();
+            mood_fluid_update(true);           // commit U_cv
+            mood_ct_update();                  // commit the FV-face field into Bxf/Byf/Bzf
+        }
         //AthenaK floor semantics: repair the committed cell averages (density
         //and total energy vs the committed CT field) before going back to
         //solution points. Cell-average granularity keeps the SD polynomial

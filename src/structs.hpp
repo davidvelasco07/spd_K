@@ -55,24 +55,51 @@ class dimension{
                 fv_nfaces = fv_ncells+1;
                 idL = n_sp-nGH;
                 idR = fv_ncells+idL;
+            }else{
+                // Degenerate 1-cell strip: need two face nodes so the center
+                // formula and IC quadrature loops can form one sub-interval.
+                n_sp = 1;
+                n_fp = 2;
             }
-            Kokkos::resize(sd_faces, N_total,n_fp);
-            Kokkos::resize(sd_centers, N_total,n_sp);
-            Kokkos::resize(fv_faces  , fv_nfaces);
-            Kokkos::resize(fv_centers, fv_ncells);
+            // Allocate directly (not resize) to avoid Kokkos CUDA ViewCopy SIGFPE
+            // on degenerate inactive-dimension views.
+            int sd_nrows = N_total;
+            int sd_ncols = n_fp;
+            int sd_spcols = n_sp;
+            int fv_nf = fv_nfaces;
+            int fv_nc = fv_ncells;
+            if(!active){
+                if(sd_nrows < 2) sd_nrows = 2;
+                if(sd_ncols < 2) sd_ncols = 2;
+                if(sd_spcols < 2) sd_spcols = 2;
+                if(fv_nf < 2) fv_nf = 2;
+                if(fv_nc < 2) fv_nc = 2;
+            }
+            sd_faces = Matrix("sd_faces", sd_nrows, sd_ncols);
+            sd_centers = Matrix("sd_centers", sd_nrows, sd_spcols);
+            fv_faces = Vector("fv_faces", fv_nf);
+            fv_centers = Vector("fv_centers", fv_nc);
+            Matrix_h sd_faces_h = setup_mirror(sd_faces);
+            Matrix_h sd_centers_h = setup_mirror(sd_centers);
+            Vector_h fv_faces_h = setup_mirror(fv_faces);
+            Vector_h fv_centers_h = setup_mirror(fv_centers);
 
             for(int j=0;j<N_total;j++){
                 for(int i=0;i<n_fp;i++){
-                    sd_faces(j,i)= (start+j-NGH + x_fp[i])*h;
+                    sd_faces_h(j,i)= (start+j-NGH + x_fp[i])*h;
                     if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
-                        fv_faces(i-idL+j*n_sp) = sd_faces(j,i);
+                        fv_faces_h(i-idL+j*n_sp) = sd_faces_h(j,i);
                 }
                 for(int i=0;i<n_sp;i++){
-                    sd_centers(j,i)= 0.5*(sd_faces(j,i+1)+sd_faces(j,i));
+                    sd_centers_h(j,i)= 0.5*(sd_faces_h(j,i+1)+sd_faces_h(j,i));
                     if((i+j*n_sp)>=idL && (i+j*n_sp)<idR)
-                        fv_centers(i-idL+j*n_sp) = sd_centers(j,i);
+                        fv_centers_h(i-idL+j*n_sp) = sd_centers_h(j,i);
                 }
             }
+            setup_push(sd_faces, sd_faces_h);
+            setup_push(sd_centers, sd_centers_h);
+            setup_push(fv_faces, fv_faces_h);
+            setup_push(fv_centers, fv_centers_h);
         }	
 };
 
@@ -90,7 +117,7 @@ class SD_Solution{
     int nz;
     int n_ader=1;
     int n_var;
-    string label;
+    char label[64];
     SD_Solution() = default;
     SD_Solution(string name,
         int nader,
@@ -122,8 +149,7 @@ class SD_Solution{
         nz = ( z  ?  Zdim.n_fp : Zdim.n_sp);
 
         Kokkos::resize(Vector,n_ader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        //cout<<name<<":"<<n_ader<<","<<nvar<<","<<Nz<<","<<Ny<<","<<Nx<<","<<nz<<","<<ny<<","<<nx<<endl;
-        label=name;
+        snprintf(label, sizeof(label), "%s", name.c_str());
     }
 
     //The host mirror is allocated lazily on the first copy(): only arrays that

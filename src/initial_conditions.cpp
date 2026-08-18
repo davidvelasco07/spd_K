@@ -198,6 +198,42 @@ void Initialize(
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     ProblemParams pp = cfg.pp;
+#ifdef KOKKOS_ENABLE_CUDA
+    Matrix_h fx = setup_mirror(faces_x); setup_pull(faces_x, fx);
+    Matrix_h fy = setup_mirror(faces_y); setup_pull(faces_y, fy);
+    Matrix_h fz = setup_mirror(faces_z); setup_pull(faces_z, fz);
+    Vector_h xs = setup_mirror(x_sp); setup_pull(x_sp, xs);
+    Vector_h ws = setup_mirror(w_sp); setup_pull(w_sp, ws);
+    SD_Vector_h Uh = Kokkos::create_mirror_view(U.Vector);
+    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k, int j, int i, int kk, int jj, int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        double value=0;
+        double s;
+        double x;
+        double y=0;
+        double z=0;
+        for(int nn=0; nn<pz; nn++){
+            if(az)
+                z = fz(k,kk) + xs(nn)*(fz(k,kk+1)-fz(k,kk));
+            for(int mm=0; mm<py; mm++){
+                if(ay)
+                    y = fy(j,jj) + xs(mm)*(fy(j,jj+1)-fy(j,jj));
+                for(int ll=0; ll<px; ll++){
+                    x = fx(i,ii) + xs(ll)*(fx(i,ii+1)-fx(i,ii));
+                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp);
+                    s*=ws(ll);
+                    if(ay) s*=ws(mm);
+                    if(az) s*=ws(nn);
+                    value+=s;
+                }
+            }
+        }
+        Uh(t_id,var,k,j,i,kk,jj,ii) = value;
+        }}
+    });
+    Kokkos::deep_copy(U.Vector, Uh);
+#else
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
@@ -225,6 +261,7 @@ void Initialize(
         U.Vector(t_id,var,k,j,i,kk,jj,ii) = value;
         }}
     });
+#endif
 }
 
 ////////////////

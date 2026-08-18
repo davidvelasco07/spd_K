@@ -49,9 +49,14 @@
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_, _reflective_};
 enum {_integrator_ader_, _integrator_rk_};
+enum {_rsolver_llf_, _rsolver_hlld_};
+enum {_nad_b_mag_, _nad_b_comps_};          // MHD NAD on |B| or (Bx,By,Bz)
+enum {_nad_v_off_, _nad_v_mag_, _nad_v_comps_}; // MHD NAD velocity: off / |v| / comps
+enum {_nad_scale_relative_, _nad_scale_delta_, _nad_scale_grange_, _nad_scale_gcfl_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
-      _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_};
+      _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,
+      _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_
@@ -99,8 +104,8 @@ extern int nGH_rt[3];
 //Bulk solution arrays live in device memory (CudaSpace): all per-step
 //kernels touch only these, so no host<->device traffic occurs during the
 //evolution loop. Small setup arrays (transform matrices, quadrature nodes,
-//face coordinates) are filled by host code once at startup and only read by
-//kernels afterwards, so they use managed memory (SetupSpace) for simplicity.
+//face coordinates) are allocated in the same device space and filled once
+//at startup via host mirrors + deep_copy (never CudaUVMSpace).
 //
 //LayoutRight everywhere: with the index order (t,var,k,j,i,kk,jj,ii) the
 //point index ii is stride-1, so a warp of consecutive flat indices reads
@@ -110,10 +115,10 @@ extern int nGH_rt[3];
 //GPU and CPU now share the same (C-order) on-disk layout.
 #ifdef KOKKOS_ENABLE_CUDA
 #define MemSpace Kokkos::CudaSpace
-#define SetupSpace Kokkos::CudaUVMSpace
+#define SetupSpace MemSpace
 #else
 #define MemSpace Kokkos::HostSpace
-#define SetupSpace Kokkos::HostSpace
+#define SetupSpace MemSpace
 #endif
 #define Layout Kokkos::LayoutRight
 
@@ -128,6 +133,22 @@ typedef Matrix::host_mirror_type Matrix_h;
 typedef Vector::host_mirror_type Vector_h;
 typedef SD_Vector::host_mirror_type SD_Vector_h;
 typedef FV_Vector::host_mirror_type FV_Vector_h;
+
+// Host mirror of a setup view for one-time initialization (device = SetupSpace).
+template<typename View>
+inline typename View::host_mirror_type setup_mirror(const View& dev){
+    return Kokkos::create_mirror_view(dev);
+}
+
+template<typename View>
+inline void setup_push(View& dev, const typename View::host_mirror_type& host){
+    Kokkos::deep_copy(dev, host);
+}
+
+template<typename View>
+inline void setup_pull(const View& dev, typename View::host_mirror_type& host){
+    Kokkos::deep_copy(host, dev);
+}
 
 //Loop helpers: thin wrappers over Kokkos::parallel_for/parallel_reduce
 //taking a KOKKOS_LAMBDA. Kernels launched on the same execution space
@@ -226,6 +247,20 @@ template <class Functor>
 Flat3<Functor> make_flat3(const Functor& f, int Mz, int My, int Mx,
                           int oz, int oy, int ox){
     return Flat3<Functor>{f,unsigned(Mz),unsigned(My),unsigned(Mx),oz,oy,ox};
+}
+
+//Host-side element loop (startup IC projection only; avoids device quadrature
+//kernels reading setup views on some CUDA builds).
+template <class Functor>
+void sd_for_cells_host(int Nz, int Ny, int Nx, int nz, int ny, int nx,
+                       const Functor& f){
+    for(int k=0;k<Nz;k++)
+    for(int j=0;j<Ny;j++)
+    for(int i=0;i<Nx;i++)
+    for(int kk=0;kk<nz;kk++)
+    for(int jj=0;jj<ny;jj++)
+    for(int ii=0;ii<nx;ii++)
+        f(k,j,i,kk,jj,ii);
 }
 
 //Element loop over all elements and their solution/flux points.

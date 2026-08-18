@@ -9,20 +9,18 @@ int choose(int dim, int i, int j, int k){
 //Momentum equations gain rho*g_i, the energy equation gains (rho v).g. Added
 //to dU/dt as +S (see the callers, which subtract it from the flux
 //divergence). U is the ADER solution-point state; t_id selects the slice.
-//NOTE: U is passed by const reference on purpose. SD_Solution holds a
-//std::string label, so a by-value copy inside device code would invoke
-//std::string's copy constructor on the GPU (invalid) and silently drop the
-//gravity source. A reference is inlined without copying the struct.
+//NOTE: pass SD_Vector, not SD_Solution — the latter holds a std::string label
+//that must not be copied into device lambdas.
 KOKKOS_INLINE_FUNCTION
-double gravity_source(const SD_Solution& U, int var, int t_id,
+double gravity_source(const SD_Vector& U, int var, int t_id,
                       int k, int j, int i, int kk, int jj, int ii,
                       double gx, double gy, double gz){
-    if(var==_vx_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gx;
-    if(var==_vy_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gy;
-    if(var==_vz_) return U.Vector(t_id,_d_,k,j,i,kk,jj,ii)*gz;
-    if(var==_p_)  return U.Vector(t_id,_vx_,k,j,i,kk,jj,ii)*gx
-                       + U.Vector(t_id,_vy_,k,j,i,kk,jj,ii)*gy
-                       + U.Vector(t_id,_vz_,k,j,i,kk,jj,ii)*gz;
+    if(var==_vx_) return U(t_id,_d_,k,j,i,kk,jj,ii)*gx;
+    if(var==_vy_) return U(t_id,_d_,k,j,i,kk,jj,ii)*gy;
+    if(var==_vz_) return U(t_id,_d_,k,j,i,kk,jj,ii)*gz;
+    if(var==_p_)  return U(t_id,_vx_,k,j,i,kk,jj,ii)*gx
+                       + U(t_id,_vy_,k,j,i,kk,jj,ii)*gy
+                       + U(t_id,_vz_,k,j,i,kk,jj,ii)*gz;
     return 0.0;
 }
 
@@ -69,6 +67,8 @@ void transform_a_to_b_ref(
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    SD_Vector Va = U_a.Vector;
+    SD_Vector Vb = U_b.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
@@ -77,7 +77,7 @@ void transform_a_to_b_ref(
         for(int nn=0; nn<qz; nn++){
             for(int mm=0; mm<qy; mm++){
                 for(int ll=0; ll<qx; ll++){
-                    s = U_a.Vector(t_id,var,k,j,i,nn,mm,ll);
+                    s = Va(t_id,var,k,j,i,nn,mm,ll);
                     if(ax) s *= a_to_b_x(ii,ll);
                     if(ay) s *= a_to_b_y(jj,mm);
                     if(az) s *= a_to_b_z(kk,nn);
@@ -85,7 +85,7 @@ void transform_a_to_b_ref(
                 }
             }
         }
-        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = result;
+        Vb(t_id,var,k,j,i,kk,jj,ii) = result;
         }}
     });
 }
@@ -131,6 +131,29 @@ void transform_a_to_b_1d(
     int q = choose(dim, U_a.nx, U_a.ny, U_a.nz);
     int nader = U_a.n_ader;
     int nvar = U_a.n_var;
+#ifdef KOKKOS_ENABLE_CUDA
+    Matrix_h Mh = setup_mirror(a_to_b);
+    setup_pull(a_to_b, Mh);
+    SD_Vector_h Va_h = Kokkos::create_mirror_view(U_a.Vector);
+    SD_Vector_h Vb_h = Kokkos::create_mirror_view(U_b.Vector);
+    Kokkos::deep_copy(Va_h, U_a.Vector);
+    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int nid[3];
+        double u=0;
+        int id = choose(dim,ii,jj,kk);
+        for(int ll=0; ll<q; ll++){
+            indices_n(nid,kk,jj,ii,ll,dim);
+            u += Va_h(t_id,var,k,j,i,NODE)*Mh(id,ll);
+        }
+        Vb_h(t_id,var,k,j,i,kk,jj,ii) = u;
+        }}
+    });
+    Kokkos::deep_copy(U_b.Vector, Vb_h);
+#else
+    SD_Vector Va = U_a.Vector;
+    SD_Vector Vb = U_b.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
@@ -139,11 +162,12 @@ void transform_a_to_b_1d(
         int id = choose(dim,ii,jj,kk);
         for(int ll=0; ll<q; ll++){
             indices_n(nid,kk,jj,ii,ll,dim);
-            u += U_a.Vector(t_id,var,k,j,i,NODE)*a_to_b(id,ll);
+            u += Va(t_id,var,k,j,i,nid[2],nid[1],nid[0])*a_to_b(id,ll);
         }
-        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
+        Vb(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
     });
+#endif
 }
 
 //Single-direction sweep of one time slice: reads slice t_src of U_a and
@@ -162,6 +186,8 @@ void transform_a_to_b_1d_slice(
     int pz = U_b.nz;
     int q = choose(dim, U_a.nx, U_a.ny, U_a.nz);
     int nvar = U_a.n_var;
+    SD_Vector Va = U_a.Vector;
+    SD_Vector Vb = U_b.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         int nid[3];
@@ -169,9 +195,9 @@ void transform_a_to_b_1d_slice(
         int id = choose(dim,ii,jj,kk);
         for(int ll=0; ll<q; ll++){
             indices_n(nid,kk,jj,ii,ll,dim);
-            u += U_a.Vector(t_src,var,k,j,i,NODE)*a_to_b(id,ll);
+            u += Va(t_src,var,k,j,i,NODE)*a_to_b(id,ll);
         }
-        U_b.Vector(0,var,k,j,i,kk,jj,ii) = u;
+        Vb(0,var,k,j,i,kk,jj,ii) = u;
         }
     });
 }
@@ -195,6 +221,8 @@ void transform_a_to_b_2d_ref(
     int dim2 = choose(dim1, _y_, _z_, _x_);
     int q1 = choose(dim1, px, py, pz);
     int q2 = choose(dim2, px, py, pz);
+    SD_Vector Va = U_a.Vector;
+    SD_Vector Vb = U_b.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         for(int var=0; var<nvar; var++){
@@ -207,13 +235,13 @@ void transform_a_to_b_2d_ref(
             indices_n(nid,kk,jj,ii,nn,dim2);
             for(int ll=0; ll<q1; ll++){
                 indices_n(nid,NODE,ll,dim1);
-                s = U_a.Vector(t_id,var,k,j,i,NODE);
+                s = Va(t_id,var,k,j,i,NODE);
                 s *= a_to_b(id1,ll);
                 s *= a_to_b(id2,nn);
                 u += s;
             }
         }
-        U_b.Vector(t_id,var,k,j,i,kk,jj,ii) = u;
+        Vb(t_id,var,k,j,i,kk,jj,ii) = u;
         }}
     });
 }
@@ -252,11 +280,13 @@ void transform_a_to_b_2d(
 void combine_solution(SD_Solution U, SD_Solution U0, double a){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
     int nvar=U.n_var;
+    SD_Vector Vu = U.Vector;
+    SD_Vector Vu0 = U0.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++)
-            U.Vector(0,var,k,j,i,kk,jj,ii) =
-                a*U0.Vector(0,var,k,j,i,kk,jj,ii)
-                + (1.0-a)*U.Vector(0,var,k,j,i,kk,jj,ii);
+            Vu(0,var,k,j,i,kk,jj,ii) =
+                a*Vu0(0,var,k,j,i,kk,jj,ii)
+                + (1.0-a)*Vu(0,var,k,j,i,kk,jj,ii);
     });
 }
 
@@ -290,6 +320,11 @@ void update_prediction(
     //current (previous Picard iteration) ADER state U_ader.
     double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
     bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
+    SD_Vector Vu = U.Vector;
+    SD_Vector Vader = U_ader.Vector;
+    SD_Vector Vfx = F_x.Vector;
+    SD_Vector Vfy = F_y.Vector;
+    SD_Vector Vfz = F_z.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt[10];
@@ -297,19 +332,16 @@ void update_prediction(
         int ll;
         double u_old;
         double du;
-        u_old =  U.Vector(0,var,k,j,i,kk,jj,ii);
+        u_old =  Vu(0,var,k,j,i,kk,jj,ii);
         for(t_id =0; t_id<nader; t_id++){
             dudt[t_id] = 0;
             for(ll=0; ll<q; ll++){
-                if(ax) dudt[t_id] += F_x.Vector(t_id,var,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/dx;
-                if(ay) dudt[t_id] += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/dy;
-                if(az) dudt[t_id] += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/dz;
+                if(ax) dudt[t_id] += Vfx(t_id,var,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/dx;
+                if(ay) dudt[t_id] += Vfy(t_id,var,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/dy;
+                if(az) dudt[t_id] += Vfz(t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/dz;
             }
-            //dudt holds the flux divergence div(F); the update below does
-            //U_ader = u_old - integral(dudt), so gravity enters as
-            //dudt -= S with S = (rho*g, rho*v.g) to give +S in dU/dt.
             if(grav){
-                double S = gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+                double S = gravity_source(Vader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
                 dudt[t_id] -= S;
             }
         }
@@ -318,7 +350,7 @@ void update_prediction(
             for(ll=0; ll<nader; ll++){
                 du += dudt[ll]*invader(t_id,ll)*w(ll)*dt;
             }
-            U_ader.Vector(t_id,var,k,j,i,kk,jj,ii) = u_old - du;
+            Vader(t_id,var,k,j,i,kk,jj,ii) = u_old - du;
         }
         }
     });
@@ -351,6 +383,11 @@ void update_solution(
     bool az = cfg.active[_z_];
     double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
     bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
+    SD_Vector Vu = U.Vector;
+    SD_Vector Vader = U_ader.Vector;
+    SD_Vector Vfx = F_x.Vector;
+    SD_Vector Vfy = F_y.Vector;
+    SD_Vector Vfz = F_z.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt;
@@ -359,16 +396,15 @@ void update_solution(
         for(int t_id =0; t_id<nader; t_id++){
             dudt = 0;
             for(int ll=0; ll<q; ll++){
-                if(ax) dudt += F_x.Vector(t_id,var,k,j,i,kk,jj,ll)*da_to_b(ii,ll)/dx;
-                if(ay) dudt += F_y.Vector(t_id,var,k,j,i,kk,ll,ii)*da_to_b(jj,ll)/dy;
-                if(az) dudt += F_z.Vector(t_id,var,k,j,i,ll,jj,ii)*da_to_b(kk,ll)/dz;
+                if(ax) dudt += Vfx(t_id,var,k,j,i,kk,jj,ll)*da_to_b(ii,ll)/dx;
+                if(ay) dudt += Vfy(t_id,var,k,j,i,kk,ll,ii)*da_to_b(jj,ll)/dy;
+                if(az) dudt += Vfz(t_id,var,k,j,i,ll,jj,ii)*da_to_b(kk,ll)/dz;
             }
-            //Gravity: subtract S from div(F) so the U -= du below adds +S*dt
             if(grav)
-                dudt -= gravity_source(U_ader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+                dudt -= gravity_source(Vader,var,t_id,k,j,i,kk,jj,ii,gx,gy,gz);
             du += dudt*w(t_id)*dt;
         }
-        U.Vector(0,var,k,j,i,kk,jj,ii) -= du;
+        Vu(0,var,k,j,i,kk,jj,ii) -= du;
         }
     });
 }
@@ -402,6 +438,8 @@ void face_integral_ref(
     bool a1 = cfg.active[dim1];
     bool a2 = cfg.active[dim2];
     GHOST_LOCALS;
+    SD_Vector Vfp = F_fp.Vector;
+    FV_Vector Vf = F.Vector;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double s=0;
         double f;
@@ -414,14 +452,14 @@ void face_integral_ref(
                 indices_n(nid,kk,jj,ii,nn,dim2);
                 for(int ll=0; ll<q1; ll++){
                     indices_n(nid,NODE,ll,dim1);
-                    s = F_fp.Vector(t_id,var,k,j,i,NODE);
+                    s = Vfp(t_id,var,k,j,i,NODE);
                     if(a1) s *= sp_to_cv(id1,ll);
                     if(a2) s *= sp_to_cv(id2,nn);
                     f += s;
                 }
             }
             if(K < Nk && J < Nj && I < Ni)
-                F.Vector(var,K,J,I) = f;
+                Vf(var,K,J,I) = f;
         }
     });
 }
@@ -464,6 +502,8 @@ void face_integral(
     int Nj = F.Ny;
     int Nk = F.Nz;
     GHOST_LOCALS;
+    SD_Vector Vt = T.Vector;
+    FV_Vector Vf = F.Vector;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         double f;
         int nid[3];
@@ -472,10 +512,10 @@ void face_integral(
             f=0;
             for(int nn=0; nn<q2; nn++){
                 indices_n(nid,kk,jj,ii,nn,dim2);
-                f += T.Vector(0,var,k,j,i,NODE)*sp_to_cv(id2,nn);
+                f += Vt(0,var,k,j,i,NODE)*sp_to_cv(id2,nn);
             }
             if(K < Nk && J < Nj && I < Ni)
-                F.Vector(var,K,J,I) = f;
+                Vf(var,K,J,I) = f;
         }
     });
 }
@@ -512,32 +552,37 @@ void fv_update_solution(
     double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
     bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
     GHOST_LOCALS;
+    SD_Vector Vcv = U_cv.Vector;
+    FV_Vector Vnew = U_new.Vector;
+    FV_Vector Vold = U_old.Vector;
+    FV_Vector Vfx = F_x.Vector;
+    FV_Vector Vfy = F_y.Vector;
+    FV_Vector Vfz = F_z.Vector;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double h;
         double F;
         double u_new;
         F=0;
-        U_old.Vector(var,K,J,I) = U_cv.Vector(0,var,k,j,i,kk,jj,ii);
+        Vold(var,K,J,I) = Vcv(0,var,k,j,i,kk,jj,ii);
         if(ax){
             h = faces_x(I+1)-faces_x(I);
-            F += (F_x.Vector(var,K,J,I+1)-F_x.Vector(var,K,J,I))/h;
+            F += (Vfx(var,K,J,I+1)-Vfx(var,K,J,I))/h;
         }
         if(ay){
             h = faces_y(J+1)-faces_y(J);
-            F += (F_y.Vector(var,K,J+1,I)-F_y.Vector(var,K,J,I))/h;
+            F += (Vfy(var,K,J+1,I)-Vfy(var,K,J,I))/h;
         }
         if(az){
             h = faces_z(K+1)-faces_z(K);
-            F += (F_z.Vector(var,K+1,J,I)-F_z.Vector(var,K,J,I))/h;
+            F += (Vfz(var,K+1,J,I)-Vfz(var,K,J,I))/h;
         }
-        //Gravity source from the current subcell average (U_cv slice 0)
         if(grav)
-            F -= gravity_source(U_cv,var,0,k,j,i,kk,jj,ii,gx,gy,gz);
-        u_new = U_old.Vector(var,K,J,I) - w(t_id)*dt*F;
-        U_new.Vector(var,K,J,I) = u_new;
+            F -= gravity_source(Vcv,var,0,k,j,i,kk,jj,ii,gx,gy,gz);
+        u_new = Vold(var,K,J,I) - w(t_id)*dt*F;
+        Vnew(var,K,J,I) = u_new;
         if(update)
-            U_cv.Vector(0,var,k,j,i,kk,jj,ii) = u_new;
+            Vcv(0,var,k,j,i,kk,jj,ii) = u_new;
         }
     });
 }
@@ -556,8 +601,10 @@ void FV_to_SD(
     int qz = pz;
     int nvar = U_sd.n_var;
     GHOST_LOCALS;
+    FV_Vector Vfv = U_fv.Vector;
+    SD_Vector Vsd = U_sd.Vector;
     sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++)
-        U_sd.Vector(0,var,k,j,i,kk,jj,ii) = U_fv.Vector(var,K,J,I);
+        Vsd(0,var,k,j,i,kk,jj,ii) = Vfv(var,K,J,I);
     });
 }

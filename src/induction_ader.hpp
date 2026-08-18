@@ -118,27 +118,35 @@ struct Induction_ader : public PhysicsModule{
         //SSP-RK stage is a single forward-Euler slice (weight 1)
         if(cfg.integrator==_integrator_rk_){
             n_ader = 1;
-            Kokkos::resize(xt,1);
-            Kokkos::resize(wt,1);
-            Kokkos::deep_copy(xt,0.0);
-            Kokkos::deep_copy(wt,1.0);
+            xt = Vector("xt", 1);
+            wt = Vector("wt", 1);
+            Vector_h xt_h = setup_mirror(xt);
+            Vector_h wt_h = setup_mirror(wt);
+            xt_h(0) = 0.0;
+            wt_h(0) = 1.0;
+            setup_push(xt, xt_h);
+            setup_push(wt, wt_h);
         }
         else{
             n_ader = p+1;
-            Kokkos::resize(xt,p+1);
-            Kokkos::resize(wt,p+1);
-            gauss_legendre(0.0, 1.0, p+1, xt.data(), wt.data());
+            xt = Vector("xt", p+1);
+            wt = Vector("wt", p+1);
+            Vector_h xt_h = setup_mirror(xt);
+            Vector_h wt_h = setup_mirror(wt);
+            gauss_legendre(0.0, 1.0, p+1, xt_h.data(), wt_h.data());
+            setup_push(xt, xt_h);
+            setup_push(wt, wt_h);
         }
 
         //////////////
         //Matrices to perform tensorial transformations
         //////////////
-        Kokkos::resize(sp_to_fp,p+2,p+1);
-        Kokkos::resize(fp_to_sp,p+1,p+2);
-        Kokkos::resize(dfp_to_sp,p+1,p+2);
-        Kokkos::resize(sp_to_cv,p+1,p+1);
-        Kokkos::resize(cv_to_sp,p+1,p+1);
-        Kokkos::resize(fp_to_cv,p+1,p+2);
+        sp_to_fp = Matrix("sp_to_fp", p+2, p+1);
+        fp_to_sp = Matrix("fp_to_sp", p+1, p+2);
+        dfp_to_sp = Matrix("dfp_to_sp", p+1, p+2);
+        sp_to_cv = Matrix("sp_to_cv", p+1, p+1);
+        cv_to_sp = Matrix("cv_to_sp", p+1, p+1);
+        fp_to_cv = Matrix("fp_to_cv", p+1, p+2);
 
         lagrange_matrix(sp_to_fp, x_sp, x_fp, p+1, p+2);
         lagrange_matrix(fp_to_sp, x_fp, x_sp, p+2, p+1);
@@ -148,8 +156,8 @@ struct Induction_ader : public PhysicsModule{
         inverse(sp_to_cv, cv_to_sp, p+1);
         //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
         if(cfg.integrator==_integrator_ader_){
-            Kokkos::resize(ader,p+1,p+1);
-            Kokkos::resize(invader,p+1,p+1);
+            ader = Matrix("ader", p+1, p+1);
+            invader = Matrix("invader", p+1, p+1);
             ader_matrix(ader, xt, wt, p+1);
             inverse(ader, invader, p+1);
         }

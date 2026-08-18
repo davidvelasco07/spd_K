@@ -115,30 +115,62 @@ void rotational_a_to_b(
     int dim2 = choose(dim1,_y_,_z_,_x_);
     bool a1 = cfg.active[dim1];
     bool a2 = cfg.active[dim2];
+#ifdef KOKKOS_ENABLE_CUDA
+    Matrix_h Dah = setup_mirror(da_to_b);
+    setup_pull(da_to_b, Dah);
+    SD_Vector_h A1h = Kokkos::create_mirror_view(A1.Vector);
+    SD_Vector_h A2h = Kokkos::create_mirror_view(A2.Vector);
+    SD_Vector_h Bh = Kokkos::create_mirror_view(B.Vector);
+    Kokkos::deep_copy(A1h, A1.Vector);
+    Kokkos::deep_copy(A2h, A2.Vector);
+    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
+        for(int t_id=0; t_id<nader; t_id++){
+        double d1a2=0;
+        double d2a1=0;
+        for(int ll=0; ll<q; ll++){
+            if(dim==0){
+                if(a1) d1a2 += A2h(t_id,0,k,j,i,kk,ll,ii)*Dah(jj,ll);
+                if(a2) d2a1 += A1h(t_id,0,k,j,i,ll,jj,ii)*Dah(kk,ll);
+            }
+            else if(dim==1){
+                if(a1) d1a2 += A2h(t_id,0,k,j,i,ll,jj,ii)*Dah(kk,ll);
+                if(a2) d2a1 += A1h(t_id,0,k,j,i,kk,jj,ll)*Dah(ii,ll);
+            }
+            else if(dim==2){
+                if(a1) d1a2 += A2h(t_id,0,k,j,i,kk,jj,ll)*Dah(ii,ll);
+                if(a2) d2a1 += A1h(t_id,0,k,j,i,kk,ll,ii)*Dah(jj,ll);
+            }
+        }
+        Bh(t_id,0,k,j,i,kk,jj,ii) = (a1 ? d1a2/d1 : 0.0) - (a2 ? d2a1/d2 : 0.0);
+        }
+    });
+    Kokkos::deep_copy(B.Vector, Bh);
+#else
+    SD_Vector Va1 = A1.Vector;
+    SD_Vector Va2 = A2.Vector;
+    SD_Vector Vb = B.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
         double d1a2=0;
         double d2a1=0;
         for(int ll=0; ll<q; ll++){
             if(dim==0){
-                //Bx = dyAz - dzAy
-                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
-                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
+                if(a1) d1a2 += Va2(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
+                if(a2) d2a1 += Va1(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
             }
             else if(dim==1){
-                //By = dzAx - dxAz
-                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
-                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
+                if(a1) d1a2 += Va2(t_id,0,k,j,i,ll,jj,ii)*da_to_b(kk,ll);
+                if(a2) d2a1 += Va1(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
             }
             else if(dim==2){
-                //Bz = dxAy - dyAx
-                if(a1) d1a2 += A2.Vector(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
-                if(a2) d2a1 += A1.Vector(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
+                if(a1) d1a2 += Va2(t_id,0,k,j,i,kk,jj,ll)*da_to_b(ii,ll);
+                if(a2) d2a1 += Va1(t_id,0,k,j,i,kk,ll,ii)*da_to_b(jj,ll);
             }
         }
-        B.Vector(t_id,0,k,j,i,kk,jj,ii) = (a1 ? d1a2/d1 : 0.0) - (a2 ? d2a1/d2 : 0.0);
+        Vb(t_id,0,k,j,i,kk,jj,ii) = (a1 ? d1a2/d1 : 0.0) - (a2 ? d2a1/d2 : 0.0);
         }
     });
+#endif
 }
 
 void compute_E(

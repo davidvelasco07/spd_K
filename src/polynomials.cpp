@@ -11,11 +11,13 @@ double lagrange(double *x, double y, int i, int n){
 }
 
 void lagrange_matrix(Matrix a_to_b, double *x_a, double *x_b, int n_a, int n_b){
-  for(int j=0;j<n_b;j++){
+    Matrix_h h = setup_mirror(a_to_b);
+    for(int j=0;j<n_b;j++){
         for(int i=0;i<n_a;i++){
-            a_to_b(j,i)=lagrange(x_a,x_b[j],i,n_a);
+            h(j,i)=lagrange(x_a,x_b[j],i,n_a);
         }
     }
+    setup_push(a_to_b, h);
 }
 
 double lagrange_prime(double *x, double y, int i, int n){
@@ -36,11 +38,13 @@ double lagrange_prime(double *x, double y, int i, int n){
 }
 
 void lagrange_prime_matrix(Matrix da_to_b, double *x_a, double *x_b, int n_a, int n_b){
-  for(int j=0;j<n_b;j++){
+    Matrix_h h = setup_mirror(da_to_b);
+    for(int j=0;j<n_b;j++){
         for(int i=0;i<n_a;i++){
-            da_to_b(j,i)=lagrange_prime(x_a,x_b[j],i,n_a);
+            h(j,i)=lagrange_prime(x_a,x_b[j],i,n_a);
         }
     }
+    setup_push(da_to_b, h);
 }
 
 void gauss_legendre(double xi, double xf, int n, double *x, double *w){
@@ -93,11 +97,18 @@ void solution_points(double *x_sp, int n){
 }
 
 void ader_matrix(Matrix ader, Vector x_t, Vector w_t, int n){
+    Vector_h xt_h = setup_mirror(x_t);
+    Vector_h wt_h = setup_mirror(w_t);
+    setup_pull(x_t, xt_h);
+    setup_pull(w_t, wt_h);
+    Matrix_h h = setup_mirror(ader);
     for(int j=0;j<n;j++){
         for(int i=0;i<n;i++){
-          ader(j,i)=lagrange(x_t.data(),1,i,n)*lagrange(x_t.data(),1,j,n)-lagrange_prime(x_t.data(),x_t(i),j,n)*w_t(i);
+          h(j,i)=lagrange(xt_h.data(),1,i,n)*lagrange(xt_h.data(),1,j,n)
+                 -lagrange_prime(xt_h.data(),xt_h(i),j,n)*wt_h(i);
         }
     }
+    setup_push(ader, h);
 }
 
 void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int n_sp){
@@ -106,6 +117,7 @@ void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int 
     double *x = malloc_host<double>(p);
     double *w = malloc_host<double>(p);
     gauss_legendre(0.0, 1.0, p, x, w);
+    Matrix_h h = setup_mirror(sp_to_cv);
     for(int k=0;k<n_cv;k++){
         if(p>0)
             gauss_legendre(x_fp[k], x_fp[k+1], p, x, w);
@@ -118,12 +130,19 @@ void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int 
             }
             else
                 integral = 1.0;
-            sp_to_cv(k,j)=integral/(x_fp[k+1]-x_fp[k]);
+            h(k,j)=integral/(x_fp[k+1]-x_fp[k]);
         }
     }
+    setup_push(sp_to_cv, h);
+    free(x);
+    free(w);
 }
 
 void inverse(Matrix A, Matrix C, int n){
+  Matrix_h Ah = setup_mirror(A);
+  Matrix_h Ch = setup_mirror(C);
+  setup_pull(A, Ah);
+
   double coeff;
   double *b = malloc_host<double>(n);
   double *d = malloc_host<double>(n);
@@ -136,7 +155,7 @@ void inverse(Matrix A, Matrix C, int n){
   for(j=0; j<n; j++){
     b[j]=0.0;
     for(i=0; i<n; i++){
-      B[i+j*n]=A(j,i);
+      B[i+j*n]=Ah(j,i);
       U[i+j*n]=0;
       L[i+j*n]=0;
     }
@@ -185,10 +204,11 @@ void inverse(Matrix A, Matrix C, int n){
     }
     //Step 3c: fill the solutions x(n) into column k of C
     for(i=0;i<n;i++){
-      C(i,k) = x[i];
+      Ch(i,k) = x[i];
     }
     b[k]=0.0;
   }
+  setup_push(C, Ch);
   free(B);
   free(L);
   free(U);

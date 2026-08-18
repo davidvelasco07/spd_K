@@ -12,8 +12,10 @@
 
 #ifdef KOKKOS_ENABLE_CUDA
 #define MemSpace Kokkos::CudaSpace
+#define SetupSpace Kokkos::CudaSpace
 #else
 #define MemSpace Kokkos::HostSpace
+#define SetupSpace Kokkos::HostSpace
 #endif
 
 using SView = Kokkos::View<double********, Kokkos::LayoutStride, MemSpace>;
@@ -79,17 +81,13 @@ int main(int argc, char** argv){
         Ext ext_sp = {1,nvar,Ne,Ne,Ne,ns,ns,ns};
         Ext ext_fp = {1,nvar,Ne,Ne,Ne,ns,ns,nf};
 
-        //Interpolation matrix (managed memory: tiny, read-only)
-        Kokkos::View<double**,
-            #ifdef KOKKOS_ENABLE_CUDA
-            Kokkos::CudaUVMSpace
-            #else
-            Kokkos::HostSpace
-            #endif
-            > M("M",nf,ns);
+        using BenchMat = Kokkos::View<double**, SetupSpace>;
+        BenchMat M("M", nf, ns);
+        auto M_h = Kokkos::create_mirror_view(M);
         for(int a=0; a<nf; a++)
             for(int b=0; b<ns; b++)
-                M(a,b) = 0.25*(a+1)/(b+1);
+                M_h(a,b) = 0.25*(a+1)/(b+1);
+        Kokkos::deep_copy(M, M_h);
 
         struct Cand { const char* name; Perm perm; };
         //dims: 0=t 1=var 2=k 3=j 4=i 5=kk 6=jj 7=ii  (perm = fastest first)
