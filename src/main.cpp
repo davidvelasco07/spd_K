@@ -251,6 +251,20 @@ int main(int argc, char** argv){
                       && pin.GetReal("output","dt") > 0.0;
         double dt_output = cfg.outputs ? pin.GetReal("output","dt") : tlim;
         select_integrator(pin.GetOrAddString("time","integrator","ader"));
+
+        //The FV fallback has to match the temporal treatment of the scheme it
+        //falls back FROM, or the time integration is applied twice. ADER hands
+        //each stage a time-accurate state, so the fallback flux needs its own
+        //Hancock half-step to be centred with it (vl2). An RK stage instead
+        //takes its time accuracy from the outer integrator, so predicting again
+        //inside the flux double-counts it -- plain PLM is the consistent
+        //choice there. The standalone lanes name the scheme outright and keep
+        //what they were given; only job/scheme=sd (SDFB) is derived.
+        if(scheme=="sd")
+            cfg.fv_predictor = (cfg.integrator == _integrator_ader_);
+        //Explicit override, for either lane.
+        cfg.fv_predictor = pin.GetOrAddBoolean("fallback","predictor",
+                                               cfg.fv_predictor);
         string system_name = pin.GetOrAddString("job","system","hydro");
 
         //Number of elements on this rank
