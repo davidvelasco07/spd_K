@@ -503,9 +503,22 @@ struct MHD_ader : public PhysicsModule {
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_x,sp_to_fp,_x_);
         transform_a_to_b_1d(U_ader_sp,U_ader_fp_y,sp_to_fp,_y_);
         if(az) transform_a_to_b_1d(U_ader_sp,U_ader_fp_z,sp_to_fp,_z_);
-        mhd_face_B_to_fp(U_ader_fp_x,Bx_fp_x,_x_);
-        mhd_face_B_to_fp(U_ader_fp_y,By_fp_y,_y_);
-        if(az) mhd_face_B_to_fp(U_ader_fp_z,Bz_fp_z,_z_);
+        //Take the normal B at the flux points from the single-valued CT face
+        //field instead of the transform-reconstructed value. Gated on the
+        //solver to match docs/mhd.md ("SD face HLLD overwrites the normal B
+        //with the CT face field, never reconstructed"): unconditionally it also
+        //changes the llf path, which moved the mhd_field_loop_* goldens by
+        //3.7e-02 (fluid only -- B stays at round-off, since B is CT-evolved and
+        //only the FLUID fluxes see the normal component). Arguably it is the
+        //better treatment for llf too -- a face's normal field IS single-valued
+        //under CT, and AthenaK always takes it from there -- but enabling it for
+        //llf is a deliberate default change that needs the goldens regenerated,
+        //not a merge side effect.
+        if(cfg.rsolver != _rsolver_llf_){
+            mhd_face_B_to_fp(U_ader_fp_x,Bx_fp_x,_x_);
+            mhd_face_B_to_fp(U_ader_fp_y,By_fp_y,_y_);
+            if(az) mhd_face_B_to_fp(U_ader_fp_z,Bz_fp_z,_z_);
+        }
         mhd_compute_fluxes(U_ader_fp_x,F_ader_fp_x,_x_);
         mhd_compute_fluxes(U_ader_fp_y,F_ader_fp_y,_y_);
         if(az) mhd_compute_fluxes(U_ader_fp_z,F_ader_fp_z,_z_);
