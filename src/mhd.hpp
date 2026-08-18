@@ -816,11 +816,18 @@ struct MHD_ader : public PhysicsModule {
                                  Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
             }
         }
-        Kokkos::deep_copy(cascade.Vector,0.0);
+        //deep_copy covers the ghosts too, so a forced level needs no halo.
+        Kokkos::deep_copy(cascade.Vector,
+                          cfg.mood_force_level>=0 ? (double)cfg.mood_force_level : 0.0);
     }
 
     //One cascade revision; returns demoted count (caller may MPI-reduce).
+    //Under mhd/mood_force_level every cell is pinned at that level, so there is
+    //nothing to detect and nothing to demote: return 0 and let the caller fall
+    //straight through to mood_commit (diagnostic lane -- pure MUSCL or pure
+    //first-order CT on the subcell mesh).
     int mood_revision(){
+        if(cfg.mood_force_level>=0) return 0;
         mood_assemble();
         mood_fluid_update(false);
         mood_ct_update();
