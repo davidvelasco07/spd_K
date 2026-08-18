@@ -1,0 +1,44 @@
+# Balsara (2004) MHD vortex accuracy setup (Balsara et al. 2025 §7.1).
+# Periodic [-10,10]^2, t=10 advection periods.
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 50
+nx2  = 50
+nx3  = 1
+x1len = 20.0
+x2len = 20.0
+x1_bc = periodic
+x2_bc = periodic
+
+<time>
+tlim       = 10.0
+cfl        = 0.3
+integrator = rk3
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = mhd_vortex
+amp = 1.0
+v1 = 1.0
+v2 = 1.0
+p0 = 1.0
+p1 = 1.0
+
+<output>
+dt = 10.0
