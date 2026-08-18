@@ -105,6 +105,7 @@ struct RunConfig {
     //Fraction of the peak score a block must reach to be tagged. 1 refines only
     //the peak block(s) and lets 2:1 balance grow a single compact patch; 0 tags
     //every block over the threshold.
+    bool amr_initial_refine = false;  //iterate refinement at t=0 (Athena++ style)
     double amr_refine_frac = 0.0;
     //Fraction of the peak score below which a sibling group is released, so the
     //fine region follows the feature instead of accumulating. 0 disables it and

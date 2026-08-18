@@ -97,6 +97,7 @@ struct Mesh : public PhysicsModule {
             exit(1);
         }
         build_block_solvers();
+        initial_refine();
 
         n_ader = blocks[0].n_ader;
 
@@ -1837,6 +1838,66 @@ struct Mesh : public PhysicsModule {
                          <<" level "<<(worst<0?-1:forest.blocks[worst].level)
                          <<", nblocks "<<nblocks<<")"<<std::endl;
         }
+    }
+
+    //Drive the initial refinement to convergence BEFORE the first step, the way
+    //Athena++ does (Mesh::Initialize: `do { ProblemGenerator; CheckRefinementCondition;
+    //AMR } while (nbtotal changed)`, mesh.cpp ~1427-1722).
+    //
+    //Why this matters, measured on fig-21 KH at 1024^2 DoF: adapt() gains ONE level
+    //per call (as do Athena++ and AthenaK), so a 3-level run reached its finest level
+    //only around step 100-150 of 13,300 and spent that transient under-resolved. KH
+    //amplifies the resulting seed exponentially, and no amount of adapt_interval or
+    //root resolution recovers it -- both knobs saturate (0.157 and 0.094 rms) while
+    //static refinement covering the same region from t=0 gives 0.0034, i.e. 27x
+    //better. The transient, not the transfer operators, is the whole gap.
+    //
+    //New blocks are given ICs RE-EVALUATED at their own resolution
+    //(build_block_solvers(run_ic=true)), NOT prolongated coarse data -- Athena++
+    //re-runs ProblemGenerator inside its loop for the same reason. Prolongating
+    //would hand the fine mesh a degree-p fit of the coarse fit, which is exactly the
+    //seed this is meant to remove.
+    //
+    //Refine only. A criterion asking to DEREFINE the initial conditions is a
+    //criterion bug, not a mesh outcome (Athena++ warns on the same condition), so
+    //say so rather than acting on it.
+    void initial_refine(){
+        if(!cfg.amr_initial_refine || cfg.amr_max_level <= 0) return;
+        //One pass per level is sufficient (each pass gains at most one level); the
+        //+1 lets the loop observe convergence, and it is a hard cap either way.
+        for(int pass=0; pass < cfg.amr_max_level + 1; pass++){
+            std::vector<int> to_refine;
+            std::vector<std::vector<int>> to_derefine;
+            tag_blocks(forest, blocks, to_refine, to_derefine,
+                       cfg.amr_max_level, cfg.amr_criterion);
+            if(pass==0 && !to_derefine.empty() && Master)
+                std::cout<<"WARNING: the refinement criterion wants to DEREFINE "
+                         <<to_derefine.size()<<" group(s) of the initial conditions;"
+                         <<" check the derefine threshold"<<std::endl;
+            if(to_refine.empty()) break;
+            const int nb_before = forest.Nblocks();
+            forest.refine_blocks(to_refine);
+            forest.enforce_2to1_balance();
+            if(forest.Nblocks() == nb_before) break;   //converged
+            //Rebuild with the ICs re-evaluated on the new mesh.
+            build_block_solvers(true);
+            //Each block re-inits its own face B from the vector potential, so the
+            //two sides of a new coarse-fine face disagree until they are
+            //reconciled -- adapt() does this after every transfer and the first
+            //adapt() used to do it for the initial mesh too. Skipping it left the
+            //CT field inconsistent across the new interfaces and collapsed dt a
+            //few steps in (mhd_orszag_tang_amr_2d, dt -> 4e-12 of its initial
+            //value at step 3).
+            if constexpr (is_mhd){
+                if(forest.max_level()==0) Sync_face_B_mhd();
+                else                      Exchange_face_B_mhd();
+                for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
+            }
+            if(Master)
+                std::cout<<"initial refine pass "<<pass+1<<": "<<nb_before<<" -> "
+                         <<nblocks<<" blocks, max_level = "<<forest.max_level()<<std::endl;
+        }
+        recompute_dt();
     }
 
     void adapt(){

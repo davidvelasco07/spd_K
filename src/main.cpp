@@ -238,6 +238,15 @@ int main(int argc, char** argv){
             pin.GetOrAddReal("amr","derefine_threshold",cfg.amr_derefine_threshold);
         cfg.amr_bfield_threshold =
             pin.GetOrAddReal("amr","bfield_threshold",cfg.amr_bfield_threshold);
+        //Drive the initial refinement to convergence before the first step
+        //(Athena++ Mesh::Initialize). OFF by default: it is only well posed for a
+        //THRESHOLD criterion. A ranking criterion (amr/refine_frac) always has a
+        //top-scoring block, so iterating it refines the peak, then the next peak,
+        //and converges only when everything sits at max_level -- on the symmetric
+        //Orszag-Tang that turned a 22-block mixed mesh into 64 blocks all at
+        //level 1. Enable it for threshold criteria (shear, pressure, lohner).
+        cfg.amr_initial_refine =
+            pin.GetOrAddBoolean("amr","initial_refine",false);
         cfg.amr_refine_frac =
             pin.GetOrAddReal("amr","refine_frac",cfg.amr_refine_frac);
         cfg.amr_derefine_frac =
