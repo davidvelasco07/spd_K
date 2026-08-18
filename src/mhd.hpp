@@ -190,7 +190,12 @@ struct MHD_ader : public PhysicsModule {
         double* x_fp,
         bool standalone=true, //false when driven as one block of a mesh
         BlockPack* pack=nullptr,
-        int pack_ib=0
+        int pack_ib=0,
+        //See the same two parameters on Hydro_ader: one per-run operator set to
+        //alias instead of rebuilding, and "this block is being rebuilt by a
+        //regrid, so its initial conditions are about to be overwritten".
+        const SDOperators* ops=nullptr,
+        bool run_ic=true
     ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim), standalone_(standalone),
         pack_(pack), pib_(pack_ib) {
         //Constrained transport needs at least the x-y plane: 3D runs evolve all
@@ -214,51 +219,24 @@ struct MHD_ader : public PhysicsModule {
         n_step = 0;
         t = 0;
 
+        //Alias the one per-run operator set (build_sd_operators) instead of
+        //rebuilding six matrices and their host mirrors per block per adapt.
+        //MHD is RK-only, so wt stays the single unit stage weight it always was
+        //rather than being taken from the operator set.
+        SDOperators local_ops;
+        if(!ops){ build_sd_operators(local_ops, p, x_sp, x_fp); ops = &local_ops; }
         Kokkos::resize(wt,1);
         Kokkos::deep_copy(wt,1.0);
+        sp_to_fp  = ops->sp_to_fp;
+        fp_to_sp  = ops->fp_to_sp;
+        dfp_to_sp = ops->dfp_to_sp;
+        sp_to_cv  = ops->sp_to_cv;
+        cv_to_sp  = ops->cv_to_sp;
+        fp_to_cv  = ops->fp_to_cv;
 
-        Kokkos::resize(sp_to_fp,p+2,p+1);
-        Kokkos::resize(fp_to_sp,p+1,p+2);
-        Kokkos::resize(dfp_to_sp,p+1,p+2);
-        Kokkos::resize(sp_to_cv,p+1,p+1);
-        Kokkos::resize(cv_to_sp,p+1,p+1);
-        Kokkos::resize(fp_to_cv,p+1,p+2);
-        //Setup matrices live in SetupSpace, which is CudaSpace on GPU: these
-        //builders are host loops, so they must fill a mirror that is then
-        //pushed (.cursor/rules/kokkos-no-uvm.mdc). Writing the device views
-        //directly aborted every MHD run on CUDA with an inaccessible
-        //memory-space error, which is why MHD had never run on the A100s.
-        {
-            Matrix_h sp_to_fp_h = setup_mirror(sp_to_fp);
-            Matrix_h fp_to_sp_h = setup_mirror(fp_to_sp);
-            Matrix_h dfp_to_sp_h = setup_mirror(dfp_to_sp);
-            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
-            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
-            Matrix_h fp_to_cv_h = setup_mirror(fp_to_cv);
-            lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
-            lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
-            lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
-            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
-            integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
-            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
-            setup_push(sp_to_fp, sp_to_fp_h);
-            setup_push(fp_to_sp, fp_to_sp_h);
-            setup_push(dfp_to_sp, dfp_to_sp_h);
-            setup_push(sp_to_cv, sp_to_cv_h);
-            setup_push(cv_to_sp, cv_to_sp_h);
-            setup_push(fp_to_cv, fp_to_cv_h);
-        }
-
-        Vector xx, wx;
-        Kokkos::resize(xx,p+1);
-        Kokkos::resize(wx,p+1);
-        {
-            Vector_h xx_h = setup_mirror(xx);
-            Vector_h wx_h = setup_mirror(wx);
-            gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
-            setup_push(xx, xx_h);
-            setup_push(wx, wx_h);
-        }
+        //Only mhd_Initialize below consumes these; they are the same GL rule for
+        //every block, so take them from the operator set.
+        Vector xx = ops->xx, wx = ops->wx;
 
         alloc(U_sp, "U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         alloc(W_sp, "W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -345,6 +323,10 @@ struct MHD_ader : public PhysicsModule {
         ////////////////////////
         // Initial conditions
         ////////////////////////
+        //Skipped for a block a regrid is rebuilding -- see Hydro_ader. The face
+        //field is transferred by install_snap / prolongate_block_face_B, which
+        //is exactly why it must NOT be re-inited from the vector potential here.
+        if(!run_ic){ Dt = 0.0; return; }
         // Fluid primitives (control-volume averages) -> W_cv -> W_sp. In 2D the
         // Bz row keeps the primitive IC value (cell-centered variable); in 3D
         // all B rows are overwritten from the CT face field below.

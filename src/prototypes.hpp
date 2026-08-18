@@ -64,6 +64,7 @@ extern int limit_prolongation(SD_Solution Ucv,
                               Vector fx, Vector fy, Vector fz,
                               double gamma, int* n_unfixable);
 extern void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
+extern void build_sd_operators(SDOperators& o, int p, double* x_sp, double* x_fp);
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);

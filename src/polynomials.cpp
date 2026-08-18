@@ -252,3 +252,83 @@ void inverse(Matrix A, Matrix C, int n){
 void inverse(Matrix_h A, Matrix_h C, int n){
     inverse_impl(A, C, n);
 }
+
+//One per-run set of spectral-difference operators, aliased into every block.
+//This is a verbatim lift of what the Hydro_ader / MHD_ader constructors each
+//used to do per block; it is the ONLY place they are built now, so hydro and
+//MHD can no longer drift apart. See SDOperators in structs.hpp.
+void build_sd_operators(SDOperators& o, int p, double* x_sp, double* x_fp){
+    Kokkos::resize(o.xx,p+1);
+    Kokkos::resize(o.wx,p+1);
+    {
+        Vector_h xx_h = setup_mirror(o.xx);
+        Vector_h wx_h = setup_mirror(o.wx);
+        gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
+        setup_push(o.xx, xx_h);
+        setup_push(o.wx, wx_h);
+    }
+
+    //ADER carries p+1 temporal quadrature slices at the same GL nodes as the
+    //spatial quadrature; an SSP-RK stage is a single slice advanced by a full
+    //forward-Euler step (weight 1) and combined convexly with U0.
+    if(cfg.integrator==_integrator_rk_){
+        o.n_ader = 1;
+        o.n_stages = ssp_rk_coefficients(cfg.rk_order, o.rk_a);
+        Kokkos::resize(o.xt,1);
+        Kokkos::resize(o.wt,1);
+        Kokkos::deep_copy(o.xt,0.0);
+        Kokkos::deep_copy(o.wt,1.0);
+    }
+    else{
+        o.n_ader = p+1;
+        o.n_stages = 1;
+        o.xt = o.xx;
+        o.wt = o.wx;
+    }
+
+    Kokkos::resize(o.sp_to_fp,p+2,p+1);
+    Kokkos::resize(o.fp_to_sp,p+1,p+2);
+    Kokkos::resize(o.dfp_to_sp,p+1,p+2);
+    Kokkos::resize(o.sp_to_cv,p+1,p+1);
+    Kokkos::resize(o.cv_to_sp,p+1,p+1);
+    Kokkos::resize(o.fp_to_cv,p+1,p+2);
+    {
+        //Setup matrices live in SetupSpace, which is CudaSpace on GPU: these
+        //builders are host loops, so they must fill a mirror that is then
+        //pushed (.cursor/rules/kokkos-no-uvm.mdc).
+        Matrix_h sp_to_fp_h = setup_mirror(o.sp_to_fp);
+        Matrix_h fp_to_sp_h = setup_mirror(o.fp_to_sp);
+        Matrix_h dfp_to_sp_h = setup_mirror(o.dfp_to_sp);
+        Matrix_h sp_to_cv_h = setup_mirror(o.sp_to_cv);
+        Matrix_h cv_to_sp_h = setup_mirror(o.cv_to_sp);
+        Matrix_h fp_to_cv_h = setup_mirror(o.fp_to_cv);
+        lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
+        lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
+        lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
+        integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
+        integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
+        inverse(sp_to_cv_h, cv_to_sp_h, p+1);
+        setup_push(o.sp_to_fp, sp_to_fp_h);
+        setup_push(o.fp_to_sp, fp_to_sp_h);
+        setup_push(o.dfp_to_sp, dfp_to_sp_h);
+        setup_push(o.sp_to_cv, sp_to_cv_h);
+        setup_push(o.cv_to_sp, cv_to_sp_h);
+        setup_push(o.fp_to_cv, fp_to_cv_h);
+        //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
+        if(cfg.integrator==_integrator_ader_){
+            Kokkos::resize(o.ader,p+1,p+1);
+            Kokkos::resize(o.invader,p+1,p+1);
+            Matrix_h ader_h = setup_mirror(o.ader);
+            Matrix_h invader_h = setup_mirror(o.invader);
+            Vector_h xt_h = setup_mirror(o.xt);
+            Vector_h wt_h = setup_mirror(o.wt);
+            setup_pull(o.xt, xt_h);
+            setup_pull(o.wt, wt_h);
+            ader_matrix(ader_h, xt_h, wt_h, p+1);
+            inverse(ader_h, invader_h, p+1);
+            setup_push(o.ader, ader_h);
+            setup_push(o.invader, invader_h);
+        }
+    }
+    o.built = true;
+}

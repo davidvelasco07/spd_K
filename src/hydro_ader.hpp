@@ -113,7 +113,16 @@ struct Hydro_ader : public PhysicsModule{
         //When a pack is supplied this block's arrays are slices of it (see
         //BlockPack), so mesh-level kernels can span every block in one launch.
         BlockPack* pack=nullptr,
-        int pack_ib=0
+        int pack_ib=0,
+        //One per-run operator set to alias instead of rebuilding (SDOperators).
+        //Null means "build a private one", which keeps the standalone path and
+        //the unit tests working unchanged.
+        const SDOperators* ops=nullptr,
+        //A block rebuilt by a regrid has its whole state overwritten from the
+        //snapshot immediately afterwards (transfer_from_snapshot either finds an
+        //ancestor / children or hard-exits), so running the initial conditions
+        //there is pure waste -- a full IC kernel per block per adapt.
+        bool run_ic=true
     ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim),
         pack_(pack), pib_(pack_ib) {
         //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
@@ -124,79 +133,24 @@ struct Hydro_ader : public PhysicsModule{
         nu = _nu;
         beta = _beta;
         viscosity = nu > 0.0;
-        Kokkos::resize(xx,p+1);
-        Kokkos::resize(wx,p+1);
-        {
-            Vector_h xx_h = setup_mirror(xx);
-            Vector_h wx_h = setup_mirror(wx);
-            gauss_legendre(0.0, 1.0, p+1, xx_h.data(), wx_h.data());
-            setup_push(xx, xx_h);
-            setup_push(wx, wx_h);
-        }
-
-        //ADER carries p+1 temporal quadrature slices at the same GL nodes as
-        //the spatial quadrature; an SSP-RK stage is a single slice advanced
-        //by a full forward-Euler step (weight 1) and combined convexly with U0
-        if(cfg.integrator==_integrator_rk_){
-            n_ader = 1;
-            n_stages = ssp_rk_coefficients(cfg.rk_order,rk_a);
-            Kokkos::resize(xt,1);
-            Kokkos::resize(wt,1);
-            Kokkos::deep_copy(xt,0.0);
-            Kokkos::deep_copy(wt,1.0);
-        }
-        else{
-            n_ader = p+1;
-            n_stages = 1;
-            xt = xx;
-            wt = wx;
-        }
-
-        //////////////
-        //Matrices to perform tensorial transformations
-        //////////////
-        Kokkos::resize(sp_to_fp,p+2,p+1);
-        Kokkos::resize(fp_to_sp,p+1,p+2);
-        Kokkos::resize(dfp_to_sp,p+1,p+2);
-        Kokkos::resize(sp_to_cv,p+1,p+1);
-        Kokkos::resize(cv_to_sp,p+1,p+1);
-        Kokkos::resize(fp_to_cv,p+1,p+2);
-
-        {
-            Matrix_h sp_to_fp_h = setup_mirror(sp_to_fp);
-            Matrix_h fp_to_sp_h = setup_mirror(fp_to_sp);
-            Matrix_h dfp_to_sp_h = setup_mirror(dfp_to_sp);
-            Matrix_h sp_to_cv_h = setup_mirror(sp_to_cv);
-            Matrix_h cv_to_sp_h = setup_mirror(cv_to_sp);
-            Matrix_h fp_to_cv_h = setup_mirror(fp_to_cv);
-            lagrange_matrix(sp_to_fp_h, x_sp, x_fp, p+1, p+2);
-            lagrange_matrix(fp_to_sp_h, x_fp, x_sp, p+2, p+1);
-            lagrange_prime_matrix(dfp_to_sp_h, x_fp, x_sp, p+2, p+1);
-            integral_matrix(sp_to_cv_h, x_fp, x_sp, p+1, p+1);
-            integral_matrix(fp_to_cv_h, x_fp, x_fp, p+1, p+2);
-            inverse(sp_to_cv_h, cv_to_sp_h, p+1);
-            setup_push(sp_to_fp, sp_to_fp_h);
-            setup_push(fp_to_sp, fp_to_sp_h);
-            setup_push(dfp_to_sp, dfp_to_sp_h);
-            setup_push(sp_to_cv, sp_to_cv_h);
-            setup_push(cv_to_sp, cv_to_sp_h);
-            setup_push(fp_to_cv, fp_to_cv_h);
-            //The ADER (temporal) matrices need the p+1 GL nodes; RK never uses them
-            if(cfg.integrator==_integrator_ader_){
-                Kokkos::resize(ader,p+1,p+1);
-                Kokkos::resize(invader,p+1,p+1);
-                Matrix_h ader_h = setup_mirror(ader);
-                Matrix_h invader_h = setup_mirror(invader);
-                Vector_h xt_h = setup_mirror(xt);
-                Vector_h wt_h = setup_mirror(wt);
-                setup_pull(xt, xt_h);
-                setup_pull(wt, wt_h);
-                ader_matrix(ader_h, xt_h, wt_h, p+1);
-                inverse(ader_h, invader_h, p+1);
-                setup_push(ader, ader_h);
-                setup_push(invader, invader_h);
-            }
-        }
+        //Alias the one per-run operator set; build a private one only when no
+        //mesh supplied it (standalone / unit tests). Either way the operators
+        //come from build_sd_operators, which is the single source of truth.
+        SDOperators local_ops;
+        if(!ops){ build_sd_operators(local_ops, p, x_sp, x_fp); ops = &local_ops; }
+        n_ader   = ops->n_ader;
+        n_stages = ops->n_stages;
+        for(int i=0;i<3;i++) rk_a[i] = ops->rk_a[i];
+        xx = ops->xx;   wx = ops->wx;
+        xt = ops->xt;   wt = ops->wt;
+        sp_to_fp  = ops->sp_to_fp;
+        fp_to_sp  = ops->fp_to_sp;
+        dfp_to_sp = ops->dfp_to_sp;
+        sp_to_cv  = ops->sp_to_cv;
+        cv_to_sp  = ops->cv_to_sp;
+        fp_to_cv  = ops->fp_to_cv;
+        ader      = ops->ader;
+        invader   = ops->invader;
 
         alloc(W_sp,"W_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         alloc(U_sp,"U_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -256,6 +210,12 @@ struct Hydro_ader : public PhysicsModule{
         ////////////////////////
         //Initial Conditions:
         ////////////////////////
+        //Skipped for a block the regrid is rebuilding: transfer_from_snapshot
+        //overwrites U_sp/W_sp for every surviving block (a block with neither a
+        //snapshot ancestor nor a full set of children is a hard error there),
+        //adapt() calls finish_block_ic() to re-derive the primitives, and it
+        //ends with recompute_dt(), so nothing below survives the regrid.
+        if(!run_ic){ Dt = 0.0; return; }
         Initialize(W_cv,X_dim.sd_faces,Y_dim.sd_faces,Z_dim.sd_faces,xx,wx);
         #ifdef PERTURB_IC
         //Diagnostic: 1-ulp perturbation to measure the solver's intrinsic

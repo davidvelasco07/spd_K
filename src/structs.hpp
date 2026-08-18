@@ -138,6 +138,28 @@ class dimension{
         }	
 };
 
+//The spectral-difference operators are functions of the degree p and the
+//reference node sets alone, so every block in a run needs the SAME ones.
+//Building them per block cost 12 device Views + 12 host mirrors plus the whole
+//host polynomial build (lagrange / lagrange_prime / integral / inverse /
+//ader_matrix) for each of nblocks -- and build_block_solvers() redid all of it
+//from scratch on every adapt, which is a large part of why a regrid was
+//allocation-bound rather than physics-bound. Build one set per run and alias it
+//into every block: these arrays are read-only after construction (the only
+//writes are inside the builders themselves), so a Matrix copy is a refcount
+//bump, not a copy of the data.
+struct SDOperators {
+    Vector xt, wt;   //temporal nodes/weights: GL (p+1) for ADER, {0}/{1} for RK
+    Vector xx, wx;   //spatial GL quadrature (control-volume averages of the ICs)
+    Matrix sp_to_fp, fp_to_sp, dfp_to_sp;
+    Matrix sp_to_cv, cv_to_sp, fp_to_cv;
+    Matrix ader, invader;   //ADER only; left empty under RK
+    int n_ader = 1;
+    int n_stages = 1;
+    double rk_a[3] = {0.0, 0.0, 0.0};
+    bool built = false;
+};
+
 //Packed multi-meshblock storage (the AthenaK layout).
 //
 //Every meshblock of a mesh carries the same element count whatever its

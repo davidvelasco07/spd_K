@@ -49,6 +49,19 @@ struct Mesh : public PhysicsModule {
     //instead of one kernel per block.
     BlockPack pack;
 
+    //The one per-run spectral-difference operator set, aliased into every block
+    //instead of rebuilt per block per adapt (see SDOperators).
+    SDOperators ops_;
+
+    //Block geometry is a pure function of the block's forest key: level plus
+    //logical index feed x_dim_for_block & co., and everything else they read is
+    //run-constant. So a block a regrid did not touch can keep the dimension
+    //objects it already has, and a regrid pays for geometry only on the blocks
+    //that actually changed. Held as keys parallel to Xd/Yd/Zd; a dimension is
+    //just Views, so a hit is a refcount copy instead of 4 device allocations,
+    //4 host mirrors and 4 deep_copies per direction.
+    std::vector<BlockForest::BlockKey> geom_keys_;
+
     static constexpr bool is_hydro = std::is_same_v<Block, Hydro_ader>;
     static constexpr bool is_mhd   = std::is_same_v<Block, MHD_ader>;
 
@@ -99,13 +112,13 @@ struct Mesh : public PhysicsModule {
     }
 
     Block make_block(const dimension& Xdim, const dimension& Ydim, const dimension& Zdim,
-                     int ib){
+                     int ib, bool run_ic){
         if constexpr (is_hydro)
             return Hydro_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,nu_,beta_,false,
-                              &pack, ib);
+                              &pack, ib, &ops_, run_ic);
         else
             return MHD_ader(comm_,p_,Xdim,Ydim,Zdim,x_,w_,x_sp_,x_fp_,false,
-                            &pack, ib);
+                            &pack, ib, &ops_, run_ic);
     }
 
     //Uniform unigrid blocks use the legacy global-offset dimension layout so
@@ -129,8 +142,18 @@ struct Mesh : public PhysicsModule {
         return block_dimension_z(b, NBz, cfg.active[_z_] ? p : 0, x_fp, cfg.active[_z_]);
     }
 
-    void build_block_solvers(){
+    //run_ic=false means "a regrid is rebuilding these blocks": the initial
+    //conditions are skipped because transfer_from_snapshot is about to overwrite
+    //every block's state anyway.
+    void build_block_solvers(bool run_ic=true){
+        if(!ops_.built) build_sd_operators(ops_, p_, x_sp_, x_fp_);
+        //Salvage the previous geometry, keyed by block, before Xd/Yd/Zd go.
+        std::map<BlockForest::BlockKey, std::array<dimension,3>> old_geom;
+        for(size_t i=0; i<geom_keys_.size() && i<Xd.size(); i++)
+            old_geom.emplace(geom_keys_[i],
+                             std::array<dimension,3>{Xd[i], Yd[i], Zd[i]});
         blocks.clear(); Xd.clear(); Yd.clear(); Zd.clear();
+        geom_keys_.clear();
         nblocks = forest.Nblocks();
         //Drop the previous pack before the new one is sized: adapt() changes
         //the block count, so every array is reallocated with a new leading
@@ -138,10 +161,19 @@ struct Mesh : public PhysicsModule {
         pack.reset(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             const MeshBlock& b = forest.blocks[ib];
-            Xd.emplace_back(x_dim_for_block(b, p_, x_fp_));
-            Yd.emplace_back(y_dim_for_block(b, p_, x_fp_));
-            Zd.emplace_back(z_dim_for_block(b, p_, x_fp_));
-            blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib], ib));
+            const BlockForest::BlockKey key = forest.block_key(ib);
+            auto it = old_geom.find(key);
+            if(it != old_geom.end()){
+                Xd.push_back(it->second[0]);
+                Yd.push_back(it->second[1]);
+                Zd.push_back(it->second[2]);
+            }else{
+                Xd.emplace_back(x_dim_for_block(b, p_, x_fp_));
+                Yd.emplace_back(y_dim_for_block(b, p_, x_fp_));
+                Zd.emplace_back(z_dim_for_block(b, p_, x_fp_));
+            }
+            geom_keys_.push_back(key);
+            blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib], ib, run_ic));
         }
         build_geometry_pack();
         build_pack_views();
@@ -1737,10 +1769,12 @@ struct Mesh : public PhysicsModule {
                 //hand the new fine block a state no update can recover from.
                 if constexpr (is_hydro){
                     blocks[ib].transform_sp_to_cv(blocks[ib].U_sp, blocks[ib].U_cv);
-                    //At p >= 1 the Lagrange prolongation is unlimited and rings
-                    //at a sharp interface without ever violating PAD, so the
-                    //PAD-only limiter below cannot see it. The DMP pass bounds
-                    //the fine elements by the coarse neighbourhood first.
+                    //The DMP pass is a measured dead end, off by default:
+                    //at p >= 1 the Lagrange prolongation is a LOSSLESS change
+                    //of representation (it re-samples the coarse element's own
+                    //polynomial), so it injects nothing for a limiter to find
+                    //and the pass only deletes real structure. See
+                    //limit_prolongation_dmp.
                     int nlim = 0;
                     if(cfg.amr_prolong_dmp && Xd[0].p > 0)
                         nlim += limit_prolongation_dmp(blocks[ib].U_cv,
@@ -1880,7 +1914,7 @@ struct Mesh : public PhysicsModule {
                      <<forest.dropped_faces<<" coarse-fine face(s) left ungrouped"
                      <<" after enforce_2to1_balance"<<std::endl;
 
-        build_block_solvers();
+        build_block_solvers(false);
         transfer_from_snapshot(key_to_ib, snap);
         if constexpr (is_mhd) report_divb("after transfer");
         if constexpr (is_mhd){
