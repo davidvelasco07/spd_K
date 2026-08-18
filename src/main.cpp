@@ -24,6 +24,9 @@ int problem_id(const string &name){
     if(name == "rti")              return _ic_rti_;
     if(name == "orszag_tang")      return _ic_orszag_tang_;
     if(name == "field_loop")       return _ic_field_loop_;
+    if(name == "mhd_vortex")       return _ic_mhd_vortex_;
+    if(name == "mhd_blast")        return _ic_mhd_blast_;
+    if(name == "mhd_jet")          return _ic_mhd_jet_;
     if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
@@ -64,6 +67,16 @@ void problem_defaults(int problem, ProblemParams &pp){
             break;
         case _ic_user_:             //free-form: defaults for the sample Gaussian pulse
             pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.5,0.1, 0};
+            break;
+        case _ic_mhd_vortex_:      //amp=V, v1/v2 background, p0 base P, p1=|B|, sigma>0 -> Leidi kernel
+            pp = {1.0, 1.0,1.0,0.0, 1.0,0.0, 1.0,1.0, 0.0,0.0, 0};
+            break;
+        case _ic_mhd_blast_:        //d0=rho, p0/p1 ambient/overpressure, amp=Bx, radius
+            pp = {1000.0, 0.0,0.0,0.0, 1.0,0.0, 0.1,10000.0, 0.1,0.0, 0};
+            break;
+        case _ic_mhd_jet_:          //d0 ambient rho, d1 jet rho, p0, v2 jet vy, amp=By, radius nozzle
+            pp = {141.421356, 0.0,800.0,0.0, 0.14,1.4, 1.0,0.0, 0.05,0.0, 0};
+            pp.cx = 0.5;  //nozzle centred at x=0 on [-0.5,0.5] when x1len=1
             break;
     }
 }
@@ -161,6 +174,8 @@ int main(int argc, char** argv){
         cfg.g[_z_]   = pin.GetOrAddReal("hydro","g3",0.0);
         cfg.fallback = pin.GetOrAddBoolean("job","fallback",true);
         cfg.nad_tolerance = pin.GetOrAddReal("fallback","tolerance",1e-5);
+        cfg.nad_atol = pin.GetOrAddReal("fallback","atol",0.0);
+        cfg.nad_eps0 = pin.GetOrAddReal("fallback","eps0",1e-12);
         cfg.nad_delta = pin.GetOrAddString("fallback","NAD","relative")=="delta";
         cfg.nad_moore = pin.GetOrAddString("fallback","NAD_neighbors","2nd")=="2nd";
         cfg.sed       = pin.GetOrAddBoolean("fallback","SED",true);
@@ -214,11 +229,10 @@ int main(int argc, char** argv){
         cfg.pp.radius = pin.GetOrAddReal("problem","radius",cfg.pp.radius);
         cfg.pp.sigma  = pin.GetOrAddReal("problem","sigma",cfg.pp.sigma);
         cfg.pp.dir    = pin.GetOrAddInteger("problem","dir",cfg.pp.dir);
-        //Domain center in physical coordinates, so ICs (e.g. spherical_blast)
-        //stay centered in rectangular boxes (x[ilj]len != 1).
-        cfg.pp.cx     = 0.5*boxlen_x;
-        cfg.pp.cy     = 0.5*boxlen_y;
-        cfg.pp.cz     = 0.5*boxlen_z;
+        //Domain center in physical coordinates (defaults to box midpoint).
+        cfg.pp.cx     = pin.GetOrAddReal("problem","cx",0.5*boxlen_x);
+        cfg.pp.cy     = pin.GetOrAddReal("problem","cy",0.5*boxlen_y);
+        cfg.pp.cz     = pin.GetOrAddReal("problem","cz",0.5*boxlen_z);
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
@@ -266,6 +280,61 @@ int main(int argc, char** argv){
         cfg.fv_predictor = pin.GetOrAddBoolean("fallback","predictor",
                                                cfg.fv_predictor);
         string system_name = pin.GetOrAddString("job","system","hydro");
+        //MHD Riemann solver (faces + edge EMF). Default llf; hlld matches the
+        //Python spd Miyoshi–Kusano HLLD / dimension-by-dimension UCT path.
+        {
+            string rs = pin.GetOrAddString("mhd","rsolver","llf");
+            if(rs=="llf")       cfg.rsolver = _rsolver_llf_;
+            else if(rs=="hlld") cfg.rsolver = _rsolver_hlld_;
+            else{
+                if(Master) cout<<"ERROR: mhd/rsolver = '"<<rs
+                               <<"' not implemented (llf|hlld)"<<endl;
+                exit(1);
+            }
+            //NAD on the candidate CT field: components (default; AthenaK/Python)
+            //or magnitude. |B|-only misses Alfvénic / transverse oscillations.
+            string nadb = pin.GetOrAddString("mhd","mood_nad_b","comps");
+            if(nadb=="mag")         cfg.mood_nad_b = _nad_b_mag_;
+            else if(nadb=="comps")  cfg.mood_nad_b = _nad_b_comps_;
+            else{
+                if(Master) cout<<"ERROR: mhd/mood_nad_b = '"<<nadb
+                               <<"' not implemented (mag|comps)"<<endl;
+                exit(1);
+            }
+            //Velocity in NAD (mirrors AthenaK mood_nad_v). Default comps: needed
+            //with HLLD+FB to catch ringing that leaves |B| smooth.
+            string nadv = pin.GetOrAddString("mhd","mood_nad_v","off");
+            if(nadv=="off")         cfg.mood_nad_v = _nad_v_off_;
+            else if(nadv=="mag")    cfg.mood_nad_v = _nad_v_mag_;
+            else if(nadv=="comps")  cfg.mood_nad_v = _nad_v_comps_;
+            else{
+                if(Master) cout<<"ERROR: mhd/mood_nad_v = '"<<nadv
+                               <<"' not implemented (off|mag|comps)"<<endl;
+                exit(1);
+            }
+            //NAD tolerance scale (AthenaK mood_nad_scale). Default gcfl: domain
+            //range of each detection variable, softened by the advective CFL.
+            string nadsc = pin.GetOrAddString("mhd","mood_nad_scale","gcfl");
+            if(nadsc=="relative")     cfg.mood_nad_scale = _nad_scale_relative_;
+            else if(nadsc=="delta")   cfg.mood_nad_scale = _nad_scale_delta_;
+            else if(nadsc=="grange")  cfg.mood_nad_scale = _nad_scale_grange_;
+            else if(nadsc=="gcfl")    cfg.mood_nad_scale = _nad_scale_gcfl_;
+            else{
+                if(Master) cout<<"ERROR: mhd/mood_nad_scale = '"<<nadsc
+                               <<"' not implemented (relative|delta|grange|gcfl)"<<endl;
+                exit(1);
+            }
+            //Keep legacy fallback/NAD=delta in sync when the user only set that.
+            if(cfg.mood_nad_scale==_nad_scale_delta_) cfg.nad_delta = true;
+            if(cfg.mood_nad_scale==_nad_scale_relative_) cfg.nad_delta = false;
+            //Force a fixed cascade level (diagnostic: pure MUSCL / FO CT update).
+            cfg.mood_force_level = pin.GetOrAddInteger("mhd","mood_force_level",-1);
+            if(cfg.mood_force_level<-1 || cfg.mood_force_level>2){
+                if(Master) cout<<"ERROR: mhd/mood_force_level = "<<cfg.mood_force_level
+                               <<" (expected -1|0|1|2)"<<endl;
+                exit(1);
+            }
+        }
 
         //Number of elements on this rank
         int Nx = ax ? NX/comm.nx : 1;
@@ -359,8 +428,24 @@ int main(int argc, char** argv){
             cout<<"system = "<<system_name<<", ndim = "<<cfg.ndim
                 <<", p = "<<p<<", N = ("<<Nx<<","<<Ny<<","<<Nz<<")"
                 <<", integrator = "
-                <<(cfg.integrator==_integrator_ader_ ? "ader" : "rk"+to_string(cfg.rk_order))
-                <<", outputs = "<<(cfg.outputs ? "on" : "off")
+                <<(cfg.integrator==_integrator_ader_ ? "ader" : "rk"+to_string(cfg.rk_order));
+            if(system_name=="mhd"){
+                cout<<", rsolver = "
+                    <<(cfg.rsolver==_rsolver_hlld_ ? "hlld" : "llf")
+                    <<", mood_nad_b = "
+                    <<(cfg.mood_nad_b==_nad_b_mag_ ? "mag" : "comps")
+                    <<", mood_nad_v = "
+                    <<(cfg.mood_nad_v==_nad_v_off_ ? "off"
+                       : (cfg.mood_nad_v==_nad_v_mag_ ? "mag" : "comps"))
+                    <<", mood_nad_scale = "
+                    <<(cfg.mood_nad_scale==_nad_scale_relative_ ? "relative"
+                       : (cfg.mood_nad_scale==_nad_scale_delta_ ? "delta"
+                          : (cfg.mood_nad_scale==_nad_scale_grange_ ? "grange"
+                             : "gcfl")));
+                if(cfg.mood_force_level>=0)
+                    cout<<", mood_force_level = "<<cfg.mood_force_level;
+            }
+            cout<<", outputs = "<<(cfg.outputs ? "on" : "off")
                 <<endl;
             if(cfg.outputs || use_mesh){
                 //Echo the effective parameters for provenance

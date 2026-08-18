@@ -46,8 +46,15 @@ struct RunConfig {
     double gamma = 1.4;
     double cfl = 0.8;
     double g[3] = {0.0, 0.0, 0.0};       //constant gravitational acceleration (source term)
-    double nad_tolerance = 1e-5;         //NAD band width
-    bool nad_delta = false;              //band scaled by local range instead of |W|
+    double nad_tolerance = 1e-5;         //NAD band width (rtol)
+    double nad_atol = 0.0;               //absolute floor on the NAD band (AthenaK mood_atol)
+    double nad_eps0 = 1e-12;             //relative floor eps0*|bound| (AthenaK mood_eps0)
+    bool nad_delta = false;              //legacy local-range band (fallback/NAD=delta)
+    int mood_nad_scale = _nad_scale_gcfl_; //MHD NAD tolerance scale (AthenaK mood_nad_scale):
+                                         //relative | delta | grange | gcfl (default)
+    int mood_force_level = -1;           //MOOD diagnostic: -1 = normal detect/demote;
+                                         //0/1/2 = force that cascade level everywhere
+                                         //(skip detection). 1 = MUSCL, 2 = first order.
     bool nad_moore = true;               //DMP bounds over the Moore (box) neighborhood
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
@@ -81,6 +88,17 @@ struct RunConfig {
     int nlim = -1;                       //step cap (-1 = unlimited). Bounds a
                                          //throughput measurement by steps
                                          //rather than by an end time.
+
+    int rsolver = _rsolver_llf_;         //MHD Riemann solver (faces + edges)
+    int mood_nad_b = _nad_b_comps_;      //MHD NAD B mode: comps (default) or mag
+                                         //(|B|-only is blind to Alfvénic / transverse
+                                         //structure; matches AthenaK mood_nad_b=comps
+                                         //and Python spd limiting_variables)
+    int mood_nad_v = _nad_v_off_;        //MHD NAD velocity: off (default) / mag / comps.
+                                         //AthenaK HLLD+FB ringing-stable configs use comps
+                                         //together with mood_nad_b=comps (and a global NAD
+                                         //scale); keep off unless needed — relative NAD on
+                                         //near-zero velocity components over-triggers.
     bool outputs = false;                //file outputs (opt-in via <output> block)
     ProblemParams pp;                    //initial-condition parameters
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps

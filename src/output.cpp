@@ -40,13 +40,11 @@ void Write_edges(dimension Dim, string name){
   int N = Dim.N;
   string foldername =  output_folder();
   string filename = name+"_N"+to_string(N)+"p"+to_string(p)+"_"+to_string(cpu_rank)+".dat";
-  #ifdef KOKKOS_ENABLE_CUDA
-  Vector_h fv_faces_h = setup_mirror(Dim.fv_faces);
-  setup_pull(Dim.fv_faces, fv_faces_h);
-  Write_arrays(fv_faces_h.data(), fv_faces_h.size(), foldername+filename);
-  #else
-  Write_arrays(Dim.fv_faces.data(), Dim.fv_faces.size(), foldername+filename);
-  #endif
+  //One path for both backends: on host, create_mirror_view returns the same
+  //view and the pull is a no-op, so the #ifdef bought nothing.
+  Vector_h fv_h = setup_mirror(Dim.fv_faces);
+  setup_pull(Dim.fv_faces, fv_h);
+  Write_arrays(fv_h.data(), fv_h.size(), foldername+filename);
 }
 
 void Write_dimensions(dimension X_dim, dimension Y_dim, dimension Z_dim){

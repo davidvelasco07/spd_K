@@ -1,0 +1,48 @@
+# Balsara (2004) MHD vortex — 3D smoke (constant Bz pitch).
+# Domain maps to [-10,10]^3 via x1len=20; periodic everywhere.
+# SD+FB p=3, HLLD+UCT.
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 8
+nx2  = 8
+nx3  = 8
+x1len = 20.0
+x2len = 20.0
+x3len = 20.0
+x1_bc = periodic
+x2_bc = periodic
+x3_bc = periodic
+
+<time>
+tlim       = 0.5
+cfl        = 0.3
+integrator = rk3
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = mhd_vortex
+amp = 1.0
+v1 = 1.0
+v2 = 1.0
+p0 = 1.0
+p1 = 1.0
+v3 = 0.1
+
+<output>
+dt = 0.5

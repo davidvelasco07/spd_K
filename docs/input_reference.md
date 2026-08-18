@@ -84,12 +84,24 @@ problem = sine_wave
 |---|---|---|
 | `nu` | (problem) | Magnetic diffusivity |
 
+### `<mhd>`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `rsolver` | `llf` | MHD Riemann solver: `llf` or `hlld` (Miyoshi–Kusano). Selects the SD face/edge path and the MOOD FV face fluxes. With `hlld`, the low-order corner E uses AthenaK UCT-HLLD composition from face coefficients; with `llf`, the four-state LLF bound. FV face fluxes take `Bn` from the CT face field |
+| `mood_nad_b` | `comps` | Candidate CT field in MHD NAD: `comps` (`Bx,By,Bz`) or `mag` (`|B|`) |
+| `mood_nad_v` | `off` | Velocity in MHD NAD: `off`, `mag` (`|v|`), or `comps` (`vx,vy,vz`) |
+| `mood_nad_scale` | `gcfl` | NAD tolerance scale (AthenaK): `gcfl` (domain range × advective CFL), `grange` (domain range), `relative` (`rtol·|bound|`), or `delta` (`rtol·local range`) |
+| `mood_force_level` | `-1` | Diagnostic: `-1` = normal MOOD detect/demote; `0`/`1`/`2` = force that cascade level everywhere and skip detection (`1` = MUSCL, `2` = first-order CT on the subcell mesh) |
+
 ### `<fallback>`
 
 | Parameter | Default | Description |
 |---|---|---|
-| `tolerance` | `1e-5` | NAD band width |
-| `NAD` | `relative` | `relative` or `delta` (band scaled by local range) |
+| `tolerance` | `1e-5` | NAD band width (`rtol`) |
+| `atol` | `0.0` | Absolute floor on the MHD NAD band |
+| `eps0` | `1e-12` | Relative floor `eps0·|bound|` on grange/gcfl bands (AthenaK `mood_eps0`) |
+| `NAD` | `relative` | Legacy local band for hydro / when `mood_nad_scale` is unset historically: `relative` or `delta` |
 | `NAD_neighbors` | `2nd` | `2nd` (Moore neighborhood) or `1st` (face neighbors) |
 | `SED` | `true` | Smooth extrema detection (for `p > 1`) |
 | `blending` | `true` | Fractional θ blending of fallback fluxes |
