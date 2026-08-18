@@ -1,0 +1,69 @@
+# Smooth-interface Kelvin-Helmholtz instability (2D hydro).
+# Athena++ (Stone et al. 2020) section 3.4.3 / figure 21.
+#
+# Two shear interfaces at y = 0.25 and y = 0.75 (paper's y = -+0.25 on its
+# [-0.5,0.5] box), density contrast 2, velocity jump 1, perturbation
+# wavelength 0.5. Reference time for figure 21 is t = 1.2.
+#
+# Set the scheme on the command line:
+#   job/scheme=vl2                MUSCL-Hancock on the flux-point subgrid (pair
+#                                 with time/integrator=rk1)
+#   job/scheme=plm                plain PLM, no predictor (pair with rk2/rk3)
+#   job/scheme=sd job/fallback=true   SD(p) with MUSCL fallback ("SDFB")
+#
+# Degrees of freedom are (p+1)^2 per element, so mesh/nx1 = D/(p+1) elements
+# gives a DxD DoF grid for any p.
+
+<job>
+system   = hydro
+fallback = true
+scheme   = sd
+
+<mesh>
+p    = 3
+nx1  = 64
+nx2  = 64
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x1_bc = periodic
+x2_bc = periodic
+
+<meshblock>
+nx1 = 64
+nx2 = 64
+nx3 = 1
+
+<time>
+tlim = 1.2
+cfl  = 0.4
+integrator = rk3
+
+<output>
+dt = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = kelvin_helmholtz
+
+<fallback>
+blending = true
+
+# Static refinement bands placed where the KH rolls land, for the SMR control
+# against dynamic AMR. The shear layers sit at y = 0.25 and y = 0.75 (the domain
+# is [0,1]; plot_kh displays it shifted by -0.5, so these are the +-0.25 layers
+# of the figures). Each band is the roll extent read off the 2048^2 fig-21 panel,
+# y = 0.25 -+ 0.12, which is ~48% of the domain at the finest level -- comparable
+# to the ~45% the shear criterion selects dynamically.
+# Run with amr/adapt_interval=0 so the mesh never changes.
+<refinement1>
+level = 3
+x2min = 0.13
+x2max = 0.37
+
+<refinement2>
+level = 3
+x2min = 0.63
+x2max = 0.87
