@@ -1362,6 +1362,13 @@ void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution
     double gm=cfg.gamma;
     int rsolver=cfg.rsolver;
     bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    // Take the normal B from the single-valued CT face field rather than
+    // reconstructing it. Gated on the solver for the same reason as the SD-side
+    // mhd_face_B_to_fp: under llf the amr line reconstructed b1 like any other
+    // primitive, and switching that is a deliberate default change needing the
+    // MHD goldens regenerated, not a merge side effect. Under hlld this is the
+    // documented behaviour and the UCT corner composition depends on it.
+    const bool take_bn = (rsolver!=_rsolver_llf_);
     const int v1 = (D==_x_?_mvx_:(D==_y_?_mvy_:_mvz_));
     const int v2 = (D==_x_?_mvy_:(D==_y_?_mvz_:_mvx_));
     const int v3 = (D==_x_?_mvz_:(D==_y_?_mvx_:_mvy_));
@@ -1377,7 +1384,7 @@ void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution
             wL[var]=W.Vector(var,kL,jL,iL)+dL;   // right face of the left cell
             wR[var]=W.Vector(var,k ,j ,i )-dR;   // left  face of the right cell
         }
-        wL[b1]=wR[b1]=Bn_f.Vector(0,k,j,i);      // CT face field, never reconstructed
+        if(take_bn) wL[b1]=wR[b1]=Bn_f.Vector(0,k,j,i);  // CT face field, never reconstructed
         mhd_conservatives(wL,uL,gm);
         mhd_conservatives(wR,uR,gm);
         mhd_riemann(f,uL,uR,v1,v2,v3,b1,b2,b3,gm,rsolver, want_uct?uct:nullptr);

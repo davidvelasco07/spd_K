@@ -752,6 +752,16 @@ struct MHD_ader : public PhysicsModule {
 
     void mood_after_U_halo(){
         mhd_compute_primitives(U_old_fv,W_fv);
+        //FV-face copy of the stage face field, consumed by the low-order sweep
+        //below (mhd_fv_fluxes, under hlld) and by mhd_uct_corner_E. It MUST be
+        //filled here: mood_ct_update refills it as a side effect of
+        //fv_update_B_solution, but that runs AFTER the sweep, so without this the
+        //first stage reads zeros and every later stage reads the previous one's
+        //field. Bxf/Byf/Bzf hold the current stage field (mood_begin ran
+        //mood_reset_face_B). Write-only under llf, which reconstructs b1.
+        mhd_face_B_to_fv(Bxf,Bx_old,_x_);
+        mhd_face_B_to_fv(Byf,By_old,_y_);
+        if(cfg.active[_z_]) mhd_face_B_to_fv(Bzf,Bz_old,_z_);
         //Detection-variable count and the frozen global NAD scales, computed once
         //per stage from the haloed OLD state. Members because HEAD splits this
         //across mood_after_U_halo() and mood_revision().
