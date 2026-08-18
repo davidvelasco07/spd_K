@@ -1,0 +1,47 @@
+# Wu & Shu (2018) Mach-800 magnetized jet — Balsara et al. 2025 Fig. 11.
+# Full domain x in [-0.5,0.5] (x1len=1), y in [0,1.5]; 400x600 elements at p=3.
+# Nozzle at y=0 with |x| < 0.05 (cx=0.5 in box coords). Outflow elsewhere.
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 400
+nx2  = 600
+nx3  = 2
+x1len = 1.0
+x2len = 1.5
+x1_bc = gradfree
+x2_bc = gradfree
+
+<time>
+tlim       = 0.002
+cfl        = 0.2
+integrator = rk3
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver = llf
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = mhd_jet
+amp = 141.4213562373095
+d0 = 0.14
+d1 = 1.4
+p0 = 1.0
+v2 = 800.0
+radius = 0.05
+cx = 0.5
+
+<output>
+dt = 0.002

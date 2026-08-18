@@ -1,0 +1,46 @@
+# Same as jet_p3_fb.athinput but MOOD locked at MUSCL (diagnostic / first rung).
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 400
+nx2  = 600
+nx3  = 2
+x1len = 1.0
+x2len = 1.5
+x1_bc = gradfree
+x2_bc = gradfree
+
+<time>
+tlim       = 0.002
+cfl        = 0.2
+integrator = rk3
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver = llf
+mood_force_level = 1
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = mhd_jet
+amp = 141.4213562373095
+d0 = 0.14
+d1 = 1.4
+p0 = 1.0
+v2 = 800.0
+radius = 0.05
+cx = 0.5
+
+<output>
+dt = 0.002

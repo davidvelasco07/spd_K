@@ -10,12 +10,16 @@ double lagrange(double *x, double y, int i, int n){
     return lag;
 }
 
+//Device-view overloads are thin wrappers: mirror, delegate to the single host
+//implementation, push back. The host overload is the primitive -- amr.cpp and
+//build_sd_operators do genuine host-side math on host arrays and call it
+//directly -- so there is ONE body per builder, not two. Running the host loop
+//straight on a SetupSpace view (CudaSpace on GPU) is the inaccessible-memory
+//bug class from fb51d93.
 void lagrange_matrix(Matrix a_to_b, double *x_a, double *x_b, int n_a, int n_b){
-  for(int j=0;j<n_b;j++){
-        for(int i=0;i<n_a;i++){
-            a_to_b(j,i)=lagrange(x_a,x_b[j],i,n_a);
-        }
-    }
+    Matrix_h h = setup_mirror(a_to_b);
+    lagrange_matrix(h, x_a, x_b, n_a, n_b);
+    setup_push(a_to_b, h);
 }
 
 void lagrange_matrix(Matrix_h a_to_b, double *x_a, double *x_b, int n_a, int n_b){
@@ -44,11 +48,9 @@ double lagrange_prime(double *x, double y, int i, int n){
 }
 
 void lagrange_prime_matrix(Matrix da_to_b, double *x_a, double *x_b, int n_a, int n_b){
-  for(int j=0;j<n_b;j++){
-        for(int i=0;i<n_a;i++){
-            da_to_b(j,i)=lagrange_prime(x_a,x_b[j],i,n_a);
-        }
-    }
+    Matrix_h h = setup_mirror(da_to_b);
+    lagrange_prime_matrix(h, x_a, x_b, n_a, n_b);
+    setup_push(da_to_b, h);
 }
 
 void lagrange_prime_matrix(Matrix_h da_to_b, double *x_a, double *x_b, int n_a, int n_b){
@@ -109,11 +111,14 @@ void solution_points(double *x_sp, int n){
 }
 
 void ader_matrix(Matrix ader, Vector x_t, Vector w_t, int n){
-    for(int j=0;j<n;j++){
-        for(int i=0;i<n;i++){
-          ader(j,i)=lagrange(x_t.data(),1,i,n)*lagrange(x_t.data(),1,j,n)-lagrange_prime(x_t.data(),x_t(i),j,n)*w_t(i);
-        }
-    }
+    //x_t / w_t are setup views too: pull them before the host loop reads them.
+    Matrix_h h  = setup_mirror(ader);
+    Vector_h xh = setup_mirror(x_t);
+    Vector_h wh = setup_mirror(w_t);
+    setup_pull(x_t, xh);
+    setup_pull(w_t, wh);
+    ader_matrix(h, xh, wh, n);
+    setup_push(ader, h);
 }
 
 void ader_matrix(Matrix_h ader, Vector_h x_t, Vector_h w_t, int n){
@@ -125,26 +130,9 @@ void ader_matrix(Matrix_h ader, Vector_h x_t, Vector_h w_t, int n){
 }
 
 void integral_matrix(Matrix sp_to_cv, double *x_fp, double *x_sp, int n_cv, int n_sp){
-    double integral;
-    int p = n_sp-1;
-    double *x = malloc_host<double>(p);
-    double *w = malloc_host<double>(p);
-    gauss_legendre(0.0, 1.0, p, x, w);
-    for(int k=0;k<n_cv;k++){
-        if(p>0)
-            gauss_legendre(x_fp[k], x_fp[k+1], p, x, w);
-        for(int j=0;j<n_sp;j++){
-            if(p>0){
-                integral=0.0;
-                for(int i=0;i<p;i++){
-                    integral+=lagrange(x_sp,x[i],j,p+1)*w[i];
-                }
-            }
-            else
-                integral = 1.0;
-            sp_to_cv(k,j)=integral/(x_fp[k+1]-x_fp[k]);
-        }
-    }
+    Matrix_h h = setup_mirror(sp_to_cv);
+    integral_matrix(h, x_fp, x_sp, n_cv, n_sp);
+    setup_push(sp_to_cv, h);
 }
 
 void integral_matrix(Matrix_h sp_to_cv, double *x_fp, double *x_sp, int n_cv, int n_sp){
@@ -246,7 +234,11 @@ static void inverse_impl(Mat A, Mat C, int n){
 }
 
 void inverse(Matrix A, Matrix C, int n){
-    inverse_impl(A, C, n);
+    Matrix_h Ah = setup_mirror(A);
+    Matrix_h Ch = setup_mirror(C);
+    setup_pull(A, Ah);
+    inverse_impl(Ah, Ch, n);
+    setup_push(C, Ch);
 }
 
 void inverse(Matrix_h A, Matrix_h C, int n){

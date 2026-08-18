@@ -617,7 +617,7 @@ static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
     s.n_var = ref.n_var;
     s.Nx = ref.Nx; s.Ny = ref.Ny; s.Nz = ref.Nz;
     s.nx = ref.nx; s.ny = ref.ny; s.nz = ref.nz;
-    s.label = name;
+    snprintf(s.label, sizeof(s.label), "%s", name);
     Kokkos::resize(s.Vector, ref.n_ader, ref.n_var, ref.Nz, ref.Ny, ref.Nx,
                    ref.nz, ref.ny, ref.nx);
     return s;

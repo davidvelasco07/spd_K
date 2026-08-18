@@ -70,9 +70,13 @@ class dimension{
                 idL = NG*n_sp-g;
                 idR = fv_ncells+idL;
             }else{
+                //Degenerate 1-cell strip: need two face nodes so the centre
+                //formula and the IC quadrature loops can form one sub-interval.
                 n_sp = 1;
                 n_fp = 2;
             }
+            //Allocate directly (not Kokkos::resize) below: resize on a
+            //degenerate inactive-dimension view trips a CUDA ViewCopy SIGFPE.
             int sd_nrows = N_total, sd_ncols = n_fp, sd_spcols = n_sp;
             int fv_nf = fv_nfaces, fv_nc = fv_ncells;
             if(!active){
@@ -234,7 +238,8 @@ class SD_Solution{
     int n_ader=1;
     int n_var;
     int nb=1;   //meshblocks spanned: 1 for a block's own view, nblocks for a pack
-    string label;
+    //char[], not std::string: captured by value into device lambdas.
+    char label[64];
     SD_Solution() = default;
     SD_Solution(string name,
         int nader,
@@ -272,7 +277,7 @@ class SD_Solution{
         ){
         set_extents(nader,nvar,Zdim,Ydim,Xdim,z,y,x);
         Kokkos::resize(Vector,n_ader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        label=name;
+        snprintf(label, sizeof(label), "%s", name.c_str());
     }
 
     //Same shape as init(), but the storage is block ib's slice of a shared
@@ -285,7 +290,7 @@ class SD_Solution{
         ){
         set_extents(nader,nvar,Zdim,Ydim,Xdim,z,y,x);
         Vector = pk.sd_slice(name, ib, n_ader, n_var, Nz, Ny, Nx, nz, ny, nx);
-        label = name;
+        snprintf(label, sizeof(label), "%s", name.c_str());
     }
 
     //The host mirror is allocated lazily on the first copy(): only arrays that
@@ -337,7 +342,7 @@ inline SD_Solution sd_pack_view(BlockPack& pk, const std::string& name){
     s.nb = m.nb; s.n_ader = m.nader; s.n_var = m.nvar;
     s.Nz = m.Nz; s.Ny = m.Ny; s.Nx = m.Nx;
     s.nz = m.nz; s.ny = m.ny; s.nx = m.nx;
-    s.label = name;
+    snprintf(s.label, sizeof(s.label), "%s", name.c_str());
     return s;
 }
 

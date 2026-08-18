@@ -26,15 +26,27 @@ class FV_dimension{
                 N_total = (N+2*NGH);
                 n_cells = N_total;
                 n_faces = n_cells+1;
+            }else{
+                n_cells = 1;
+                n_faces = 2;
             }
-            Kokkos::resize(faces, n_faces);
-            Kokkos::resize(centers, n_cells);
+            int nf = n_faces;
+            int nc = n_cells;
+            if(!active){
+                if(nf < 2) nf = 2;
+                if(nc < 2) nc = 2;
+            }
+            faces = Vector("faces", nf);
+            centers = Vector("centers", nc);
+            Vector_h faces_h = setup_mirror(faces);
+            Vector_h centers_h = setup_mirror(centers);
             for(int i=0;i<n_faces;i++)
-                faces(i)= (start+i-NGH)*h;
+                faces_h(i)= (start+i-NGH)*h;
             
             for(int i=0;i<n_cells;i++)
-                centers(i)= 0.5*(faces(i+1)+faces(i)); 
-  
+                centers_h(i)= 0.5*(faces_h(i+1)+faces_h(i));
+            setup_push(faces, faces_h);
+            setup_push(centers, centers_h);
         }	
 };
 
@@ -55,7 +67,9 @@ class FV_Solution{
     int kL;
     int kR;
     int nb=1;   //meshblocks spanned: 1 for a block's own view, nblocks for a pack
-    string label;
+    //char[], not std::string: an FV_Solution is captured by value into device
+    //lambdas and std::string cannot cross to the device.
+    char label[64];
     FV_Solution() = default;
     FV_Solution(string name,
         int nvar,
@@ -97,7 +111,7 @@ class FV_Solution{
         ){
         set_extents(nvar,Zdim,Ydim,Xdim,z,y,x);
         Kokkos::resize(Vector,nvar,Nz,Ny,Nx);
-        label=name;
+        snprintf(label, sizeof(label), "%s", name.c_str());
     }
 
     //Block ib's slice of a shared pack (see BlockPack in structs.hpp).
@@ -114,7 +128,7 @@ class FV_Solution{
         Vector = pk.fv_slice(name, ib, n_var, Nz, Ny, Nx);
         PackMeta& m = pk.meta[name];
         m.iL=iL; m.iR=iR; m.jL=jL; m.jR=jR; m.kL=kL; m.kR=kR;
-        label=name;
+        snprintf(label, sizeof(label), "%s", name.c_str());
     }
 
     //Lazy host mirror: allocated on first copy() (see SD_Solution::copy)
@@ -140,7 +154,7 @@ inline FV_Solution fv_pack_view(BlockPack& pk, const std::string& name){
     s.iL = m.iL; s.iR = m.iR;
     s.jL = m.jL; s.jR = m.jR;
     s.kL = m.kL; s.kR = m.kR;
-    s.label = name;
+    snprintf(s.label, sizeof(s.label), "%s", name.c_str());
     return s;
 }
 

@@ -1,0 +1,43 @@
+# Low-res strong MHD blast smoke (same physics as blast_p3_fb.athinput).
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p    = 3
+nx1  = 32
+nx2  = 32
+nx3  = 1
+x1len = 1.2
+x2len = 1.2
+x1_bc = gradfree
+x2_bc = gradfree
+
+<time>
+tlim       = 0.001
+cfl        = 0.2
+integrator = rk3
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+
+<fallback>
+max_revs = 3
+tolerance = 1e-5
+NAD = relative
+NAD_neighbors = 2nd
+SED = true
+
+<problem>
+problem = mhd_blast
+amp = 1000.0
+d0 = 1.0
+p0 = 0.1
+p1 = 10000.0
+radius = 0.1
+
+<output>
+dt = 0.001

@@ -9,12 +9,34 @@ constrained-transport (CT) spectral-difference scheme ported from the Python
 rho, vx, vy, vz, P/E, Bx, By, Bz
 ```
 
-is advanced with high-order SD fluxes and an MHD LLF Riemann solver (fast
-magnetosonic speed), while the divergence-free magnetic field lives on the cell
-faces and is evolved by CT from edge electromotive forces. The edge EMF couples
-the face field (interpolated to edges) with the fluid state (interpolated from
-cell-centered primitives to the same edge points) through an upwind
-electric-field Riemann solver.
+is advanced with high-order SD fluxes and an MHD Riemann solver (default LLF on
+the fast magnetosonic speed; optional Miyoshi–Kusano HLLD via `mhd/rsolver`),
+while the divergence-free magnetic field lives on the cell faces and is evolved
+by CT from edge electromotive forces. Edge points are classified by how many
+element interfaces they lie on:
+
+| Edge point | Discontinuous normals | Edge EMF (`rsolver = hlld`) |
+|---|---|---|
+| Interior to an element | none | polynomial `E = v×B` from `mhd_compute_E` |
+| Mid-face element interface | one | **1D UCT** (face HLLD weights along that normal) |
+| 4-element corner | two | **2D UCT** (MDZ composition from both face families) |
+
+With `mhd/rsolver = llf` the high-order SD edges stay on the legacy two
+sequential 1-D edge sweeps (`llf_E`, `v_index` 3 then 4).
+
+`mhd/rsolver = hlld` selects HLLD for SD face fluxes and for the MOOD FV face
+fluxes. SD face HLLD overwrites the normal `B` with the CT face field (never
+reconstructed) and stores UCT coefficients `(aL,dL,dR,vt1,vt2)` on the face
+flux-point lattice. The high-order SD edge EMF then uses the same AthenaK /
+MDZ UCT formula as the MOOD demoted corners (Mignone & Del Zanna 2021 /
+Berta+2024, sign-flipped to the spd `E = v×B` convention): for each edge
+point, discontinuous axes take L/R neighbour states from the pre-Riemann edge
+array plus `(a,d)` interpolated from the adjacent face HLLD solves; continuous
+axes collapse to the local `mhd_compute_E` state with `a = 1/2`, `d = 0`. No
+second HLLD sweep is applied at SD edges when `rsolver = hlld`. With
+`rsolver = llf` the MOOD low-order corner E stays the four-state LLF bound.
+Forced-MUSCL and full SD+FB Orszag–Tang at `p=3`, `N=32²` with HLLD+UCT both
+run cleanly to `t=1`.
 
 Time integration is SSP-RK (`rk1`–`rk3`); ADER MHD is not ported yet. The
 module supports 3D and **true 2D** (`mesh/nx3 = 1`, x-y plane; matching the
@@ -32,9 +54,9 @@ time step, since the CFL no longer sums the z fast speed).
 Each SSP-RK stage runs, as tasks registered in the driver's stage list:
 
 1. `CopyCons` — stage state + primitives at solution points.
-2. `Advance` — SD fluxes + MHD Riemann solve, edge EMF assembly + edge Riemann
-   solve, fluid update, CT update of the face field (or the MOOD cascade, see
-   below).
+2. `Advance` — SD fluxes + face HLLD/LLF (with CT face `Bn` and UCT coeffs when
+   HLLD), edge EMF assembly + UCT or two-sweep edge upwinding, fluid update, CT
+   update of the face field (or the MOOD cascade, see below).
 3. `Combine` — SSP convex combination of the stage.
 4. `BtoU` — projection of the face field onto the cell-centered B rows.
 
@@ -84,12 +106,17 @@ Trouble detection runs on control-volume averages of the full candidate state
 (the fluid candidate with its B rows replaced by the cell average of the
 candidate CT update):
 
-- **NAD** on `rho`, gas `P`, and `|B|` — the field enters through its
-  *magnitude*, not its components, which is markedly more robust (flagging on
-  components over-triggers on rotations of B that are perfectly fine
-  physically);
+- **NAD** on `rho`, gas `P`, and the magnetic field — default
+  `mhd/mood_nad_b = comps` (`Bx,By,Bz`), matching Python `spd` and AthenaK.
+  `|B|`-only (`mood_nad_b = mag`) is blind to Alfvénic / transverse
+  oscillations. Optional `mhd/mood_nad_v = comps|mag` adds velocity.
+  The band width uses `mhd/mood_nad_scale` (default **`gcfl`**: domain range of
+  each detection variable, softened by the advective CFL — AthenaK's default).
+  Alternatives: `grange` (no CFL factor), `relative`, `delta`. `fallback/atol`
+  and `fallback/eps0` floor the band near zero crossings;
 - **PAD** on density and gas pressure (total energy minus kinetic and magnetic
-  energy of the candidate field), with runtime floors `fallback/min_rho` and
+  energy of the candidate field), plus an `isfinite` check on the conserved
+  candidate (NaN demotion). Runtime floors `fallback/min_rho` and
   `fallback/min_P` (defaults `1e-10`). The raw internal energy is tested, so
   candidates the ctoprim floors would mask are still flagged; raising
   `min_P` toward the problem's pressure scale demotes degenerating low-β cells
@@ -137,6 +164,7 @@ stably with the flagged cells tracking the shock fronts.
 `scripts/cross_validate_mhd.py` runs the same Orszag-Tang problem in Python
 spd (`soe="mhd"`, rk3, LLF) and compares the primitive CV averages, mapping
 between the code-unit conventions (`rho_K = rho_py/4π`, `B_K = B_py/√4π`).
-Fallback-off at t = 0.1 agrees to ~1e-6 relative L1; fallback-on the |B|-based
-NAD flags different cells than Python's per-component NAD, so agreement past
-shock formation is qualitative (~2% relative L1 at t = 0.25).
+Fallback-off at t = 0.1 agrees to ~1e-6 relative L1; fallback-on both codes
+now use per-component B NAD (Python `limiting_variables`, spd_K
+`mhd/mood_nad_b=comps`), so cascade agreement past shock formation should
+track more closely than the earlier `|B|`-only spd_K path.
