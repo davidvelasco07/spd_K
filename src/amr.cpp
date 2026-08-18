@@ -292,12 +292,19 @@ int limit_prolongation(SD_Solution C,
 
 //Discrete-maximum-principle limiter for the p >= 1 prolongation.
 //
-//prolongate_block is exact on degree-p data but UNLIMITED, so across a sharp
-//interface it rings: the fine element overshoots the coarse data it came from
-//without ever violating PAD, so limit_prolongation (which fires only on
-//inadmissible pressure/density) lets it through. On the fig-21 KH that ringing
-//is what fills the SDFB AMR roll cores with fine-scale texture the uniform run
-//does not have.
+//DEAD END, kept as the record of why -- and the premise it was built on is
+//false. prolongate_block does not ring, because it does not interpolate
+//anything new: amr_P is lagrange_matrix(x_sp -> 0.5*x_sp [+0.5]), so a child
+//solution point holds the COARSE element's own degree-p polynomial evaluated
+//inside that child, and p+1 such samples determine the restriction of that
+//polynomial uniquely. Prolongation at p >= 1 is therefore a lossless change of
+//representation: the function carried by the block is the same function
+//afterwards. The suite has always said so -- "prolongate_block exact (degree-p
+//data)" holds to 8.9e-15 -- and every coarse element state IS degree-p data by
+//construction, so that test covers every state rather than a lucky one.
+//Nothing is injected here, so no limiter placed here can recover accuracy; it
+//can only delete real sub-element structure. Which is what the measurement
+//below found.
 //
 //The bound is taken from the COARSE neighbourhood, which is still recoverable
 //from the fine block: prolongation is conservative per parent, so a parent's
@@ -325,10 +332,31 @@ int limit_prolongation(SD_Solution C,
 //The reason is structural: a degree-p element's control volumes LEGITIMATELY
 //overshoot the neighbouring element MEANS -- that overshoot is the sub-element
 //resolution p buys -- so bounding CVs by group means cannot distinguish real
-//structure from interpolation ringing. A usable bound needs the coarse
-//element's own CV range, or a smoothness test (SED) on the coarse data; either
-//way the coarse source has to reach the limiter, which it does not today.
-//Kept as scaffolding for that, and as the record of why the cheap version fails.
+//structure from interpolation ringing.
+//
+//The escalation this used to propose -- bound by the coarse element's OWN CV
+//range, threading the coarse source through to the limiter -- is WORSE, not
+//better, and needs no code to rule out. The outermost fine CV of a child
+//averages the polynomial over a NARROWER interval, nearer the element edge,
+//than the outermost coarse CV does, so for any data with a gradient it is
+//strictly more extreme than every coarse CV no matter how smooth the data is.
+//Modelled on the production nodes (Chebyshev x_sp, Gauss x_fp, p = 3) with the
+//bounds widened to admit the child's own mean exactly as below: pure LINEAR
+//data puts 2 of 8 fine CVs outside the coarse CV range (worst excursion
+//2.8e-02), xi^2 the same 2 of 8, a sine at 64 coarse elements per wavelength
+//still 2 of 8. The count is set by the node geometry, not by smoothness, so
+//that bound clips the edge CV of every element that is not constant and is not
+//even exact on linear data -- it would cost the scheme its order of accuracy
+//everywhere, not just at discontinuities. The group-mean version measured
+//above is the LOOSER of the two.
+//
+//So the 2.6e-04 a p = 3 regrid puts into the KH solution is not prolongation
+//error at all: it is the coarse solution being under-resolved relative to the
+//uniform run it is compared against, then represented exactly on the finer
+//mesh. The lever for that is when and where the mesh is refined -- criterion
+//and root resolution, cf. the p = 0 result that root, not level count, controls
+//the gain -- not the transfer operator. On the fig-21 KH limit_prolongation
+//reports prolong_limited 0 throughout: there is nothing here to limit.
 //
 //Returns the number of elements limited.
 int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz){
