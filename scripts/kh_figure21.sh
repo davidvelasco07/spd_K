@@ -11,8 +11,8 @@
 #   t = 1.2, cfl = 0.4, gamma = 1.4, HLLC + PLM in the paper
 #
 # spd_K carries (p+1)^2 degrees of freedom per element, so an "N cells" grid is
-# N/(p+1) elements. MUSCL runs at p=0 (one cell per element, matching the
-# paper's finite-volume scheme); SDFB4 runs at p=3, where the same DoF count
+# N/(p+1) elements. The vl2 lane (MUSCL-Hancock) runs at p=0 (one cell per
+# element, matching the paper's finite-volume scheme); SDFB4 runs at p=3, where the same DoF count
 # needs a quarter of the elements per direction. Blocks are matched by DoF, not
 # by element count, so the two schemes are comparable block for block.
 #
@@ -27,7 +27,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-lane=${1:?usage: kh_figure21.sh <0=muscl-1k|1=sd-1k|2=muscl-2k|3=sd-2k>}
+lane=${1:?usage: kh_figure21.sh <0=vl2-1k|1=sd-1k|2=vl2-2k|3=sd-2k>}
 TL=${TL:-1.2}
 OD=${OD:-0.3}
 ADAPT=${ADAPT:-50}
@@ -41,16 +41,16 @@ CRIT="amr/criterion=shear amr/refine_threshold=0.01 amr/derefine_threshold=0.005
 # kh_case.sh <tag> <gpu> <scheme> <p> <nelem> <mb-elem> <maxlev> <adapt> <tlim> <outdt> [args]
 case "$lane" in
   0) # MUSCL, 1024^2 effective: root 128 cells, 4 levels (128 * 2^3 = 1024)
-     ./scripts/kh_case.sh f21_muscl_uni_1k  "$GPU" muscl 0 1024 1024 0 0      "$TL" "$OD" time/cfl=$CFL
-     ./scripts/kh_case.sh f21_muscl_amr_1k  "$GPU" muscl 0  128  $MB  3 $ADAPT "$TL" "$OD" time/cfl=$CFL $CRIT
+     ./scripts/kh_case.sh f21_muscl_uni_1k  "$GPU" vl2 0 1024 1024 0 0      "$TL" "$OD" time/cfl=$CFL
+     ./scripts/kh_case.sh f21_muscl_amr_1k  "$GPU" vl2 0  128  $MB  3 $ADAPT "$TL" "$OD" time/cfl=$CFL $CRIT
      ;;
   1) # SDFB4 p=3, 1024^2 DoF: 256 elements uniform; root 32 elements, 4 levels
      ./scripts/kh_case.sh f21_sd_uni_1k     "$GPU" sd 3 256 256 0 0      "$TL" "$OD" time/cfl=$CFL
      ./scripts/kh_case.sh f21_sd_amr_1k     "$GPU" sd 3  32 $((MB/4)) 3 $ADAPT "$TL" "$OD" time/cfl=$CFL $CRIT
      ;;
   2) # MUSCL, paper scale: 2048^2 uniform; root 256 cells, 4 levels
-     ./scripts/kh_case.sh f21_muscl_uni_2k  "$GPU" muscl 0 2048 2048 0 0      "$TL" "$OD" time/cfl=$CFL
-     ./scripts/kh_case.sh f21_muscl_amr_2k  "$GPU" muscl 0  256  $MB  3 $ADAPT "$TL" "$OD" time/cfl=$CFL $CRIT
+     ./scripts/kh_case.sh f21_muscl_uni_2k  "$GPU" vl2 0 2048 2048 0 0      "$TL" "$OD" time/cfl=$CFL
+     ./scripts/kh_case.sh f21_muscl_amr_2k  "$GPU" vl2 0  256  $MB  3 $ADAPT "$TL" "$OD" time/cfl=$CFL $CRIT
      ;;
   3) # SDFB4 p=3, paper scale: 512 elements uniform; root 64 elements, 4 levels
      ./scripts/kh_case.sh f21_sd_uni_2k     "$GPU" sd 3 512 512 0 0      "$TL" "$OD" time/cfl=$CFL

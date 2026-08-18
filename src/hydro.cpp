@@ -667,7 +667,15 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, do
 //all active directions). D is a compile-time parameter so all local arrays
 //stay in registers; the arithmetic is identical to reconstructing all
 //directions and discarding the unused ones.
-template<int D>
+//PRED selects the two schemes job/scheme names:
+//  PRED=true  (vl2) MUSCL-Hancock -- limited slopes plus the Hancock half-step
+//             predictor, second order in time on its own (use rk1 outside).
+//  PRED=false (plm) plain PLM -- limited slopes only; the time accuracy is
+//             whatever the outer integrator provides (rk2/rk3).
+//It is a template parameter, not a runtime flag, because the predictor is not
+//just the +dwt term: the TRANSVERSE slopes exist solely to feed corrector(),
+//so plm needs only the D-direction slope. Zeroing dt would still pay for both.
+template<int D, bool PRED>
 KOKKOS_INLINE_FUNCTION
 void slopes_d(
     FV_Vector W,
@@ -696,36 +704,55 @@ void slopes_d(
     double dwy[NVAR];
     double dwz[NVAR];
     double dwt[NVAR];
+    //A slope is needed if it is the reconstruction direction, or if the Hancock
+    //corrector will consume it. Both tests are compile-time, so plm compiles
+    //down to the single slope it actually uses.
+    constexpr bool need_x = PRED || D==_x_;
+    constexpr bool need_y = PRED || D==_y_;
+    constexpr bool need_z = PRED || D==_z_;
     for(int var=0; var<NVAR; var++){
         w[var] = W(off+var,k,j,i);
-        wL=W(off+var,k,j,i-1);
-        wR=W(off+var,k,j,i+1);
-        //Each one-sided difference uses its own center spacing: the FV
-        //sub-grid (Gauss points) is non-uniform, and a shared h breaks the
-        //mirror symmetry at reflective walls (spurious wall mass flux)
-        dwx[var] = minmod((wR - w[var])/(x_c[i+1]-x_c[i]),
-                          (w[var] - wL)/(x_c[i]-x_c[i-1]),x_f[i],x_f[i+1]);
+        dwx[var] = 0;
         dwy[var] = 0;
         dwz[var] = 0;
-        if(ay){
-            wL=W(off+var,k,j-1,i);
-            wR=W(off+var,k,j+1,i);
-            dwy[var] = minmod((wR - w[var])/(y_c[j+1]-y_c[j]),
-                              (w[var] - wL)/(y_c[j]-y_c[j-1]),y_f[j],y_f[j+1]);
+        if constexpr (need_x){
+            wL=W(off+var,k,j,i-1);
+            wR=W(off+var,k,j,i+1);
+            //Each one-sided difference uses its own center spacing: the FV
+            //sub-grid (Gauss points) is non-uniform, and a shared h breaks the
+            //mirror symmetry at reflective walls (spurious wall mass flux)
+            dwx[var] = minmod((wR - w[var])/(x_c[i+1]-x_c[i]),
+                              (w[var] - wL)/(x_c[i]-x_c[i-1]),x_f[i],x_f[i+1]);
         }
-        if(az){
-            wL=W(off+var,k-1,j,i);
-            wR=W(off+var,k+1,j,i);
-            dwz[var] = minmod((wR - w[var])/(z_c[k+1]-z_c[k]),
-                              (w[var] - wL)/(z_c[k]-z_c[k-1]),z_f[k],z_f[k+1]);
+        if constexpr (need_y){
+            if(ay){
+                wL=W(off+var,k,j-1,i);
+                wR=W(off+var,k,j+1,i);
+                dwy[var] = minmod((wR - w[var])/(y_c[j+1]-y_c[j]),
+                                  (w[var] - wL)/(y_c[j]-y_c[j-1]),y_f[j],y_f[j+1]);
+            }
+        }
+        if constexpr (need_z){
+            if(az){
+                wL=W(off+var,k-1,j,i);
+                wR=W(off+var,k+1,j,i);
+                dwz[var] = minmod((wR - w[var])/(z_c[k+1]-z_c[k]),
+                                  (w[var] - wL)/(z_c[k]-z_c[k-1]),z_f[k],z_f[k+1]);
+            }
         }
     }
-    corrector(w,dwt,dwx,dwy,dwz,gm);
+    if constexpr (PRED) corrector(w,dwt,dwx,dwy,dwz,gm);
     for(int var=0; var<NVAR; var++){
         h = (D==_x_ ? x_f[i+1]-x_f[i] : (D==_y_ ? y_f[j+1]-y_f[j] : z_f[k+1]-z_f[k]));
         double dw = (D==_x_ ? dwx[var] : (D==_y_ ? dwy[var] : dwz[var]));
-        WR[var] = w[var] - dw + dwt[var]*dt/h;
-        WL[var] = w[var] + dw + dwt[var]*dt/h;
+        if constexpr (PRED){
+            WR[var] = w[var] - dw + dwt[var]*dt/h;
+            WL[var] = w[var] + dw + dwt[var]*dt/h;
+        } else {
+            (void)dt;
+            WR[var] = w[var] - dw;
+            WL[var] = w[var] + dw;
+        }
     }
 }
 
@@ -750,7 +777,8 @@ void compute_fluxes(
     int ader,
     bool ay,
     bool az,
-    double gm
+    double gm,
+    bool pred
     ){
     //wL/wR hold only the D-direction faces of the two cells adjacent to the
     //face (l = -1, 0); with D compile-time everything stays in registers.
@@ -768,7 +796,7 @@ void compute_fluxes(
     int v2 = choose(D,_vy_,_vz_,_vx_);
     int v3 = choose(D,_vz_,_vx_,_vy_);
     for(int l=-1; l<1; l++)
-        slopes_d<D>(
+        if(pred) slopes_d<D,true>(
             W,
             x_c,
             x_f,
@@ -786,6 +814,12 @@ void compute_fluxes(
             ay,
             az,
             gm);
+        else slopes_d<D,false>(
+            W,x_c,x_f,y_c,y_f,z_c,z_f,off,
+            k + (D==_z_ ? l:0),
+            j + (D==_y_ ? l:0),
+            i + (D==_x_ ? l:0),
+            (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
     //Now we have the reconstructed values at both faces
     //We can then solve the Riemann problem
     //Left Boundary
@@ -809,7 +843,7 @@ void compute_fluxes(
 //
 //muscl=true is the limited-slope MUSCL-Hancock reconstruction -- the same
 //flux compute_fluxes above produces at theta=1, so cascade level 1 and
-//job/scheme=muscl agree by construction. muscl=false is donor cell: the two
+//job/scheme=vl2 agree by construction. muscl=false is donor cell: the two
 //face states are the adjacent cell averages, which is the most diffusive
 //level and the one that has to hold when nothing else does.
 template<int D>
@@ -831,7 +865,8 @@ void level_flux(
     bool ay,
     bool az,
     double gm,
-    bool muscl
+    bool muscl,
+    bool pred
     ){
     double uL[NVAR];
     double uR[NVAR];
@@ -843,7 +878,12 @@ void level_flux(
         double wL[FACE_CELLS][NVAR];
         double wR[FACE_CELLS][NVAR];
         for(int l=-1; l<1; l++)
-            slopes_d<D>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
+            if(pred) slopes_d<D,true>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
+                        k + (D==_z_ ? l:0),
+                        j + (D==_y_ ? l:0),
+                        i + (D==_x_ ? l:0),
+                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
+            else     slopes_d<D,false>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
@@ -891,6 +931,7 @@ void level_fluxes(
     double gm = cfg.gamma;
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cx=x_c.data(), *ffx=x_f.data();
     const double *cy=y_c.data(), *ffy=y_f.data();
@@ -899,9 +940,9 @@ void level_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
-        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
-        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
     });
 }
 
@@ -926,6 +967,7 @@ void level_fluxes_b(
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var;
     double gm = cfg.gamma;
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cxd=cxm.data(), *fxd=fxm.data();
     const double *cyd=cym.data(), *fyd=fym.data();
@@ -940,9 +982,9 @@ void level_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
-        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
-        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl);
+        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
     });
 }
 
@@ -968,6 +1010,7 @@ void fallback_fluxes_b(
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var, tnv=theta.n_var;
     double gm = cfg.gamma;
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, th=theta.Vector;
     FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cxd=cxm.data(), *fxd=fxm.data();
@@ -983,9 +1026,9 @@ void fallback_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
-        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
-        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
     }, "fallback_fluxes_b");
 }
 
@@ -1011,6 +1054,7 @@ void fallback_fluxes(
     double gm = cfg.gamma;
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
+    const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, th=theta.Vector;
     FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cx=x_c.data(), *ffx=x_f.data();
@@ -1019,8 +1063,8 @@ void fallback_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
-        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
-        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm);
+        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
     });
 }

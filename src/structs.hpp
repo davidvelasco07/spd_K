@@ -112,7 +112,7 @@ class dimension{
             //supplies NG ghost elements of n_sp points each. For g <= NG*n_sp
             //every FV ghost has an SD source; past that idL < 0 and the
             //outermost ghost coordinates have none and would stay zero. Two
-            //ways in: p = 0 (job/scheme=muscl) has n_sp = 1 < g at the default
+            //ways in: p = 0 (job/scheme=vl2|plm) has n_sp = 1 < g at the default
             //width, and widening the halo (SPD_FV_GHOST) does it at any p.
             //slopes_d divides by the centre spacing there, so the boundary
             //ghost slope -- and with it the flux on the two domain boundary

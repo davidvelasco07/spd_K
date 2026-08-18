@@ -1001,7 +1001,7 @@ struct Mesh : public PhysicsModule {
     //is skipped entirely under pure MUSCL, which never reads the flags.
     void FV_detect_batched(){
         compute_primitives(pv.U_old, pv.W_old);
-        if(cfg.muscl_only) return;
+        if(cfg.fv_only) return;
         compute_primitives(pv.U_new, pv.W_new);
         detect_pack();
     }
@@ -1085,11 +1085,11 @@ struct Mesh : public PhysicsModule {
     }
 
     void FV_theta_batched(){
-        if(cfg.muscl_only){
+        if(cfg.fv_only){
             Kokkos::deep_copy(pv.theta.Vector, 1.0);
             return;
         }
-        if(cfg.muscl_only){ Kokkos::deep_copy(pv.theta.Vector, 1.0); return; }
+        if(cfg.fv_only){ Kokkos::deep_copy(pv.theta.Vector, 1.0); return; }
         if(cfg.blending){
             apply_blending_b(pv.flagged, pv.theta_tmp);
             blending_ring_b(pv.theta_tmp, pv.theta);
@@ -1105,10 +1105,10 @@ struct Mesh : public PhysicsModule {
             { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
             { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
             { Region r("FV_detect"); FV_detect_batched(); }
-            if(!cfg.muscl_only){ Region r("Exchange_flagged");
+            if(!cfg.fv_only){ Region r("Exchange_flagged");
                                  Exchange_fv_field(&Block::flagged,&pv.flagged); }
             { Region r("FV_theta"); FV_theta_batched(); }
-            if(!cfg.muscl_only){ Region r("Exchange_theta");
+            if(!cfg.fv_only){ Region r("Exchange_theta");
                                  Exchange_fv_field(&Block::theta,&pv.theta); }
             { Region r("FV_blend"); FV_blend_batched(ader); }
             if(forest.max_level()>0){

@@ -51,7 +51,12 @@ struct RunConfig {
     bool nad_moore = true;               //DMP bounds over the Moore (box) neighborhood
     bool sed = true;                     //smooth extrema detection (only applied for p>1)
     bool blending = true;                //fractional theta blending of fallback fluxes
-    bool muscl_only = false;             //take every face from the MUSCL fallback (theta=1)
+    bool fv_only = false;                //take every face from the FV flux (theta=1):
+                                         //the low-order lane, job/scheme=vl2|plm
+    bool fv_predictor = true;            //FV reconstruction: true = MUSCL-Hancock
+                                         //(job/scheme=vl2), false = plain PLM
+                                         //(job/scheme=plm), whose time accuracy
+                                         //comes from the outer integrator
     bool mood_cascade = false;           //fallback style: false = fractional theta blend
                                          //(matches the Python reference), true = discrete
                                          //MOOD cascade levels as the MHD module uses.

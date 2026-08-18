@@ -174,15 +174,25 @@ int main(int argc, char** argv){
                            <<"' (expected blend or cascade)"<<endl;
             exit(1);
         }
-        //job/scheme = muscl pins the fallback blend to 1 on every face, so the
-        //run is plain MUSCL-Hancock on the flux-point subgrid instead of SD
-        //with a fallback. Useful as a low-order reference at matched DoF.
+        //job/scheme picks the discretisation on the flux-point subgrid:
+        //  sd   spectral difference with the FV fallback (the primary scheme)
+        //  vl2  MUSCL-Hancock -- limited slopes + Hancock half-step predictor,
+        //       second order in time on its own, so pair it with time/integrator=rk1
+        //  plm  plain PLM -- limited slopes only, no predictor; the time accuracy
+        //       is the outer integrator's, so pair it with rk2/rk3
+        //vl2 and plm pin the fallback blend to 1 on every face, giving a
+        //low-order reference lane at matched DoF. (vl2 names the scheme after
+        //Athena++'s integrator for comparison; MUSCL-Hancock predicts the FACE
+        //STATES locally with one Riemann solve, where VL2 does a conservative
+        //half-step with donor-cell fluxes and solves twice. Same order, and the
+        //closest lane spd_K has, but not the same algorithm.)
         string scheme = pin.GetOrAddString("job","scheme","sd");
-        if(scheme=="muscl"){
-            cfg.muscl_only = true;
+        if(scheme=="vl2" || scheme=="plm"){
+            cfg.fv_only = true;
             cfg.fallback = true;
+            cfg.fv_predictor = (scheme=="vl2");
         } else if(scheme!="sd"){
-            cout<<"ERROR: unknown scheme '"<<scheme<<"' (expected sd or muscl)"<<endl;
+            cout<<"ERROR: unknown scheme '"<<scheme<<"' (expected sd, vl2 or plm)"<<endl;
             exit(1);
         }
         cfg.max_revs  = pin.GetOrAddInteger("fallback","max_revs",3);
@@ -312,11 +322,11 @@ int main(int argc, char** argv){
             //cascade instead *selects* one flux per face from the pooled level,
             //which is single-valued from both sides by construction. MHD always
             //runs its own cascade, so this is a hydro-only requirement.
-            //job/scheme=muscl is exempt: it pins theta to 1 on every face, so
+            //job/scheme=vl2|plm is exempt: they pin theta to 1 on every face, so
             //every face takes the MUSCL flux and is single-valued after all.
             //It is the low-order reference lane, not a blend.
             if(system_name=="hydro" && cfg.amr_max_level>0 && cfg.fallback
-               && !cfg.mood_cascade && !cfg.muscl_only){
+               && !cfg.mood_cascade && !cfg.fv_only){
                 if(Master)
                     cout<<"ERROR: mixed-level AMR with the FV fallback requires "
                         <<"fallback/style=cascade; the fractional blend is not "

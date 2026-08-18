@@ -3,8 +3,8 @@
 #
 # usage: kh_case.sh <tag> <gpu> <scheme> <p> <nelem> <mb> <maxlev> <adapt> <tlim> <outdt> [extra args...]
 #
-#   scheme  sd | muscl
-#   p       polynomial degree (0 for MUSCL, 3 for SDFB4)
+#   scheme  sd | vl2 (MUSCL-Hancock) | plm (no predictor)
+#   p       polynomial degree (0 for vl2/plm, 3 for SDFB4)
 #   nelem   elements per direction on the root grid
 #   mb      meshblock size in elements (use nelem for a single block)
 #   maxlev  0 for a uniform run, >0 for AMR

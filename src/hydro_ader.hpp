@@ -681,7 +681,7 @@ struct Hydro_ader : public PhysicsModule{
         compute_primitives(U_old,W_old);
         //Pure MUSCL blends in the fallback everywhere, so the flags are never
         //read and the whole detection stencil can be skipped.
-        if(cfg.muscl_only) return;
+        if(cfg.fv_only) return;
         compute_primitives(U_new,W_new);
         //Following the reference implementation, only density and
         //pressure enter the NAD/SED checks (uniform or zero fields,
@@ -696,7 +696,7 @@ struct Hydro_ader : public PhysicsModule{
     //blending is disabled. Requires ghosted trouble flags.
     void FV_theta(){
         //Fills the ghosts too, so the usual theta exchange is a no-op here.
-        if(cfg.muscl_only){
+        if(cfg.fv_only){
             Kokkos::deep_copy(theta.Vector, 1.0);
             return;
         }
@@ -844,12 +844,12 @@ struct Hydro_ader : public PhysicsModule{
             //stencils near the domain boundary see the same data as their
             //periodic partners. Only the pooled level is read downstream, so
             //this is a one-component halo rather than the whole flag array.
-            if(!cfg.muscl_only) apply_fv_boundaries(comm,flagged);
+            if(!cfg.fv_only) apply_fv_boundaries(comm,flagged);
             FV_theta();
             //Ghost thetas must also be exact periodic images so the two
             //domain boundary faces of each direction receive identical
             //blended fluxes (exact conservation)
-            if(!cfg.muscl_only) apply_fv_boundaries(comm,theta);
+            if(!cfg.fv_only) apply_fv_boundaries(comm,theta);
             #ifdef DEBUG_MASS
             if(t==0 && ader==0) Write(F_x,899);
             #endif

@@ -13,7 +13,8 @@ plus command-line overrides. Checks per configuration:
                    replacement is exactly conservative for periodic BCs)
   hydro_fv_blast : 2d blast with a real shock; detector fires, fallback
                    active, mass still conserved to round-off
-  hydro_muscl_2d : job/scheme=muscl (blend pinned to 1 on every face) on a
+  hydro_muscl_2d : job/scheme=vl2 (MUSCL-Hancock; blend pinned to 1 on every
+                   face) on a
                    smooth periodic wave; the low-order reference lane for the
                    figure-21 runs, conservative to round-off
   *_rk3          : same checks with the SSP-RK3 integrator (per-stage
@@ -215,14 +216,14 @@ CONFIGS = {
         "golden_rtol": 1e-6,
     },
     "hydro_muscl_2d": {
-        # job/scheme=muscl pins the fallback blend to 1 on every face, which is
+        # job/scheme=vl2 (MUSCL-Hancock) pins the blend to 1 on every face, which is
         # a different path from the hydro_fv_* tests: those run SD and only
         # reach a MUSCL flux where the detector fires. This is the low-order
         # reference lane for the figure-21 runs. It drifted ~3e-06 when the
         # lane was first added; it is exact now (0.0 here, 2.2e-16 multiblock),
         # so it is a real check rather than a known failure.
         "input": "inputs/sine_wave.athinput",
-        "overrides": ["job/scheme=muscl", "mesh/p=0",
+        "overrides": ["job/scheme=vl2", "mesh/p=0",
                       "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
                       "meshblock/nx1=32", "meshblock/nx2=32", "meshblock/nx3=1",
                       "output/dt=0.05"],
@@ -235,7 +236,7 @@ CONFIGS = {
         # same scheme across meshblock boundaries; the per-face flux must not
         # depend on which block computes it.
         "input": "inputs/sine_wave.athinput",
-        "overrides": ["job/scheme=muscl", "mesh/p=0",
+        "overrides": ["job/scheme=vl2", "mesh/p=0",
                       "mesh/nx1=32", "mesh/nx2=32", "mesh/nx3=1",
                       "meshblock/nx1=8", "meshblock/nx2=8", "meshblock/nx3=1",
                       "output/dt=0.05"],
@@ -384,7 +385,7 @@ CONFIGS = {
         "t_end": 0.1,
     },
     "hydro_amr_muscl_2d": {
-        # Dynamic AMR at p = 0 (job/scheme=muscl). This is the only config that
+        # Dynamic AMR at p = 0 (job/scheme=vl2). This is the only config that
         # exercises prolongate_block_lim: every other AMR test runs at p = 3 and
         # so takes the amr_P matrix path. At p = 0 amr_P degenerates to
         # piecewise-constant injection, and the limited-linear reconstruction
@@ -393,7 +394,7 @@ CONFIGS = {
         # conservative through a regrid. mass_strict is the sharp test of that;
         # the minmod limiter also has to leave the pulse admissible.
         "input": "inputs/amr_pulse.athinput",
-        "overrides": ["mesh/p=0", "job/scheme=muscl"],
+        "overrides": ["mesh/p=0", "job/scheme=vl2"],
         "env": {"SPD_NEW_XCHG": "1"},
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],

@@ -6,7 +6,9 @@
 # wavelength 0.5. Reference time for figure 21 is t = 1.2.
 #
 # Set the scheme on the command line:
-#   job/scheme=muscl              plain MUSCL-Hancock on the flux-point subgrid
+#   job/scheme=vl2                MUSCL-Hancock on the flux-point subgrid (pair
+#                                 with time/integrator=rk1)
+#   job/scheme=plm                plain PLM, no predictor (pair with rk2/rk3)
 #   job/scheme=sd job/fallback=true   SD(p) with MUSCL fallback ("SDFB")
 #
 # Degrees of freedom are (p+1)^2 per element, so mesh/nx1 = D/(p+1) elements

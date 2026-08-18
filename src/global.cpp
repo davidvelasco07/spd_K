@@ -74,7 +74,7 @@ void set_runtime_dimensionality(bool ax, bool ay, bool az, int p){
     //negative and the outermost FV ghosts have no SD source -- which is not
     //fatal: nothing copies SD into an FV ghost (fv_update_solution writes active
     //cells only, the exchange fills the rest), and structs.hpp extends the ghost
-    //*coordinates* by whole elements. p = 0 (job/scheme=muscl) already runs that
+    //*coordinates* by whole elements. p = 0 (job/scheme=vl2|plm) already runs that
     //way at the default width, so the SD halo stays at NGH and that lane is
     //untouched. Reported below rather than silently accepted.
     NGH_rt[_x_] = ax ? NGH : 0;
