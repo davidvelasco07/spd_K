@@ -1636,6 +1636,238 @@ struct Mesh : public PhysicsModule {
         return m;
     }
 
+    //--------------------------------------------------------------------------
+    // Coarse-fine magnetic-flux telescoping: the observable `divb` cannot see.
+    //
+    // mhd_max_divB computes the divergence PER BLOCK from that block's own face
+    // field, and a CT update is locally divergence-free for ANY EMF that is
+    // single-valued within the block -- including one that disagrees with the
+    // neighbour across a level jump. So `divb` is structurally blind to a
+    // coarse-fine EMF mismatch and passes whether or not the correction is right.
+    //
+    // What is NOT blind is the magnetic flux through the SHARED face, measured
+    // from each side. Both CT updates write dB*h = -dt*dE per cell (SD:
+    // update_B_solution, FV/cascade: fv_update_B_solution), so over any
+    // contiguous run of cells the change in flux telescopes to the EMF at the
+    // two ends:
+    //     d(flux over the coarse half-face) = -dt*[E_coarse] at the two corners
+    //     d(flux over the fine face)        = -dt*[E_fine]   at the same corners
+    // The two sides can only stay in step if the EMF is single-valued at those
+    // two corners -- exactly what a coarse-fine EMF correction exists to achieve,
+    // and what the cascade's FV-lattice EMF had nothing enforcing before step 5.
+    //
+    // The mismatch VALUE is not the signal: coarse and fine carry different
+    // polynomial representations of the same field, so it is nonzero at t=0 and
+    // means nothing. The DRIFT is the signal: max over interfaces of |m(t)-m(0)|.
+    //
+    // Every index into either block is located from the physical coordinates in
+    // dimension::fv_faces, never from the index arithmetic of the correction
+    // under test. A correction that writes the right value in the wrong place,
+    // measured with its own arithmetic, reports agreement -- which is how two
+    // earlier attempts at this check passed for the wrong reason.
+    //
+    // 2D only, matching the correction; reads both blocks of a pair directly,
+    // as correct_coarse_fine_fv_emf itself does.
+    struct CFLabel {
+        int dim, side, ib, jb, lvl_c, lvl_f;
+        bool operator!=(const CFLabel& o) const {
+            return dim!=o.dim || side!=o.side || ib!=o.ib || jb!=o.jb
+                || lvl_c!=o.lvl_c || lvl_f!=o.lvl_f;
+        }
+    };
+    std::vector<double> cf_flux_ref_, sl_flux_ref_;
+    //The t=0 reference is keyed on WHICH faces it was taken over, not just how
+    //many. A regrid can hand back the same interface count over a different set
+    //of faces, and comparing against a reference that silently refers to other
+    //faces is a drift number that means nothing.
+    std::vector<CFLabel> cf_ref_key_, sl_ref_key_;
+    std::vector<CFLabel> cf_label_;
+    std::vector<double> cf_scale_;
+    int cf_flux_bad_ = 0;
+
+    //Interior extent of a block along `dim`, from the FV face coordinates.
+    void cf_block_extent(int ib, int dim, double& lo, double& hi){
+        dimension& D = (dim==_x_) ? Xd[ib] : (dim==_y_ ? Yd[ib] : Zd[ib]);
+        Vector_h f = setup_mirror(D.fv_faces); setup_pull(D.fv_faces, f);
+        GHOST_LOCALS;
+        const int g = (dim==_x_) ? sghx : (dim==_y_ ? sghy : sghz);
+        lo = f(g);
+        hi = f(g + D.N*D.n_sp);
+    }
+
+    //Integral of the face-normal B over block ib's own boundary face in
+    //direction `dim` (its high end if `high`), restricted to the transverse FV
+    //cells whose centre lies in (t0,t1). `width` returns the transverse extent
+    //actually integrated, so the caller can check the geometry it asked for is
+    //the geometry it got.
+    //
+    //The face field is stored at solution points transversally; sp_to_cv turns
+    //those into the FV sub-cell averages that the CT update itself advances, so
+    //sum(cv * cell width) is the exact face integral of the same polynomial in
+    //both the SD and the cascade path.
+    double cf_face_flux(int ib, int dim, bool high, double t0, double t1,
+                        double& width){
+        width = 0.0;
+        if constexpr (!is_mhd) { (void)ib;(void)dim;(void)high;(void)t0;(void)t1; return 0.0; }
+        else {
+        GHOST_LOCALS;
+        SD_Solution B = (dim==_x_) ? blocks[ib].Bx_fp_x : blocks[ib].By_fp_y;
+        const int tdim = (dim==_x_) ? _y_ : _x_;
+        dimension& Dt = (tdim==_x_) ? Xd[ib] : Yd[ib];
+        const bool xnorm = (dim==_x_);
+        //p+2 points along the staggered (normal) direction, p+1 transversally,
+        //and p+1 is also the number of FV cells per element.
+        const int qn   = xnorm ? B.nx : B.ny;
+        const int qt   = xnorm ? B.ny : B.nx;
+        const int Ne_n = (xnorm ? B.Nx : B.Ny) - 2*(xnorm ? NGHx : NGHy);
+        const int gn   = xnorm ? ghx  : ghy;
+        const int gt   = xnorm ? ghy  : ghx;
+        const int sgt  = xnorm ? sghy : sghx;
+        const int e_n  = high ? gn+Ne_n-1 : gn;   //element carrying the face
+        const int p_n  = high ? qn-1      : 0;    //flux point on it
+        const int kz   = ghz;
+        //Transverse FV cells of this block, selected by coordinate.
+        const int J0 = sgt, J1 = sgt + Dt.N*Dt.n_sp;
+        Vector_h ft = setup_mirror(Dt.fv_faces); setup_pull(Dt.fv_faces, ft);
+        int Jlo = J1, Jhi = J0;
+        for(int Jc=J0; Jc<J1; Jc++){
+            const double c = 0.5*(ft(Jc)+ft(Jc+1));
+            if(c>t0 && c<t1){ if(Jc<Jlo) Jlo=Jc; if(Jc+1>Jhi) Jhi=Jc+1; }
+        }
+        if(Jhi<=Jlo) return 0.0;
+        width = ft(Jhi)-ft(Jlo);
+        const int JloL = Jlo, qtL = qt, gtL = gt, sgtL = sgt;
+        Vector fv = Dt.fv_faces;
+        Matrix S  = blocks[ib].sp_to_cv;
+        double sum = 0.0;
+        Kokkos::parallel_reduce("cf_face_flux", flat_range(0,flat_total(Jhi-Jlo)),
+            KOKKOS_LAMBDA(const unsigned idx, double& acc){
+                const int Jc  = JloL + (int)idx;
+                const int e_t = gtL + (Jc-sgtL)/qtL;
+                const int c   = (Jc-sgtL)%qtL;
+                double cv = 0.0;
+                for(int m=0; m<qtL; m++){
+                    const double b = xnorm ? B.Vector(0,0,kz,e_t,e_n,0,m,p_n)
+                                           : B.Vector(0,0,kz,e_n,e_t,0,p_n,m);
+                    cv += S(c,m)*b;
+                }
+                acc += cv*(fv(Jc+1)-fv(Jc));
+            }, sum);
+        return sum;
+        }
+    }
+
+    //Per-interface flux mismatch (coarse partial flux minus fine flux), one
+    //entry per (dim, side, coarse block, fine sub-neighbour). cf_flux_bad_
+    //counts pairs whose geometry did not check out; those are excluded, and a
+    //nonzero count means the diagnostic is not measuring what it claims.
+    //`same_level`: run the identical measurement over SAME-level block
+    //interfaces instead of coarse-fine ones. That is the control that decides
+    //whether a nonzero drift is physics or instrument. Sync_face_B_mhd is NOT
+    //called on a mixed-level mesh, so a same-level face is held together only
+    //by its single-valued Riemann EMF -- exactly the condition the coarse-fine
+    //correction is supposed to reproduce across a level jump. If the same-level
+    //drift is at round-off while the coarse-fine drift is not, the quadrature
+    //and the telescoping premise are sound and the level jump is the defect.
+    std::vector<double> cf_flux_mismatch(bool same_level=false){
+        std::vector<double> m;
+        cf_flux_bad_ = 0;
+        cf_label_.clear();
+        cf_scale_.clear();
+        if constexpr (!is_mhd) return m;
+        else {
+        if(forest.max_level()==0 || cfg.active[_z_]) return m;
+        for(int dim=0; dim<3; dim++){
+            if(!cfg.active[dim] || (dim!=_x_ && dim!=_y_)) continue;
+            const int tdim = (dim==_x_) ? _y_ : _x_;
+            const double L = forest.domain_lim[dim][1]-forest.domain_lim[dim][0];
+            for(int side=0; side<2; side++){
+                const FaceGroups& g = forest.face_groups[dim][side];
+                const size_t nq = same_level ? g.same_ib.size() : g.fi_ib.size();
+                for(size_t q=0; q<nq; q++){
+                    const int ib = same_level ? g.same_ib[q] : g.fi_ib[q];
+                    //Which end of the coarse block this group's face is on --
+                    //taken from the group convention, then VERIFIED below
+                    //against the coordinate the two faces must share.
+                    const bool c_high = (side==1);
+                    double clo, chi; cf_block_extent(ib, dim, clo, chi);
+                    const double cn = c_high ? chi : clo;
+                    const size_t ns = same_level ? 1 : g.fi_jb[q].size();
+                    for(size_t s=0; s<ns; s++){
+                        const int jb = same_level ? g.same_jb[q] : g.fi_jb[q][s];
+                        double flo, fhi; cf_block_extent(jb, dim, flo, fhi);
+                        const double fn = c_high ? flo : fhi;
+                        const double d = fabs(cn-fn);
+                        //Same face, or the same face across a periodic wrap.
+                        if(d > 1e-10*L && fabs(d-L) > 1e-10*L){ cf_flux_bad_++; continue; }
+                        double t0, t1; cf_block_extent(jb, tdim, t0, t1);
+                        double wc, wf;
+                        const double fc = cf_face_flux(ib, dim,  c_high, t0, t1, wc);
+                        const double ff = cf_face_flux(jb, dim, !c_high,
+                                                       -1e300, 1e300, wf);
+                        //The coarse cells selected must cover exactly the fine
+                        //block's transverse span, and the fine face must be
+                        //that same span. Either failing means the halves are
+                        //not the halves this is claiming to compare.
+                        const double w = t1-t0;
+                        if(fabs(wc-w) > 1e-10*w || fabs(wf-w) > 1e-10*w){
+                            cf_flux_bad_++; continue;
+                        }
+                        m.push_back(fc-ff);
+                        cf_label_.push_back({dim, side, ib, jb,
+                                             forest.blocks[ib].level,
+                                             forest.blocks[jb].level});
+                        cf_scale_.push_back(std::max(fabs(fc), fabs(ff)));
+                    }
+                }
+            }
+        }
+        return m;
+        }
+    }
+
+    //max |m(t) - m(0)| over coarse-fine interfaces. Negative when there is
+    //nothing to measure (uniform mesh, 3D, hydro) or when the interface set
+    //changed under us -- a regrid invalidates the t=0 reference, so the drift
+    //is only meaningful on a static mesh.
+    double mhd_cf_flux_drift(int& n_iface, bool same_level=false){
+        n_iface = 0;
+        //Two small reductions plus a few coordinate mirrors per interface, once
+        //per output. That is negligible next to writing the output itself on
+        //the meshes the suite runs, but a production AMR mesh can carry
+        //thousands of interfaces, so leave a way to switch it off without a
+        //rebuild rather than capping the interface count silently.
+        static const bool off = getenv("SPD_NO_CF_FLUX")!=nullptr;
+        if(off) return -1.0;
+        std::vector<double> m = cf_flux_mismatch(same_level);
+        std::vector<double>& ref = same_level ? sl_flux_ref_ : cf_flux_ref_;
+        std::vector<CFLabel>& key = same_level ? sl_ref_key_ : cf_ref_key_;
+        n_iface = (int)m.size();
+        if(m.empty()) return -1.0;
+        bool same_faces = (key.size() == m.size());
+        for(size_t i=0; same_faces && i<key.size(); i++)
+            if(key[i] != cf_label_[i]) same_faces = false;
+        if(!same_faces){ ref = m; key = cf_label_; return -1.0; }
+        double worst = 0.0;
+        static const bool verb = getenv("SPD_CF_VERBOSE")!=nullptr;
+        for(size_t i=0; i<m.size(); i++){
+            const double d = fabs(m[i]-ref[i]);
+            worst = std::max(worst, d);
+            if(verb && Master){
+                const CFLabel& L = cf_label_[i];
+                std::cout<<"    "<<(same_level?"sl":"cf")<<"["<<i<<"]"
+                         <<" dim="<<L.dim<<" side="<<L.side
+                         <<" b="<<L.ib<<"("<<L.lvl_c<<")"
+                         <<"/"<<L.jb<<"("<<L.lvl_f<<")"
+                         <<std::scientific<<std::setprecision(3)
+                         <<"  |F|="<<cf_scale_[i]<<"  drift="<<d
+                         <<"  rel="<<(cf_scale_[i]>0 ? d/cf_scale_[i] : 0.0)
+                         <<std::defaultfloat<<std::endl;
+            }
+        }
+        return worst;
+    }
+
     double total_mass(){
         double M=0;
         for(int b=0;b<nblocks;b++){
@@ -1674,6 +1906,23 @@ struct Mesh : public PhysicsModule {
             if(Master)
                 std::cout<<std::endl<<"OUTPUT "<<this->n_output
                          <<"  max|divB| = "<<divB<<std::endl;
+            //Coarse-fine flux telescoping, which divB above cannot see.
+            int n_iface = 0, n_same = 0;
+            const double cfd = mhd_cf_flux_drift(n_iface, false);
+            const int cf_bad = cf_flux_bad_;
+            const double sld = mhd_cf_flux_drift(n_same, true);
+            if(Master && n_iface>0){
+                std::cout<<"  CF flux drift = "<<cfd<<"  over "<<n_iface
+                         <<" interfaces, "<<cf_bad<<" bad"
+                         <<"  | same-level control = "<<sld
+                         <<" over "<<n_same;
+                //A negative drift is not a measurement: either this is the
+                //first output (the t=0 reference is only now being taken) or a
+                //regrid changed the interface set and the old reference no
+                //longer refers to the same faces.
+                if(cfd<0 || sld<0) std::cout<<"   [n/a: reference (re)set]";
+                std::cout<<std::endl;
+            }
         } else if(Master){
             std::cout<<std::endl<<"OUTPUT "<<this->n_output<<std::endl;
         }

@@ -35,6 +35,14 @@ plus command-line overrides. Checks per configuration:
   mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
   mhd_*_smr_2d   : true-2D MHD static refinement (mixed levels + divB)
   mhd_*_amr_2d   : true-2D MHD dynamic AMR (face-B transfer + mixed levels)
+  mhd_*_smr_fb_* : mixed-level MHD with the MOOD cascade live, gated on
+                   coarse-fine magnetic-flux telescoping (cf_flux) -- the thing
+                   divb cannot see, since divb is per-block and any within-block
+                   single-valued EMF passes it
+  mhd_orszag_tang_smr_noemf_2d : the same with the coarse-fine edge-EMF
+                   correction switched off. It must FAIL to telescope
+                   (cf_flux_sensitive), which is what keeps the cf_flux gate
+                   above from silently becoming vacuous
 
 Every configuration is additionally gated on all dumps being finite, before
 any tolerance is applied.
@@ -538,7 +546,7 @@ CONFIGS = {
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
         "ndim": 2,
-        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.02,
     },
@@ -553,7 +561,7 @@ CONFIGS = {
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
         "ndim": 2,
-        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
     },
@@ -572,7 +580,34 @@ CONFIGS = {
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
         "ndim": 2,
-        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
+    "mhd_orszag_tang_smr_noemf_2d": {
+        # THE NEGATIVE CONTROL for the cf_flux gate, and the reason to trust it.
+        # Identical to mhd_orszag_tang_smr_fb_lvl1_2d with the coarse-fine
+        # edge-EMF correction switched off, which is what the cascade did before
+        # step 5. It must FAIL to telescope: cf_flux_sensitive requires the drift
+        # to be large, so a change that quietly makes the paired gate measure
+        # nothing turns this red instead of leaving both green.
+        #
+        # Measured 2026-08-19: correction on 1.4e-17, off 2.2e-04. Note divb is
+        # 1.58e-12 either way -- it cannot see this, which is why the earlier
+        # attempts to gate step 5 with divb passed for the wrong reason.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mhd/mood_force_level=1",
+                      "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "env": {"SPD_NO_FV_EMF": "1"},
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux_sensitive"],
+        "cf_floor": 1e-6,
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
     },
@@ -792,6 +827,62 @@ def check_divb(stdout, limit=1e-11):
     return ok, f"max|divB| over run = {worst:.3e} (limit {limit:.1e})"
 
 
+def check_cf_flux(stdout, limit):
+    """Coarse-fine magnetic-flux telescoping drift, which the divb check cannot
+    see: mhd_max_divB is computed per block, and a CT update is locally
+    divergence-free for ANY within-block single-valued EMF, including one that
+    disagrees with the neighbour across a level jump. The mesh prints, at every
+    output, the drift of the flux mismatch between the two sides of every
+    coarse-fine face -- exactly zero for a telescoping scheme -- plus the same
+    measurement over SAME-level faces as a control on the instrument itself.
+
+    The same-level number is reported, not gated: it is a known, separate
+    incompleteness (the patch-corner edge value is not shared with the coarse
+    block diagonal to the patch), and pinning it here would make this check
+    fail for a reason that has nothing to do with the level jump.
+    """
+    vals = [float(v) for v in re.findall(
+        r"CF flux drift = ([-\d.e+]+(?:inf)?)", stdout)]
+    same = [float(v) for v in re.findall(
+        r"same-level control = ([-\d.e+]+(?:inf)?)", stdout)]
+    bad = [int(v) for v in re.findall(r"interfaces, (\d+) bad", stdout)]
+    if not vals:
+        return False, "no CF flux diagnostics in run output"
+    if bad and max(bad) > 0:
+        return False, (f"{max(bad)} coarse-fine pair(s) failed the geometry "
+                       "check: the diagnostic is not measuring the faces it "
+                       "claims to")
+    # -1 marks "no reference yet" (first output) or an interface set that
+    # changed under a regrid; both are not measurements.
+    worst = max([v for v in vals if v >= 0], default=-1.0)
+    if worst < 0:
+        return False, "no CF flux measurement with a t=0 reference"
+    worst_same = max([v for v in same if v >= 0], default=-1.0)
+    ok = np.isfinite(worst) and worst < limit
+    return ok, (f"CF flux drift = {worst:.3e} (limit {limit:.1e}); "
+                f"same-level control = {worst_same:.3e}")
+
+
+def check_cf_flux_sensitive(stdout, floor):
+    """The negative control, kept in the suite on purpose.
+
+    A gate that cannot fail is worth nothing, and this one has a specific way of
+    going quiet: if the coarse-fine EMF correction ever stops being what holds
+    the telescoping together, check_cf_flux above would keep passing while
+    measuring nothing. This config disables the correction (SPD_NO_FV_EMF=1) and
+    requires the drift to be LARGE. It failing means the paired gate has become
+    vacuous, not that the code regressed.
+    """
+    vals = [float(v) for v in re.findall(
+        r"CF flux drift = ([-\d.e+]+(?:inf)?)", stdout)]
+    worst = max([v for v in vals if v >= 0], default=-1.0)
+    if worst < 0:
+        return False, "no CF flux measurement with a t=0 reference"
+    ok = worst > floor
+    return ok, (f"correction OFF -> CF flux drift = {worst:.3e} "
+                f"(must exceed {floor:.1e}, else the paired gate is vacuous)")
+
+
 def check_mixed_levels(outdir, cfg):
     """The mesh must really carry a coarse-fine interface at some point in the
     run. Without this a refinement region that happens to cover the whole
@@ -895,6 +986,11 @@ def main():
                 ok, msg = check_mixed_levels(outdir, cfg)
             elif chk == "divb":
                 ok, msg = check_divb(stdout)
+            elif chk == "cf_flux":
+                ok, msg = check_cf_flux(stdout, cfg.get("cf_limit", 1e-14))
+            elif chk == "cf_flux_sensitive":
+                ok, msg = check_cf_flux_sensitive(stdout,
+                                                  cfg.get("cf_floor", 1e-6))
             elif chk == "golden":
                 if args.skip_golden and not args.regen_goldens:
                     print(f"[SKIP] {name}: golden (skipped)")
