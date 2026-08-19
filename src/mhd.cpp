@@ -1031,6 +1031,13 @@ static void project_face_to_row(SD_Solution U, int brow, SD_Solution B, Matrix f
     setup_pull(fp_to_sp, Fh);
     SD_Vector_h Uh = Kokkos::create_mirror_view(U.Vector);
     SD_Vector_h Bh = Kokkos::create_mirror_view(B.Vector);
+    //Pull U before touching it. This kernel writes ONE row (brow) but the
+    //deep_copy below pushes the WHOLE mirror back, so without this every other
+    //variable is overwritten with whatever the fresh mirror held. The #else
+    //path writes U in place and is unaffected, which is why the suite has
+    //always been green on CPU while MHD produced a zero/NaN state from t=0 on
+    //CUDA: W_sp lost rho/v/p here, then cons_to_prim_cv divided by rho = 0.
+    Kokkos::deep_copy(Uh, U.Vector);
     Kokkos::deep_copy(Bh, B.Vector);
     sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
         int nid[3];
