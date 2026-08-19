@@ -524,6 +524,72 @@ CONFIGS = {
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
     },
+    "mhd_field_loop_smr_fb_2d": {
+        # Same static patch as mhd_field_loop_smr_2d but with the MOOD cascade
+        # LIVE. Nothing covered mixed-level MHD + fallback before: every smr/amr
+        # MHD config ran job/fallback=false, which is why the coarse-fine FV flux
+        # and edge-EMF corrections (steps 4-5) had no test at all.
+        "input": "inputs/field_loop.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.02", "output/dt=0.01",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    "mhd_orszag_tang_smr_fb_2d": {
+        # OT on a static patch with the cascade live and detection running.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
+    "mhd_orszag_tang_smr_fb_lvl1_2d": {
+        # Same, pinned at MOOD level 1 (pure MUSCL on the sub-cell mesh, no
+        # detection). This is the lane that isolates the coarse-fine corrections
+        # from the detector: any difference here is a communication or
+        # restriction bug, not a detection one.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mhd/mood_force_level=1",
+                      "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
+    "mhd_orszag_tang_amr_fb_2d": {
+        # Dynamic AMR with the cascade live: regrid + face-B transfer + the
+        # coarse-fine corrections all in one lane.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=2",
+                      "amr/criterion=bfield", "amr/refine_frac=1.0"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
     "mhd_orszag_tang_amr_2d": {
         # Dynamic AMR on OT. At 4x4 base blocks the B^2 Löhner scores agree to
         # 0.2% across the mesh (OT is symmetric at t=0), so no threshold can
