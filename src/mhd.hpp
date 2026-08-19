@@ -79,6 +79,11 @@ extern void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar
                                     double* gscale, double dt,
                                     double dx, double dy, double dz,
                                     bool apply_cfl=true);
+extern void mhd_nad_partial_gscales(FV_Solution det_old, FV_Solution W, int nvar,
+                                    double* gmin, double* gmax, double& vmax);
+extern void mhd_nad_finalize_gscales(const double* gmin, const double* gmax, double vmax,
+                                     int nvar, double* gscale, double dt, double dxmin,
+                                     bool apply_cfl=true);
 extern void mhd_NAD(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles,
                     double tol, int nvar, const double* gscale);
 extern void mhd_PAD(FV_Solution U, FV_Solution troubles);
@@ -766,8 +771,13 @@ struct MHD_ader : public PhysicsModule {
         //per stage from the haloed OLD state. Members because HEAD splits this
         //across mood_after_U_halo() and mood_revision().
         n_det = mhd_detection_vars(U_old_fv,det_old);
-        mhd_nad_compute_gscales(det_old,W_fv,n_det,nad_gscale,dt,
-                                Xdim_.h,Ydim_.h,Zdim_.h);
+        //Standalone: one block IS the domain, so reduce it here. Under a mesh the
+        //scales must span every block (Mesh::mhd_reduce_nad_gscales), or grange/
+        //gcfl give each block its own NAD band and multiblock stops agreeing with
+        //single-block -- measured on OT before this split.
+        if(standalone_)
+            mhd_nad_compute_gscales(det_old,W_fv,n_det,nad_gscale,dt,
+                                    Xdim_.h,Ydim_.h,Zdim_.h);
         for(int dim=0; dim<3; dim++){
             if(cfg.active[dim]){
                 FV_Solution &F1=(dim==_x_?F1_x:(dim==_y_?F1_y:F1_z));
@@ -819,6 +829,15 @@ struct MHD_ader : public PhysicsModule {
         //deep_copy covers the ghosts too, so a forced level needs no halo.
         Kokkos::deep_copy(cascade.Vector,
                           cfg.mood_force_level>=0 ? (double)cfg.mood_force_level : 0.0);
+    }
+
+    //Mesh-driven NAD scales: accumulate this block's partial into the caller's
+    //running min/max, then take back the single combined result.
+    void mood_partial_gscales(double* gmin, double* gmax, double& vmax){
+        mhd_nad_partial_gscales(det_old,W_fv,n_det,gmin,gmax,vmax);
+    }
+    void mood_set_gscales(const double* gs){
+        for(int v=0; v<8; v++) nad_gscale[v]=gs[v];
     }
 
     //One cascade revision; returns demoted count (caller may MPI-reduce).

@@ -1262,11 +1262,44 @@ struct Mesh : public PhysicsModule {
             Exchange_sd_field(&Block::Bz_fp_z, _z_, true);
     }
 
+    //Global NAD scales for mood_nad_scale=grange|gcfl. The reduction is over the
+    //WHOLE mesh: reduced per block it gives every block its own band, so the same
+    //flow is judged differently either side of a block face (measured on OT: the
+    //2x2 multiblock diverged from single-block under gcfl and agreed exactly under
+    //the local `relative` band). dxmin is the global minimum too -- under AMR the
+    //gcfl softening dt*vmax/dxmin would otherwise differ level by level.
+    void mhd_reduce_nad_gscales(){
+        if constexpr (!is_mhd) return;
+        if(cfg.mood_nad_scale!=_nad_scale_grange_ && cfg.mood_nad_scale!=_nad_scale_gcfl_)
+            return;
+        double gmin[8], gmax[8], gs[8], vmax=0.0;
+        for(int v=0;v<8;v++){ gmin[v]=1e300; gmax[v]=-1e300; gs[v]=0.0; }
+        for(int b=0;b<nblocks;b++) blocks[b].mood_partial_gscales(gmin,gmax,vmax);
+        double dxmin=1e300;
+        for(int b=0;b<nblocks;b++){
+            if(cfg.active[_x_]) dxmin=std::min(dxmin,Xd[b].h);
+            if(cfg.active[_y_]) dxmin=std::min(dxmin,Yd[b].h);
+            if(cfg.active[_z_]) dxmin=std::min(dxmin,Zd[b].h);
+        }
+        #ifdef MPI
+        double t[8];
+        MPI_Allreduce(gmin,t,8,MPI_DOUBLE,MPI_MIN,Comm); for(int v=0;v<8;v++) gmin[v]=t[v];
+        MPI_Allreduce(gmax,t,8,MPI_DOUBLE,MPI_MAX,Comm); for(int v=0;v<8;v++) gmax[v]=t[v];
+        double r;
+        MPI_Allreduce(&vmax,&r,1,MPI_DOUBLE,MPI_MAX,Comm); vmax=r;
+        MPI_Allreduce(&dxmin,&r,1,MPI_DOUBLE,MPI_MIN,Comm); dxmin=r;
+        #endif
+        int nd = nblocks>0 ? blocks[0].n_det : 0;
+        mhd_nad_finalize_gscales(gmin,gmax,vmax,nd,gs,this->dt,dxmin);
+        for(int b=0;b<nblocks;b++) blocks[b].mood_set_gscales(gs);
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
         for(int b=0;b<nblocks;b++) blocks[b].mood_begin();
         Exchange_fv_field(&Block::U_old_fv);
         for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo();
+        mhd_reduce_nad_gscales();
         for(int rev=0; rev<cfg.max_revs; rev++){
             int demoted = 0;
             for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_revision();

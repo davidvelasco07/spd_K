@@ -1134,13 +1134,16 @@ int mhd_detection_vars(FV_Solution U, FV_Solution det){
 // With gcfl the ranges are further multiplied by min(1, dt·vmax/dxmin), vmax being
 // the domain max of max(|vx|,|vy|,|vz|) from the stage-input primitives W.
 // gscale must hold at least nvar entries; relative/delta modes leave it unused.
-void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar,
-                             double* gscale, double dt,
-                             double dx, double dy, double dz,
-                             bool apply_cfl){
+// Per-BLOCK partial reduction for the global NAD scales: min/max of each
+// detection variable over the block's active cells, plus max|v| for the gcfl
+// softening. No MPI and no CFL factor here -- the caller combines across every
+// block it owns first (Mesh::mhd_reduce_nad_gscales), because a domain range
+// reduced per block is not the same number as one reduced over the domain, and
+// under AMR it is not even the same physical region. See mhd_nad_finalize_gscales.
+void mhd_nad_partial_gscales(FV_Solution det_old, FV_Solution W, int nvar,
+                             double* gmin, double* gmax, double& vmax){
     int Nx=det_old.Nx, Ny=det_old.Ny, Nz=det_old.Nz;
     int scale=cfg.mood_nad_scale;
-    for(int var=0;var<nvar;var++) gscale[var]=0.0;
     if(scale!=_nad_scale_grange_ && scale!=_nad_scale_gcfl_) return;
 
     // Active-cell frame (NGH ghosts), matching AthenaK's active-only reduce.
@@ -1160,17 +1163,12 @@ void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar,
                 rmin = rmin<u ? rmin : u;
                 rmax = rmax>u ? rmax : u;
             }, Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
-        #ifdef MPI
-        double mn_g=mn, mx_g=mx;
-        MPI_Allreduce(&mn,&mn_g,1,MPI_DOUBLE,MPI_MIN,Comm);
-        MPI_Allreduce(&mx,&mx_g,1,MPI_DOUBLE,MPI_MAX,Comm);
-        mn=mn_g; mx=mx_g;
-        #endif
-        gscale[var] = mx>mn ? mx-mn : 0.0;
+        if(mn<gmin[var]) gmin[var]=mn;
+        if(mx>gmax[var]) gmax[var]=mx;
     }
 
-    if(scale==_nad_scale_gcfl_ && apply_cfl){
-        double vmax=0.0;
+    if(scale==_nad_scale_gcfl_){
+        double vm=0.0;
         auto WV=W.Vector;
         Kokkos::parallel_reduce("mhd_nad_vmax", flat_range(0,flat_total(total)),
             KOKKOS_LAMBDA(const unsigned idx, double& rmax){
@@ -1182,20 +1180,50 @@ void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar,
                 double v = vx>vy ? vx : vy;
                 v = v>vz ? v : vz;
                 rmax = rmax>v ? rmax : v;
-            }, Kokkos::Max<double>(vmax));
-        #ifdef MPI
-        double vmax_g=vmax;
-        MPI_Allreduce(&vmax,&vmax_g,1,MPI_DOUBLE,MPI_MAX,Comm);
-        vmax=vmax_g;
-        #endif
-        double dxmin=1e300;
-        if(cfg.active[_x_]) dxmin=dxmin<dx ? dxmin : dx;
-        if(cfg.active[_y_]) dxmin=dxmin<dy ? dxmin : dy;
-        if(cfg.active[_z_]) dxmin=dxmin<dz ? dxmin : dz;
+            }, Kokkos::Max<double>(vm));
+        if(vm>vmax) vmax=vm;
+    }
+}
+
+// Turn combined (already cross-block, already cross-rank) partials into the NAD
+// band scales. dxmin must be the GLOBAL minimum cell size: under AMR the gcfl
+// softening dt*vmax/dxmin would otherwise differ level by level, so a fine block
+// and a coarse block covering the same flow would get different bands.
+void mhd_nad_finalize_gscales(const double* gmin, const double* gmax, double vmax,
+                              int nvar, double* gscale, double dt, double dxmin,
+                              bool apply_cfl){
+    int scale=cfg.mood_nad_scale;
+    for(int var=0;var<nvar;var++) gscale[var]=0.0;
+    if(scale!=_nad_scale_grange_ && scale!=_nad_scale_gcfl_) return;
+    for(int var=0;var<nvar;var++)
+        gscale[var] = gmax[var]>gmin[var] ? gmax[var]-gmin[var] : 0.0;
+    if(scale==_nad_scale_gcfl_ && apply_cfl){
         double cfl_adv = (dxmin>0.0 && isfinite(dxmin)) ? dt*vmax/dxmin : 0.0;
         double fac = cfl_adv<1.0 ? cfl_adv : 1.0;
         for(int var=0;var<nvar;var++) gscale[var]*=fac;
     }
+}
+
+// Single-block convenience wrapper: partial + rank reduce + finalize. Used by the
+// standalone (non-mesh) MOOD path, where one block IS the domain.
+void mhd_nad_compute_gscales(FV_Solution det_old, FV_Solution W, int nvar,
+                             double* gscale, double dt,
+                             double dx, double dy, double dz,
+                             bool apply_cfl){
+    double gmin[8], gmax[8], vmax=0.0;
+    for(int v=0;v<8;v++){ gmin[v]=1e300; gmax[v]=-1e300; }
+    mhd_nad_partial_gscales(det_old,W,nvar,gmin,gmax,vmax);
+    #ifdef MPI
+    double b[8];
+    MPI_Allreduce(gmin,b,8,MPI_DOUBLE,MPI_MIN,Comm); for(int v=0;v<8;v++) gmin[v]=b[v];
+    MPI_Allreduce(gmax,b,8,MPI_DOUBLE,MPI_MAX,Comm); for(int v=0;v<8;v++) gmax[v]=b[v];
+    double vg; MPI_Allreduce(&vmax,&vg,1,MPI_DOUBLE,MPI_MAX,Comm); vmax=vg;
+    #endif
+    double dxmin=1e300;
+    if(cfg.active[_x_]) dxmin=dxmin<dx ? dxmin : dx;
+    if(cfg.active[_y_]) dxmin=dxmin<dy ? dxmin : dy;
+    if(cfg.active[_z_]) dxmin=dxmin<dz ? dxmin : dz;
+    mhd_nad_finalize_gscales(gmin,gmax,vmax,nvar,gscale,dt,dxmin,apply_cfl);
 }
 
 // Discrete-maximum-principle NAD on the detection variables. A cell is flagged
