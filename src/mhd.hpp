@@ -840,14 +840,17 @@ struct MHD_ader : public PhysicsModule {
         for(int v=0; v<8; v++) nad_gscale[v]=gs[v];
     }
 
-    //One cascade revision; returns demoted count (caller may MPI-reduce).
+    //Candidate + detection from an ALREADY-ASSEMBLED flux/edge-E set. Split out
+    //of mood_revision so a mesh can make the assembled flux single-valued at
+    //block interfaces (Mesh::enforce_fv_flux_consistency) BEFORE the candidate
+    //is built: the DMP test runs on that candidate, so a still-double-valued
+    //flux biases the very decision driving the cascade.
     //Under mhd/mood_force_level every cell is pinned at that level, so there is
     //nothing to detect and nothing to demote: return 0 and let the caller fall
-    //straight through to mood_commit (diagnostic lane -- pure MUSCL or pure
+    //straight through to the commit (diagnostic lane -- pure MUSCL or pure
     //first-order CT on the subcell mesh).
-    int mood_revision(){
+    int mood_detect(){
         if(cfg.mood_force_level>=0) return 0;
-        mood_assemble();
         mood_fluid_update(false);
         mood_ct_update();
         mhd_set_candidate_B(U_new_fv,B_new_cv);
@@ -857,9 +860,18 @@ struct MHD_ader : public PhysicsModule {
         return update_cascade(troubles,cascade,2);
     }
 
-    void mood_commit(){
-        bool az=cfg.active[_z_];
+    //One cascade revision; returns demoted count (caller may MPI-reduce).
+    //Standalone form: one block IS the domain, so nothing to reconcile.
+    int mood_revision(){
+        if(cfg.mood_force_level>=0) return 0;
         mood_assemble();
+        return mood_detect();
+    }
+
+    //Commit from an already-assembled (and, under a mesh, already corrected)
+    //flux/edge-E set.
+    void mood_commit_assembled(){
+        bool az=cfg.active[_z_];
         mood_fluid_update(true);
         mood_ct_update();
         if(cfg.floor_cons) mhd_floor_cv(U_cv,B_new_cv);
@@ -867,6 +879,11 @@ struct MHD_ader : public PhysicsModule {
         transform_a_to_b_2d(Bxf,Bx_fp_x,TB_x,cv_to_sp,_x_);
         transform_a_to_b_2d(Byf,By_fp_y,TB_y,cv_to_sp,_y_);
         if(az) transform_a_to_b_2d(Bzf,Bz_fp_z,TB_z,cv_to_sp,_z_);
+    }
+
+    void mood_commit(){
+        mood_assemble();
+        mood_commit_assembled();
     }
 
     void Write_outputs(){

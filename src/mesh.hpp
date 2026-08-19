@@ -1301,15 +1301,25 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo();
         mhd_reduce_nad_gscales();
         for(int rev=0; rev<cfg.max_revs; rev++){
+            //Assemble, RECONCILE, then judge. The cascade tests a candidate built
+            //from the assembled flux, so the flux has to be single-valued at every
+            //block interface before the candidate exists -- otherwise cells demote
+            //on an interface mismatch instead of on the solution. This is what the
+            //hydro FV path does inside its own loop, and what the Python reference
+            //FallbackAMRScheme.mood_loop does with _enforce_flux_consistency().
+            for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
+            enforce_fv_flux_consistency();
             int demoted = 0;
-            for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_revision();
+            for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect();
             #ifdef MPI
             int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
             #endif
             if(demoted==0) break;
             Exchange_fv_field_max(&Block::cascade);
         }
-        for(int b=0;b<nblocks;b++) blocks[b].mood_commit();
+        for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
+        enforce_fv_flux_consistency();
+        for(int b=0;b<nblocks;b++) blocks[b].mood_commit_assembled();
         //Interior face-B sync is safe only on uniform meshes; mixed-level
         //uses ghost exchange instead (EMF correction owns CF telescoping).
         if(forest.max_level()==0) Sync_face_B_mhd();
