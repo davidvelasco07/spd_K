@@ -571,6 +571,160 @@ void compute_B_cv_from_cf(
     });
 }
 
+//Pack-wide form of fv_update_B_solution.
+void fv_update_B_solution_b(
+    FV_Solution B_new,
+    FV_Solution B_old,
+    SD_Solution B,
+    FV_Solution E_1,
+    FV_Solution E_2,
+    Matrix faces_1,
+    Matrix faces_2,
+    Vector w,
+    double dt,
+    int t_id,
+    int dim,
+    bool update){
+
+    int nb = B.nb;
+    int Nx = B.Nx;
+    int Ny = B.Ny;
+    int Nz = B.Nz;
+    int px = B.nx;
+    int py = B.ny;
+    int pz = B.nz;
+    int qx = px-(dim==_x_);
+    int qy = py-(dim==_y_);
+    int qz = pz-(dim==_z_);
+    int Ni = B_new.Nx;
+    int Nj = B_new.Ny;
+    int Nk = B_new.Nz;
+    int dim1 = choose(dim ,_y_,_z_,_x_);
+    int dim2 = choose(dim1,_y_,_z_,_x_);
+    bool e1 = cfg.active[dim2] && cfg.active[dim];
+    bool e2 = cfg.active[dim1] && cfg.active[dim];
+    int na  = B.n_ader;
+    int nvn = B_new.n_var, nvo = B_old.n_var;
+    int nv1 = E_1.n_var,   nv2 = E_2.n_var;
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(na);
+        double dBdt;
+        double b_new;
+        double b_old;
+        double ep;
+        double h;
+        int id;
+        dBdt = 0;
+        b_old = B.Vector(boff+0,0,k,j,i,kk,jj,ii);
+        if(K < Nk && J < Nj && I < Ni){
+            B_old.Vector(b*nvo+0,K,J,I) = b_old;
+            if(e1){
+                ep = E_1.Vector(b*nv1+0,K+(dim2==_z_),J+(dim2==_y_),I+(dim2==_x_));
+                id = choose(dim2, I, J, K);
+                h = (faces_2(b,id+1)-faces_2(b,id));
+                dBdt = (ep-E_1.Vector(b*nv1+0,K,J,I))/h;
+            }
+            if(e2){
+                ep = E_2.Vector(b*nv2+0,K+(dim1==_z_),J+(dim1==_y_),I+(dim1==_x_));
+                id = choose(dim1, I, J, K);
+                h = (faces_1(b,id+1)-faces_1(b,id));
+                dBdt-= (ep-E_2.Vector(b*nv2+0,K,J,I))/h;
+            }
+            b_new = b_old - dBdt*w(t_id)*dt;
+            B_new.Vector(b*nvn+0,K,J,I) = b_new;
+            if(update)
+                B.Vector(boff+0,0,k,j,i,kk,jj,ii) = b_new;
+        }
+    }, "fv_update_B_solution_b");
+}
+
+//Pack-wide form of compute_B_cv_from_cf: one launch over every block instead
+//of one per block. Same arithmetic; the leading axis carries the block.
+void compute_B_cv_from_cf_b(
+    FV_Solution B,
+    SD_Solution B_x,
+    SD_Solution B_y,
+    SD_Solution B_z,
+    Matrix fp_to_cv
+    ){
+    int nb = B_x.nb;
+    int Nx = B_x.Nx;
+    int Ny = B_x.Ny;
+    int Nz = B_x.Nz;
+    int px = B_x.nx-1;
+    int py = B_x.ny;
+    int pz = B_x.nz;
+    int q = px+1;
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int nvb = B.n_var;
+    bool az = cfg.active[_z_];
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        const int boff = b*nvb;
+        int ll;
+        double bx=0;
+        double by=0;
+        double bz=0;
+        for(ll=0; ll<q; ll++){
+            bx += B_x.Vector(b,0,k,j,i,kk,jj,ll)*fp_to_cv(ii,ll);
+            by += B_y.Vector(b,0,k,j,i,kk,ll,ii)*fp_to_cv(jj,ll);
+            if(az) bz += B_z.Vector(b,0,k,j,i,ll,jj,ii)*fp_to_cv(kk,ll);
+        }
+        B.Vector(boff+0,K,J,I) = bx;
+        B.Vector(boff+1,K,J,I) = by;
+        B.Vector(boff+2,K,J,I) = bz;
+        B.Vector(boff+3,K,J,I) = bx*bx + by*by + bz*bz;
+    }, "compute_B_cv_from_cf_b");
+}
+
+//Pack-wide form of edge_integral.
+void edge_integral_b(
+    SD_Solution E_ep,
+    FV_Solution E,
+    Matrix sp_to_cv,
+    int t_id,
+    int dim){
+    int nb = E_ep.nb;
+    int Nx = E_ep.Nx+(dim==_x_ ? 0:1);
+    int Ny = E_ep.Ny+(dim==_y_ ? 0:1);
+    int Nz = E_ep.Nz+(dim==_z_ ? 0:1);
+    int px = E_ep.nx-(dim==_x_ ? 0:1);
+    int py = E_ep.ny-(dim==_y_ ? 0:1);
+    int pz = E_ep.nz-(dim==_z_ ? 0:1);
+    int qx = px;
+    int qy = py;
+    int qz = pz;
+    int q  = choose(dim, px, py, pz);
+    int Ni = E.Nx;
+    int Nj = E.Ny;
+    int Nk = E.Nz;
+    int na = E_ep.n_ader;
+    int nve = E.n_var;
+    bool adim = cfg.active[dim];
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        BOFF(na);
+        double s;
+        double e=0;
+        int nid[3];
+        int id = choose(dim, ii, jj, kk);
+        for(int ll=0; ll<q; ll++){
+            indices_n(nid,kk,jj,ii,ll,dim);
+            s = E_ep.Vector(boff+t_id,0,k,j,i,NODE);
+            if(adim) s *= sp_to_cv(id,ll);
+            e += s;
+        }
+        if(K < Nk && J < Nj && I < Ni)
+            E.Vector(b*nve+0,K,J,I) = e;
+    }, "edge_integral_b");
+}
+
 KOKKOS_INLINE_FUNCTION
 double upwind(double left, double right, double vel){
     if(vel==0) return 0.5*(left+right);

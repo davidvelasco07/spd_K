@@ -2,6 +2,7 @@
 #define MESH_HPP_
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -27,8 +28,60 @@ struct Region {
 //Block-forest mesh driver: uniform multiblock and mixed-level AMR (hydro +
 //true-2D MHD). Derives from PhysicsModule and registers mesh-orchestrated
 //tasks into Driver.
+//Phase timing for the advance, enabled by SPD_PHASE_TIMES=1.
+//
+//Why this exists rather than a profiler: nsys on apollo (2022.1.3) cannot export
+//its own report ("Version number is invalid"), and no Kokkos kp_*.so is built
+//there. This needs no tooling, works identically on CPU and GPU, and answers the
+//one question that matters for the per-block dispatch cost -- which phase is
+//paying it. Each scope fences before and after, so it SERIALISES the pipeline:
+//it is a diagnostic, never something to leave enabled.
+struct PhaseTimes {
+    static bool on(){
+        static const bool b = getenv("SPD_PHASE_TIMES")!=nullptr;
+        return b;
+    }
+    std::map<std::string,double> t;
+    std::map<std::string,long>   n;
+    void add(const std::string& k, double s){ t[k]+=s; n[k]++; }
+    void report(const char* tag) const {
+        if(!on() || !Master || t.empty()) return;
+        double tot = 0.0;
+        for(const auto& kv : t) tot += kv.second;
+        std::vector<std::pair<double,std::string>> v;
+        for(const auto& kv : t) v.push_back({kv.second, kv.first});
+        std::sort(v.rbegin(), v.rend());
+        std::cout<<"\nphase times ("<<tag<<"), total "<<std::fixed
+                 <<std::setprecision(3)<<tot<<" s over fenced scopes:"<<std::endl;
+        for(const auto& e : v)
+            std::cout<<"  "<<std::setw(8)<<std::setprecision(3)<<e.first<<" s "
+                     <<std::setw(5)<<std::setprecision(1)<<(100*e.first/tot)<<"%  "
+                     <<std::setw(9)<<n.at(e.second)<<" calls  "<<e.second<<std::endl;
+        std::cout<<std::defaultfloat;
+    }
+};
+
+struct PhaseScope {
+    PhaseTimes* p;
+    const char* k;
+    bool on;
+    std::chrono::steady_clock::time_point t0;
+    PhaseScope(PhaseTimes* p_, const char* k_) : p(p_), k(k_), on(PhaseTimes::on()){
+        if(on){ Kokkos::fence(); t0 = std::chrono::steady_clock::now(); }
+    }
+    ~PhaseScope(){
+        if(!on) return;
+        Kokkos::fence();
+        p->add(k, std::chrono::duration<double>(
+                      std::chrono::steady_clock::now()-t0).count());
+    }
+};
+#define PHASE(name) PhaseScope _phase_scope_(&phase_times_, name)
+
 template<typename Block>
 struct Mesh : public PhysicsModule {
+    PhaseTimes phase_times_;
+
     BlockForest forest;
     int NBx, NBy, NBz;
     int nblocks;
@@ -201,6 +254,21 @@ struct Mesh : public PhysicsModule {
         FV_Solution F1_x, F1_y, F1_z, F2_x, F2_y, F2_z;
         FV_Solution alpha_x, alpha_y, alpha_z;
         FV_Solution F_x, F_y, F_z;
+        //MHD. The pack already HOLDS these (MHD_ader routes every array through
+        //alloc() -> init_packed, exactly as Hydro_ader does); only the whole-pack
+        //handles were missing, which is why the MHD advance was still a per-block
+        //loop while every hydro phase had been batched.
+        SD_Solution Bx_fp_x, By_fp_y, Bz_fp_z;
+        SD_Solution Bxf, Byf, Bzf, TB_x, TB_y, TB_z;
+        SD_Solution Ex_ep_yz, Ey_ep_zx, Ez_ep_xy;
+        FV_Solution B_old_cv, B_new_cv;
+        FV_Solution F0_x, F0_y, F0_z, E0x, E0y, E0z;
+        FV_Solution U_old_fv, U_new_fv;
+        FV_Solution Bx_old, Bx_new, By_old, By_new, Bz_old, Bz_new;
+        FV_Solution F1m_x, F1m_y, F1m_z, F2m_x, F2m_y, F2m_z;
+        FV_Solution E1x, E1y, E1z, E2x, E2y, E2z;
+        FV_Solution W_fv, det_old, mhd_cascade;
+        FV_Solution UCT1_x, UCT1_y, UCT1_z, UCT2_x, UCT2_y, UCT2_z;
     } pv;
 
     void build_pack_views(){
@@ -220,6 +288,60 @@ struct Mesh : public PhysicsModule {
         pv.T_fp_x      = sd_pack_view(pack,"T_fp_x");
         pv.T_fp_y      = sd_pack_view(pack,"T_fp_y");
         pv.T_fp_z      = sd_pack_view(pack,"T_fp_z");
+        if constexpr (is_mhd){
+            pv.Bx_fp_x  = sd_pack_view(pack,"Bx_fp_x");
+            pv.By_fp_y  = sd_pack_view(pack,"By_fp_y");
+            pv.Bz_fp_z  = sd_pack_view(pack,"Bz_fp_z");
+            pv.Bxf      = sd_pack_view(pack,"Bxf");
+            pv.Byf      = sd_pack_view(pack,"Byf");
+            pv.Bzf      = sd_pack_view(pack,"Bzf");
+            pv.TB_x     = sd_pack_view(pack,"TB_x");
+            pv.TB_y     = sd_pack_view(pack,"TB_y");
+            pv.TB_z     = sd_pack_view(pack,"TB_z");
+            pv.Ex_ep_yz = sd_pack_view(pack,"Ex_ep_yz");
+            pv.Ey_ep_zx = sd_pack_view(pack,"Ey_ep_zx");
+            pv.Ez_ep_xy = sd_pack_view(pack,"Ez_ep_xy");
+            pv.B_old_cv = fv_pack_view(pack,"B_old_cv");
+            pv.B_new_cv = fv_pack_view(pack,"B_new_cv");
+            pv.F0_x     = fv_pack_view(pack,"F0_x");
+            pv.F0_y     = fv_pack_view(pack,"F0_y");
+            pv.F0_z     = fv_pack_view(pack,"F0_z");
+            pv.E0x      = fv_pack_view(pack,"E0x");
+            pv.E0y      = fv_pack_view(pack,"E0y");
+            pv.E0z      = fv_pack_view(pack,"E0z");
+            pv.U_old_fv = fv_pack_view(pack,"U_old_fv");
+            pv.U_new_fv = fv_pack_view(pack,"U_new_fv");
+            pv.Bx_old   = fv_pack_view(pack,"Bx_old");
+            pv.Bx_new   = fv_pack_view(pack,"Bx_new");
+            pv.By_old   = fv_pack_view(pack,"By_old");
+            pv.By_new   = fv_pack_view(pack,"By_new");
+            pv.Bz_old   = fv_pack_view(pack,"Bz_old");
+            pv.Bz_new   = fv_pack_view(pack,"Bz_new");
+            //MHD's level-1/2 flux arrays share names with hydro's F1_*/F2_*,
+            //so they get their own handles to keep the two unambiguous.
+            pv.F1m_x    = fv_pack_view(pack,"F1_x");
+            pv.F1m_y    = fv_pack_view(pack,"F1_y");
+            pv.F1m_z    = fv_pack_view(pack,"F1_z");
+            pv.F2m_x    = fv_pack_view(pack,"F2_x");
+            pv.F2m_y    = fv_pack_view(pack,"F2_y");
+            pv.F2m_z    = fv_pack_view(pack,"F2_z");
+            pv.E1x      = fv_pack_view(pack,"E1x");
+            pv.E1y      = fv_pack_view(pack,"E1y");
+            pv.E1z      = fv_pack_view(pack,"E1z");
+            pv.E2x      = fv_pack_view(pack,"E2x");
+            pv.E2y      = fv_pack_view(pack,"E2y");
+            pv.E2z      = fv_pack_view(pack,"E2z");
+            pv.W_fv     = fv_pack_view(pack,"W_fv");
+            pv.det_old  = fv_pack_view(pack,"det_old");
+            pv.mhd_cascade = fv_pack_view(pack,"cascade");
+            pv.UCT1_x   = fv_pack_view(pack,"UCT1_x");
+            pv.UCT1_y   = fv_pack_view(pack,"UCT1_y");
+            pv.UCT1_z   = fv_pack_view(pack,"UCT1_z");
+            pv.UCT2_x   = fv_pack_view(pack,"UCT2_x");
+            pv.UCT2_y   = fv_pack_view(pack,"UCT2_y");
+            pv.UCT2_z   = fv_pack_view(pack,"UCT2_z");
+            return;
+        }
         pv.F_x         = fv_pack_view(pack,"F_x");
         pv.F_y         = fv_pack_view(pack,"F_y");
         pv.F_z         = fv_pack_view(pack,"F_z");
@@ -1311,6 +1433,153 @@ struct Mesh : public PhysicsModule {
             if(cfg.active[dim]) correct_coarse_fine_fv_emf(forest, blocks, dim);
     }
 
+    //Batched MHD phases. The per-block loops they replace were the whole cost of
+    //MHD under AMR: measured on a uniform 256^2 mesh at fixed total work, going
+    //from 4 blocks to 256 blocks cost 7.20 s -> 79.94 s per 200 steps on an A100
+    //(11.1x) while the same sweep on CPU was flat, so it is pure launch dispatch.
+    //SPD_NO_MHD_BATCH=1 restores the per-block path; the two must agree bitwise.
+    //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit. SPD_MHD_BATCH_MASK
+    //selects which are batched, which is how a mismatch against the per-block path
+    //gets bisected to one phase instead of guessed at.
+    static bool mhd_batched(int phase = 15){
+        static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
+        if(off) return false;
+        static const int mask = getenv("SPD_MHD_BATCH_MASK")
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 15;
+        return (mask & phase) != 0;
+    }
+
+    //mood_begin over the whole pack. Same order of operations as
+    //MHD_ader::mood_begin, one launch per step instead of one per block.
+    void MOOD_begin_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        auto& b0 = blocks[0];
+        transform_a_to_b(pv.U_sp, pv.U_cv, pv.T_sweep, b0.sp_to_cv);
+        //mood_reset_face_B
+        transform_a_to_b_2d_b(pv.Bx_fp_x, pv.Bxf, pv.TB_x, b0.sp_to_cv, _x_);
+        transform_a_to_b_2d_b(pv.By_fp_y, pv.Byf, pv.TB_y, b0.sp_to_cv, _y_);
+        if(az) transform_a_to_b_2d_b(pv.Bz_fp_z, pv.Bzf, pv.TB_z, b0.sp_to_cv, _z_);
+        compute_B_cv_from_cf_b(pv.B_old_cv, pv.Bxf, pv.Byf, pv.Bzf, b0.fp_to_cv);
+        //Scratch: the MHD per-block path hands face_integral its own U_ader_fp_*,
+        //NOT the hydro T_fp_* arrays -- MHD never allocates those, so passing
+        //pv.T_fp_* here handed the kernel an empty view. It went unnoticed in 2D
+        //because face_integral_b only touches the scratch when BOTH transverse
+        //directions are active; with z on it diverged from the per-block path.
+        if(cfg.active[_x_])
+            face_integral_b(pv.F_ader_fp_x, pv.F0_x, pv.U_ader_fp_x, b0.sp_to_cv, 0, _x_);
+        if(cfg.active[_y_])
+            face_integral_b(pv.F_ader_fp_y, pv.F0_y, pv.U_ader_fp_y, b0.sp_to_cv, 0, _y_);
+        if(az)
+            face_integral_b(pv.F_ader_fp_z, pv.F0_z, pv.U_ader_fp_z, b0.sp_to_cv, 0, _z_);
+        if(az){
+            edge_integral_b(pv.Ex_ep_yz, pv.E0x, b0.sp_to_cv, 0, _x_);
+            edge_integral_b(pv.Ey_ep_zx, pv.E0y, b0.sp_to_cv, 0, _y_);
+        }
+        edge_integral_b(pv.Ez_ep_xy, pv.E0z, b0.sp_to_cv, 0, _z_);
+        fv_update_solution_b(pv.U_new_fv, pv.U_old_fv, pv.U_cv,
+                             pv.F0_x, fvx_p, pv.F0_y, fvy_p, pv.F0_z, fvz_p,
+                             b0.wt, 0, dt, 0);
+        mhd_set_candidate_B_b(pv.U_old_fv, pv.B_old_cv);
+        }
+    }
+
+    //mood_ct_update + mood_commit_assembled over the whole pack, in the same
+    //order MHD_ader::mood_commit_assembled uses.
+    void MOOD_commit_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        auto& b0 = blocks[0];
+        //mood_fluid_update(true)
+        fv_update_solution_b(pv.U_new_fv, pv.U_old_fv, pv.U_cv,
+                             pv.F0_x, fvx_p, pv.F0_y, fvy_p, pv.F0_z, fvz_p,
+                             b0.wt, 0, dt, 1);
+        //mood_ct_update
+        transform_a_to_b_2d_b(pv.Bx_fp_x, pv.Bxf, pv.TB_x, b0.sp_to_cv, _x_);
+        transform_a_to_b_2d_b(pv.By_fp_y, pv.Byf, pv.TB_y, b0.sp_to_cv, _y_);
+        if(az) transform_a_to_b_2d_b(pv.Bz_fp_z, pv.Bzf, pv.TB_z, b0.sp_to_cv, _z_);
+        fv_update_B_solution_b(pv.Bx_new, pv.Bx_old, pv.Bxf, pv.E0y, pv.E0z,
+                               fvy_p, fvz_p, b0.wt, dt, 0, _x_, 1);
+        fv_update_B_solution_b(pv.By_new, pv.By_old, pv.Byf, pv.E0z, pv.E0x,
+                               fvz_p, fvx_p, b0.wt, dt, 0, _y_, 1);
+        if(az)
+            fv_update_B_solution_b(pv.Bz_new, pv.Bz_old, pv.Bzf, pv.E0x, pv.E0y,
+                                   fvx_p, fvy_p, b0.wt, dt, 0, _z_, 1);
+        compute_B_cv_from_cf_b(pv.B_new_cv, pv.Bxf, pv.Byf, pv.Bzf, b0.fp_to_cv);
+        if(cfg.floor_cons) mhd_floor_cv_b(pv.U_cv, pv.B_new_cv);
+        transform_a_to_b(pv.U_cv, pv.U_sp, pv.T_sweep, b0.cv_to_sp);
+        transform_a_to_b_2d_b(pv.Bxf, pv.Bx_fp_x, pv.TB_x, b0.cv_to_sp, _x_);
+        transform_a_to_b_2d_b(pv.Byf, pv.By_fp_y, pv.TB_y, b0.cv_to_sp, _y_);
+        if(az) transform_a_to_b_2d_b(pv.Bzf, pv.Bz_fp_z, pv.TB_z, b0.cv_to_sp, _z_);
+        }
+    }
+
+    //mood_assemble over the whole pack: the same in-place selection into the
+    //level-0 arrays, one launch per family instead of one per block.
+    void MOOD_assemble_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        assign_face_flux_b(pv.F0_x, pv.F1m_x, pv.F2m_x, pv.mhd_cascade, _x_);
+        assign_face_flux_b(pv.F0_y, pv.F1m_y, pv.F2m_y, pv.mhd_cascade, _y_);
+        if(az) assign_face_flux_b(pv.F0_z, pv.F1m_z, pv.F2m_z, pv.mhd_cascade, _z_);
+        if(az){
+            mhd_assign_edge_E_b(pv.E0x, pv.E1x, pv.E2x, pv.mhd_cascade, _x_);
+            mhd_assign_edge_E_b(pv.E0y, pv.E1y, pv.E2y, pv.mhd_cascade, _y_);
+        }
+        mhd_assign_edge_E_b(pv.E0z, pv.E1z, pv.E2z, pv.mhd_cascade, _z_);
+        }
+    }
+
+    //mood_after_U_halo over the whole pack: the primitives, the FV-face copy of
+    //the stage field, the detection variables, and both cascade levels of the face
+    //flux and the corner EMF. This was 33.8% of the fenced advance at 256 blocks,
+    //the single largest per-block dispatch cost in the MHD path.
+    //
+    //The NAD global scales stay on the mesh-wide reduction path
+    //(mhd_reduce_nad_gscales); nothing here touches them.
+    void MOOD_after_U_halo_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        mhd_compute_primitives_b(pv.U_old_fv, pv.W_fv);
+        mhd_face_B_to_fv_b(pv.Bxf, pv.Bx_old, _x_);
+        mhd_face_B_to_fv_b(pv.Byf, pv.By_old, _y_);
+        if(az) mhd_face_B_to_fv_b(pv.Bzf, pv.Bz_old, _z_);
+        const int nd = mhd_detection_vars_b(pv.U_old_fv, pv.det_old);
+        for(int b=0;b<nblocks;b++) blocks[b].n_det = nd;
+        for(int dim=0; dim<3; dim++){
+            if(cfg.active[dim]){
+                FV_Solution& F1 = (dim==_x_?pv.F1m_x:(dim==_y_?pv.F1m_y:pv.F1m_z));
+                FV_Solution& F2 = (dim==_x_?pv.F2m_x:(dim==_y_?pv.F2m_y:pv.F2m_z));
+                FV_Solution& Bn = (dim==_x_?pv.Bx_old:(dim==_y_?pv.By_old:pv.Bz_old));
+                FV_Solution& U1 = (dim==_x_?pv.UCT1_x:(dim==_y_?pv.UCT1_y:pv.UCT1_z));
+                FV_Solution& U2 = (dim==_x_?pv.UCT2_x:(dim==_y_?pv.UCT2_y:pv.UCT2_z));
+                mhd_fv_fluxes_b(pv.W_fv,F1,Bn,U1, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                fvzc_p,fvz_p, dim, true);
+                mhd_fv_fluxes_b(pv.W_fv,F2,Bn,U2, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                fvzc_p,fvz_p, dim, false);
+            }
+            const int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
+            const int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
+            if(cfg.active[d1] && cfg.active[d2]){
+                FV_Solution& E1 = (dim==_x_?pv.E1x:(dim==_y_?pv.E1y:pv.E1z));
+                FV_Solution& E2 = (dim==_x_?pv.E2x:(dim==_y_?pv.E2y:pv.E2z));
+                mhd_four_state_E_b(E1,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                   fvzc_p,fvz_p, dim, true);
+                mhd_four_state_E_b(E2,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                   fvzc_p,fvz_p, dim, false);
+            }
+        }
+        //One fill over the whole pack instead of one per block; deep_copy covers
+        //the ghosts, so a forced level needs no halo (as in MHD_ader).
+        Kokkos::deep_copy(pv.mhd_cascade.Vector,
+                          cfg.mood_force_level>=0 ? (double)cfg.mood_force_level : 0.0);
+        }
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
         //3D mixed-level MOOD needs the genuine line-average of the edge EMF along
@@ -1321,9 +1590,13 @@ struct Mesh : public PhysicsModule {
                              "(the 3D coarse-fine edge-EMF restriction is not implemented)"<<endl;
             exit(1);
         }
-        for(int b=0;b<nblocks;b++) blocks[b].mood_begin();
-        Exchange_fv_field(&Block::U_old_fv);
-        for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo();
+        { PHASE("mood/begin");
+          if(mhd_batched(1)) MOOD_begin_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].mood_begin(); }
+        { PHASE("xchg/Exchange_U_fv"); Exchange_fv_field(&Block::U_old_fv); }
+        { PHASE("mood/after_U_halo");
+          if(mhd_batched(2)) MOOD_after_U_halo_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo(); }
         mhd_reduce_nad_gscales();
         for(int rev=0; rev<cfg.max_revs; rev++){
             //Assemble, RECONCILE, then judge. The cascade tests a candidate built
@@ -1332,25 +1605,32 @@ struct Mesh : public PhysicsModule {
             //on an interface mismatch instead of on the solution. This is what the
             //hydro FV path does inside its own loop, and what the Python reference
             //FallbackAMRScheme.mood_loop does with _enforce_flux_consistency().
-            for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
-            enforce_fv_flux_consistency();
-            enforce_fv_emf_consistency();
+            { PHASE("mood/assemble");
+              if(mhd_batched(4)) MOOD_assemble_batched();
+              else for(int b=0;b<nblocks;b++) blocks[b].mood_assemble(); }
+            { PHASE("cf/enforce_fv_flux"); enforce_fv_flux_consistency(); }
+            { PHASE("cf/enforce_fv_emf");  enforce_fv_emf_consistency(); }
             int demoted = 0;
-            for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect();
+            { PHASE("mood/detect");
+              for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect(); }
             #ifdef MPI
             int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
             #endif
             if(demoted==0) break;
             Exchange_fv_field_max(&Block::cascade);
         }
-        for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
-        enforce_fv_flux_consistency();
-        enforce_fv_emf_consistency();
-        for(int b=0;b<nblocks;b++) blocks[b].mood_commit_assembled();
+        { PHASE("mood/assemble");
+          if(mhd_batched(4)) MOOD_assemble_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].mood_assemble(); }
+        { PHASE("cf/enforce_fv_flux"); enforce_fv_flux_consistency(); }
+        { PHASE("cf/enforce_fv_emf");  enforce_fv_emf_consistency(); }
+        { PHASE("mood/commit_assembled");
+          if(mhd_batched(8)) MOOD_commit_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].mood_commit_assembled(); }
         //Interior face-B sync is safe only on uniform meshes; mixed-level
         //uses ghost exchange instead (EMF correction owns CF telescoping).
-        if(forest.max_level()==0) Sync_face_B_mhd();
-        else Exchange_face_B_mhd();
+        if(forest.max_level()==0){ PHASE("sync/face_B"); Sync_face_B_mhd(); }
+        else { PHASE("xchg/Exchange_face_B"); Exchange_face_B_mhd(); }
     }
 
     void Advance_hydro(){
@@ -1365,31 +1645,39 @@ struct Mesh : public PhysicsModule {
 
     void Advance_mhd(){
         if constexpr (!is_mhd) return;
-        for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre();
-        Exchange_fp();
+        { PHASE("sd/Fluxes_pre");
+          for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre(); }
+        { PHASE("xchg/Exchange_fp"); Exchange_fp(); }
         //Refresh face-B ghosts and re-project into U so CF fluid Riemann
         //sees B consistent with the staggered field (not the prolonged U-B).
         if(forest.max_level()>0){
-            Exchange_face_B_mhd();
+            { PHASE("xchg/Exchange_face_B"); Exchange_face_B_mhd(); }
+            PHASE("sd/B_to_U");
             for(int b=0;b<nblocks;b++)
                 mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
                            blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_, blocks[b].Tz_,
                            blocks[b].fp_to_sp);
         }
-        for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver();
+        { PHASE("sd/Riemann_Solver");
+          for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver(); }
         if(forest.max_level()>0){
+            PHASE("cf/correct_cf_flux");
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) correct_cf_flux_dim(dim);
         }
-        for(int b=0;b<nblocks;b++) blocks[b].Compute_E();
-        Exchange_E_mhd();
-        for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver();
+        { PHASE("sd/Compute_E");
+          for(int b=0;b<nblocks;b++) blocks[b].Compute_E(); }
+        { PHASE("xchg/Exchange_E"); Exchange_E_mhd(); }
+        { PHASE("sd/E_Riemann_Solver");
+          for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver(); }
         if(forest.max_level()>0){
+            PHASE("cf/correct_cf_emf");
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) correct_coarse_fine_emf(forest, blocks, dim);
         }
         if(cfg.fallback) MHD_MOOD_update();
         else {
+            PHASE("sd/Update_CT");
             for(int b=0;b<nblocks;b++) blocks[b].Update_CT();
             //Uniform MB: kill round-off face mismatch. Mixed-level: do not
             //overwrite CT interiors (breaks discrete divB); ghost fill via
@@ -1906,6 +2194,7 @@ struct Mesh : public PhysicsModule {
             if(Master)
                 std::cout<<std::endl<<"OUTPUT "<<this->n_output
                          <<"  max|divB| = "<<divB<<std::endl;
+            phase_times_.report("cumulative");
             //Coarse-fine flux telescoping, which divB above cannot see.
             int n_iface = 0, n_same = 0;
             const double cfd = mhd_cf_flux_drift(n_iface, false);

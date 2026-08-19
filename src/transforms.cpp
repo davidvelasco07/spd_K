@@ -211,6 +211,34 @@ void transform_a_to_b_1d_slice_b(
     }, "transform_a_to_b_1d_slice");
 }
 
+//Pack-wide transverse (2d) transform: the same sweep factorisation as
+//transform_a_to_b_2d, but each 1d sweep spans every block in the pack. Every
+//array this is used on (the face-B families) carries n_ader = 1, so the slice
+//form reading t_src = 0 addresses exactly the block slot.
+void transform_a_to_b_2d_b(
+    SD_Solution U_a,
+    SD_Solution U_b,
+    SD_Solution T,
+    Matrix a_to_b,
+    int dim){
+    int dim1 = choose(dim , _y_, _z_, _x_);
+    int dim2 = choose(dim1, _y_, _z_, _x_);
+    int dims[2];
+    int nd=0;
+    if(cfg.active[dim1]) dims[nd++]=dim1;
+    if(cfg.active[dim2]) dims[nd++]=dim2;
+    if(nd==0){
+        Kokkos::deep_copy(U_b.Vector, U_a.Vector);
+        return;
+    }
+    SD_Solution src = U_a;
+    for(int s=0; s<nd; s++){
+        SD_Solution dst = ((nd-1-s)%2==0) ? U_b : T;
+        transform_a_to_b_1d_slice_b(src, dst, a_to_b, dims[s], 0);
+        src = dst;
+    }
+}
+
 //Reference implementation of the transverse (2d) transform.
 //Cost per point is (p+1)^2; kept only to validate the sweep version.
 void transform_a_to_b_2d_ref(

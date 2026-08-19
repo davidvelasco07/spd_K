@@ -97,6 +97,11 @@ extern void rotational_a_to_b(SD_Solution, SD_Solution, SD_Solution, Matrix, dou
 extern void compute_E(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Matrix, Matrix, int);
 extern void compute_B2_cv(SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix);
 extern void compute_B_cv_from_cf(FV_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix);
+extern void compute_B_cv_from_cf_b(FV_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix);
+extern void fv_update_B_solution_b(FV_Solution, FV_Solution, SD_Solution, FV_Solution,
+                                   FV_Solution, Matrix, Matrix, Vector, double, int, int, bool);
+extern void edge_integral_b(SD_Solution, FV_Solution, Matrix, int, int);
+extern void transform_a_to_b_2d_b(SD_Solution, SD_Solution, SD_Solution, Matrix, int);
 extern void compute_rotational_B(SD_Solution, SD_Solution, SD_Solution, double, double, Matrix, Matrix, double, int);
 extern double Induction_compute_dt(SD_Solution, double, double, double, Matrix, Matrix, Matrix);
 

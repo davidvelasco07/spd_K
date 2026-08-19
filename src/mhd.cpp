@@ -191,6 +191,77 @@ void mhd_compute_primitives(FV_Solution U, FV_Solution W){
     });
 }
 
+// Pack-wide form of the FV mhd_compute_primitives.
+void mhd_compute_primitives_b(FV_Solution U, FV_Solution W){
+    int nb=U.nb, Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
+    int nvu=U.n_var, nvw=W.n_var;
+    double gm=cfg.gamma;
+    double dfl=cfg.dfloor, pfl=cfg.pfloor;
+    fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int uo=b*nvu, wo=b*nvw;
+        double u[NMHD], w[NMHD];
+        for(int var=0;var<NMHD;var++) u[var]=U.Vector(uo+var,k,j,i);
+        mhd_primitives(u,w,gm,dfl,pfl);
+        for(int var=0;var<NMHD;var++) W.Vector(wo+var,k,j,i)=w[var];
+    }, "mhd_compute_primitives_b");
+}
+
+// Pack-wide form of mhd_detection_vars. The returned count is a pure function of
+// cfg, identical for every block, so it needs no reduction.
+int mhd_detection_vars_b(FV_Solution U, FV_Solution det){
+    int nb=U.nb, Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
+    int nvu=U.n_var, nvd=det.n_var;
+    double gm=cfg.gamma;
+    int bmode=cfg.mood_nad_b, vmode=cfg.mood_nad_v;
+    fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int uo=b*nvu, doff=b*nvd;
+        double u[NMHD], w[NMHD];
+        for(int var=0;var<NMHD;var++) u[var]=U.Vector(uo+var,k,j,i);
+        mhd_primitives(u,w,gm);
+        det.Vector(doff+0,k,j,i)=w[_mrho_];
+        det.Vector(doff+1,k,j,i)=w[_mprs_];
+        int r=2;
+        if(bmode==_nad_b_mag_){
+            double B2=w[_mbx_]*w[_mbx_]+w[_mby_]*w[_mby_]+w[_mbz_]*w[_mbz_];
+            det.Vector(doff+(r++),k,j,i)=sqrt(B2);
+        }else{
+            det.Vector(doff+(r++),k,j,i)=w[_mbx_];
+            det.Vector(doff+(r++),k,j,i)=w[_mby_];
+            det.Vector(doff+(r++),k,j,i)=w[_mbz_];
+        }
+        if(vmode==_nad_v_mag_){
+            double v2=w[_mvx_]*w[_mvx_]+w[_mvy_]*w[_mvy_]+w[_mvz_]*w[_mvz_];
+            det.Vector(doff+(r++),k,j,i)=sqrt(v2);
+        }else if(vmode==_nad_v_comps_){
+            det.Vector(doff+(r++),k,j,i)=w[_mvx_];
+            det.Vector(doff+(r++),k,j,i)=w[_mvy_];
+            det.Vector(doff+(r++),k,j,i)=w[_mvz_];
+        }
+    }, "mhd_detection_vars_b");
+    int nvar=2;
+    nvar += (bmode==_nad_b_mag_) ? 1 : 3;
+    if(vmode==_nad_v_mag_) nvar += 1;
+    else if(vmode==_nad_v_comps_) nvar += 3;
+    return nvar;
+}
+
+// Pack-wide form of mhd_face_B_to_fv.
+void mhd_face_B_to_fv_b(SD_Solution B, FV_Solution Bfv, int dim){
+    int nb=B.nb;
+    int Nx=B.Nx, Ny=B.Ny, Nz=B.Nz;
+    int px=B.nx, py=B.ny, pz=B.nz;
+    int qx=px-(dim==_x_), qy=py-(dim==_y_), qz=pz-(dim==_z_);
+    int Ni=Bfv.Nx, Nj=Bfv.Ny, Nk=Bfv.Nz;
+    int na=B.n_ader, nvf=Bfv.n_var;
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(na);
+        if(K < Nk && J < Nj && I < Ni)
+            Bfv.Vector(b*nvf+0,K,J,I) = B.Vector(boff+0,0,k,j,i,kk,jj,ii);
+    }, "mhd_face_B_to_fv_b");
+}
+
 // AthenaK floor semantics at the correct granularity for an SD scheme: repair
 // the committed CELL AVERAGES (sub-cell control volumes) of the MOOD update.
 // The gas pressure is measured against the candidate CT field average (B_ct
@@ -1360,6 +1431,27 @@ double mhd_fv_dslope(FV_Vector W, int var, int k, int j, int i, int dim,
                          z_c(k+1)-z_c(k),z_c(k)-z_c(k-1),z_f(k),z_f(k+1),lim);
 }
 
+// Pack-wide twin of mhd_fv_dslope: identical arithmetic, geometry read from the
+// per-block coordinate packs and the variable axis offset by the block.
+KOKKOS_INLINE_FUNCTION
+double mhd_fv_dslope_b(FV_Vector W, int voff, int var, int k, int j, int i, int dim,
+                       Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                       Matrix z_c, Matrix z_f, int b, int lim){
+    double w=W(voff+var,k,j,i), wm, wp;
+    if(dim==_x_){ wm=W(voff+var,k,j,i-1); wp=W(voff+var,k,j,i+1);
+        return limited_slope((wp-w)/(x_c(b,i+1)-x_c(b,i)),(w-wm)/(x_c(b,i)-x_c(b,i-1)),
+                             x_c(b,i+1)-x_c(b,i),x_c(b,i)-x_c(b,i-1),
+                             x_f(b,i),x_f(b,i+1),lim); }
+    if(dim==_y_){ wm=W(voff+var,k,j-1,i); wp=W(voff+var,k,j+1,i);
+        return limited_slope((wp-w)/(y_c(b,j+1)-y_c(b,j)),(w-wm)/(y_c(b,j)-y_c(b,j-1)),
+                             y_c(b,j+1)-y_c(b,j),y_c(b,j)-y_c(b,j-1),
+                             y_f(b,j),y_f(b,j+1),lim); }
+    wm=W(voff+var,k-1,j,i); wp=W(voff+var,k+1,j,i);
+    return limited_slope((wp-w)/(z_c(b,k+1)-z_c(b,k)),(w-wm)/(z_c(b,k)-z_c(b,k-1)),
+                         z_c(b,k+1)-z_c(b,k),z_c(b,k)-z_c(b,k-1),
+                         z_f(b,k),z_f(b,k+1),lim);
+}
+
 // Copy the staggered face field (SD layout, `dim`-normal) onto the FV face lattice, which
 // is the same index space the low-order face fluxes are written on. Mirrors the index map
 // used by fv_update_B_solution.
@@ -1440,6 +1532,57 @@ void mhd_fv_fluxes(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution U
     else              mhd_fv_fluxes_t<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
 }
 
+//Pack-wide twin of mhd_fv_fluxes_t. The face body is the same arithmetic; only the
+//variable axis (offset by the block) and the geometry (per-block coordinate packs)
+//differ. SPD_NO_MHD_BATCH=1 runs the per-block original, and the two must agree
+//bitwise -- that is the check that keeps this copy honest.
+template<int D>
+void mhd_fv_fluxes_t_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
+                       Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                       Matrix z_c, Matrix z_f, bool muscl){
+    const int lim = cfg.limiter;
+    int nb=W.nb, Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
+    double gm=cfg.gamma;
+    int rsolver=cfg.rsolver;
+    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    const bool take_bn = (rsolver!=_rsolver_llf_);
+    const int nvw=W.n_var, nvf=F.n_var, nvb=Bn_f.n_var;
+    const int nvu=want_uct?UCT.n_var:1;
+    const int v1 = (D==_x_?_mvx_:(D==_y_?_mvy_:_mvz_));
+    const int v2 = (D==_x_?_mvy_:(D==_y_?_mvz_:_mvx_));
+    const int v3 = (D==_x_?_mvz_:(D==_y_?_mvx_:_mvy_));
+    const int b1 = (D==_x_?_mbx_:(D==_y_?_mby_:_mbz_));
+    const int b2 = (D==_x_?_mby_:(D==_y_?_mbz_:_mbx_));
+    const int b3 = (D==_x_?_mbz_:(D==_y_?_mbx_:_mby_));
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int wo=b*nvw, fo=b*nvf, bo=b*nvb, uo=b*nvu;
+        int kL=k-(D==_z_), jL=j-(D==_y_), iL=i-(D==_x_);
+        double wL[NMHD], wR[NMHD], uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
+        for(int var=0;var<NMHD;var++){
+            double dL = muscl ? mhd_fv_dslope_b(W.Vector,wo,var,kL,jL,iL,D,
+                                                x_c,x_f,y_c,y_f,z_c,z_f,b,lim) : 0.0;
+            double dR = muscl ? mhd_fv_dslope_b(W.Vector,wo,var,k ,j ,i ,D,
+                                                x_c,x_f,y_c,y_f,z_c,z_f,b,lim) : 0.0;
+            wL[var]=W.Vector(wo+var,kL,jL,iL)+dL;
+            wR[var]=W.Vector(wo+var,k ,j ,i )-dR;
+        }
+        if(take_bn) wL[b1]=wR[b1]=Bn_f.Vector(bo+0,k,j,i);
+        mhd_conservatives(wL,uL,gm);
+        mhd_conservatives(wR,uR,gm);
+        mhd_riemann(f,uL,uR,v1,v2,v3,b1,b2,b3,gm,rsolver, want_uct?uct:nullptr);
+        for(int var=0;var<NMHD;var++) F.Vector(fo+var,k,j,i)=f[var];
+        if(want_uct) for(int var=0;var<NUCT;var++) UCT.Vector(uo+var,k,j,i)=uct[var];
+    }, "mhd_fv_fluxes_b");
+}
+
+void mhd_fv_fluxes_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
+                     Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                     Matrix z_c, Matrix z_f, int dim, bool muscl){
+    if(dim==_x_)      mhd_fv_fluxes_t_b<_x_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+    else if(dim==_y_) mhd_fv_fluxes_t_b<_y_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+    else              mhd_fv_fluxes_t_b<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+}
+
 //----------------------------------------------------------------------------------------
 // Four-state corner electric field (mhd_fv_scheme.four_state_E), single-valued on the
 // edge lattice. E-family `dim` has transverse directions (dim1,dim2); the four corner
@@ -1462,6 +1605,22 @@ double mhd_fv_corner_val(FV_Solution W, int var, int ck, int cj, int ci,
     if(muscl){
         val += sgn1*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim1,x_c,x_f,y_c,y_f,z_c,z_f,lim);
         val += sgn2*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim2,x_c,x_f,y_c,y_f,z_c,z_f,lim);
+    }
+    return val;
+}
+
+// Pack-wide twin of mhd_fv_corner_val.
+KOKKOS_INLINE_FUNCTION
+double mhd_fv_corner_val_b(FV_Solution W, int voff, int var, int ck, int cj, int ci,
+                           int dim1, int dim2, double sgn1, double sgn2, bool muscl,
+                           Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                           Matrix z_c, Matrix z_f, int b, int lim){
+    double val = W.Vector(voff+var,ck,cj,ci);
+    if(muscl){
+        val += sgn1*mhd_fv_dslope_b(W.Vector,voff,var,ck,cj,ci,dim1,
+                                    x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+        val += sgn2*mhd_fv_dslope_b(W.Vector,voff,var,ck,cj,ci,dim2,
+                                    x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
     }
     return val;
 }
@@ -1647,6 +1806,69 @@ void mhd_four_state_E(FV_Solution E, FV_Solution W,
     else              mhd_four_state_E_t<_z_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
 }
 
+//Pack-wide twin of mhd_four_state_E_t. Same arithmetic as the per-block version;
+//see mhd_fv_fluxes_t_b on why the copy is safe to keep.
+template<int D>
+void mhd_four_state_E_t_b(FV_Solution E, FV_Solution W,
+                          Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                          Matrix z_c, Matrix z_f, bool muscl){
+    const int lim = cfg.limiter;
+    int nb=W.nb, Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
+    double gm=cfg.gamma;
+    const int nvw=W.n_var, nve=E.n_var;
+    const int dim1 = (D==_z_?_x_:(D==_y_?_z_:_y_));
+    const int dim2 = (D==_z_?_y_:(D==_y_?_x_:_z_));
+    const int v1v = (D==_z_?_mvx_:(D==_y_?_mvz_:_mvy_));
+    const int v2v = (D==_z_?_mvy_:(D==_y_?_mvx_:_mvz_));
+    const int b1v = (D==_z_?_mbx_:(D==_y_?_mbz_:_mby_));
+    const int b2v = (D==_z_?_mby_:(D==_y_?_mbx_:_mbz_));
+    const int b3v = (D==_z_?_mbz_:(D==_y_?_mby_:_mbx_));
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int wo=b*nvw, eo=b*nve;
+        double Esum=0, dB2_1=0, dB1_2=0, Sp1=0, Sp2=0;
+        for(int o1=-1;o1<=0;o1++) for(int o2=-1;o2<=0;o2++){
+            int ck=k, cj=j, ci=i;
+            if(dim1==_x_) ci+=o1; else if(dim1==_y_) cj+=o1; else ck+=o1;
+            if(dim2==_x_) ci+=o2; else if(dim2==_y_) cj+=o2; else ck+=o2;
+            double sgn1 = (o1==-1)? 1.0 : -1.0;
+            double sgn2 = (o2==-1)? 1.0 : -1.0;
+            double rho = mhd_fv_corner_val_b(W,wo,_mrho_,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                             x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            double p   = mhd_fv_corner_val_b(W,wo,_mprs_,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                             x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            if(rho<=rho_min) rho=W.Vector(wo+_mrho_,ck,cj,ci);
+            if(p<=p_min)     p  =W.Vector(wo+_mprs_,ck,cj,ci);
+            double V1 = mhd_fv_corner_val_b(W,wo,v1v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                            x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            double V2 = mhd_fv_corner_val_b(W,wo,v2v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                            x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            double B1 = mhd_fv_corner_val_b(W,wo,b1v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                            x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            double B2 = mhd_fv_corner_val_b(W,wo,b2v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                            x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            double B3 = mhd_fv_corner_val_b(W,wo,b3v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
+                                            x_c,x_f,y_c,y_f,z_c,z_f,b,lim);
+            Esum += V1*B2 - V2*B1;
+            double c = sqrt((gm*p + B1*B1 + B2*B2 + B3*B3)/rho);
+            Sp1 = max(Sp1, fabs(V1)+c);
+            Sp2 = max(Sp2, fabs(V2)+c);
+            double js1 = (o1==0)? 1.0 : -1.0;
+            double js2 = (o2==0)? 1.0 : -1.0;
+            dB2_1 += 0.5*js1*B2;
+            dB1_2 += 0.5*js2*B1;
+        }
+        E.Vector(eo+0,k,j,i) = 0.25*Esum - 0.5*Sp1*dB2_1 + 0.5*Sp2*dB1_2;
+    }, "mhd_four_state_E_b");
+}
+
+void mhd_four_state_E_b(FV_Solution E, FV_Solution W,
+                        Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                        Matrix z_c, Matrix z_f, int dim, bool muscl){
+    if(dim==_x_)      mhd_four_state_E_t_b<_x_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+    else if(dim==_y_) mhd_four_state_E_t_b<_y_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+    else              mhd_four_state_E_t_b<_z_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+}
+
 //----------------------------------------------------------------------------------------
 // MOOD cascade assembly: per-face flux and per-edge E selected from the level arrays
 // (0 = high order, 1 = MUSCL, 2 = first order) by the pooled cascade index.
@@ -1692,6 +1914,72 @@ void mhd_set_candidate_B(FV_Solution U_new, FV_Solution B_cand){
         U_new.Vector(_mby_,k,j,i)=B_cand.Vector(1,k,j,i);
         if(az) U_new.Vector(_mbz_,k,j,i)=B_cand.Vector(2,k,j,i);
     });
+}
+
+// Pack-wide form of mhd_assign_edge_E.
+void mhd_assign_edge_E_b(FV_Solution E0, FV_Solution E1, FV_Solution E2,
+                         FV_Solution cascade, int dim){
+    int Nx=cascade.Nx, Ny=cascade.Ny, Nz=cascade.Nz, nb=cascade.nb;
+    const int nve = E0.n_var, cnv = cascade.n_var;
+    const int dim1 = (dim==_z_?_x_:(dim==_y_?_z_:_y_));
+    const int dim2 = (dim==_z_?_y_:(dim==_y_?_x_:_z_));
+    fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int eo = b*nve, co = b*cnv;
+        double c=0;
+        for(int o1=-1;o1<=0;o1++) for(int o2=-1;o2<=0;o2++){
+            int ck=k, cj=j, ci=i;
+            if(dim1==_x_) ci+=o1; else if(dim1==_y_) cj+=o1; else ck+=o1;
+            if(dim2==_x_) ci+=o2; else if(dim2==_y_) cj+=o2; else ck+=o2;
+            c=max(c,cascade.Vector(co+0,ck,cj,ci));
+        }
+        if(c>=1)
+            E0.Vector(eo+0,k,j,i) = c>=2 ? E2.Vector(eo+0,k,j,i)
+                                         : E1.Vector(eo+0,k,j,i);
+    }, "mhd_assign_edge_E_b");
+}
+
+// Pack-wide form of mhd_floor_cv.
+void mhd_floor_cv_b(SD_Solution U_cv, FV_Solution B_cv){
+    double gm=cfg.gamma, dfl=cfg.dfloor, pfl=cfg.pfloor;
+    if(pfl < 0) pfl = dfl*min_c2/gm;
+    int nb=U_cv.nb;
+    int Nx=U_cv.Nx, Ny=U_cv.Ny, Nz=U_cv.Nz, px=U_cv.nx, py=U_cv.ny, pz=U_cv.nz;
+    int qx=px, qy=py, qz=pz;
+    int na=U_cv.n_ader, nvb=B_cv.n_var;
+    bool az=cfg.active[_z_];
+    GHOST_LOCALS;
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(na);
+        const int bo = b*nvb;
+        double rho = U_cv.Vector(boff+0,_mrho_,k,j,i,kk,jj,ii);
+        if(rho < dfl){ rho = dfl; U_cv.Vector(boff+0,_mrho_,k,j,i,kk,jj,ii) = rho; }
+        double mx=U_cv.Vector(boff+0,_mvx_,k,j,i,kk,jj,ii);
+        double my=U_cv.Vector(boff+0,_mvy_,k,j,i,kk,jj,ii);
+        double mz=U_cv.Vector(boff+0,_mvz_,k,j,i,kk,jj,ii);
+        double Bx=B_cv.Vector(bo+0,K,J,I), By=B_cv.Vector(bo+1,K,J,I);
+        double Bz=az ? B_cv.Vector(bo+2,K,J,I)
+                     : U_cv.Vector(boff+0,_mbz_,k,j,i,kk,jj,ii);
+        double Ekin = 0.5*(mx*mx+my*my+mz*mz)/rho;
+        double Emag = 0.5*(Bx*Bx+By*By+Bz*Bz);
+        double p = (U_cv.Vector(boff+0,_mprs_,k,j,i,kk,jj,ii) - Ekin - Emag)*(gm-1.);
+        if(p < pfl)
+            U_cv.Vector(boff+0,_mprs_,k,j,i,kk,jj,ii) = pfl/(gm-1.) + Ekin + Emag;
+    }, "mhd_floor_cv_b");
+}
+
+// Pack-wide form of mhd_set_candidate_B.
+void mhd_set_candidate_B_b(FV_Solution U_new, FV_Solution B_cand){
+    int nb = U_new.nb;
+    int Nx=U_new.Nx, Ny=U_new.Ny, Nz=U_new.Nz;
+    int nvu = U_new.n_var, nvb = B_cand.n_var;
+    bool az=cfg.active[_z_];
+    fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int uo = b*nvu, bo = b*nvb;
+        U_new.Vector(uo+_mbx_,k,j,i)=B_cand.Vector(bo+0,k,j,i);
+        U_new.Vector(uo+_mby_,k,j,i)=B_cand.Vector(bo+1,k,j,i);
+        if(az) U_new.Vector(uo+_mbz_,k,j,i)=B_cand.Vector(bo+2,k,j,i);
+    }, "mhd_set_candidate_B_b");
 }
 
 // Demote still-troubled, revisable cells one cascade level; returns the number demoted.
