@@ -300,9 +300,12 @@ int main(int argc, char** argv){
                                <<"' not implemented (llf|hlld)"<<endl;
                 exit(1);
             }
-            //NAD on the candidate CT field: components (default; AthenaK/Python)
-            //or magnitude. |B|-only misses Alfvénic / transverse oscillations.
-            string nadb = pin.GetOrAddString("mhd","mood_nad_b","comps");
+            //NAD on the candidate CT field: magnitude (default) or components.
+            //comps is what AthenaK / Python spd use and is the better detector --
+            //|B|-only misses Alfvénic / transverse oscillations -- but flipping
+            //the default moves the MHD goldens, so it waits until the global NAD
+            //scale is decomposition-invariant and they can be regenerated once.
+            string nadb = pin.GetOrAddString("mhd","mood_nad_b","mag");
             if(nadb=="mag")         cfg.mood_nad_b = _nad_b_mag_;
             else if(nadb=="comps")  cfg.mood_nad_b = _nad_b_comps_;
             else{
@@ -321,9 +324,14 @@ int main(int argc, char** argv){
                                <<"' not implemented (off|mag|comps)"<<endl;
                 exit(1);
             }
-            //NAD tolerance scale (AthenaK mood_nad_scale). Default gcfl: domain
-            //range of each detection variable, softened by the advective CFL.
-            string nadsc = pin.GetOrAddString("mhd","mood_nad_scale","gcfl");
+            //NAD tolerance scale (AthenaK mood_nad_scale). Default relative: a
+            //purely LOCAL band. grange/gcfl take a domain-range reduction, and
+            //mhd_nad_compute_gscales is currently called per block, so under them
+            //each block gets its own band and multiblock stops agreeing with
+            //single-block (measured: OT true2d 1.205e-01 vs true2d_mb 9.700e-02
+            //under gcfl; identical 1.227e-01 under relative). Default moves to
+            //gcfl once that reduction is hoisted to mesh level.
+            string nadsc = pin.GetOrAddString("mhd","mood_nad_scale","relative");
             if(nadsc=="relative")     cfg.mood_nad_scale = _nad_scale_relative_;
             else if(nadsc=="delta")   cfg.mood_nad_scale = _nad_scale_delta_;
             else if(nadsc=="grange")  cfg.mood_nad_scale = _nad_scale_grange_;

@@ -107,10 +107,14 @@ Trouble detection runs on control-volume averages of the full candidate state
 candidate CT update):
 
 - **NAD** on `rho`, gas `P`, and the magnetic field — default
-  `mhd/mood_nad_b = comps` (`Bx,By,Bz`), matching Python `spd` and AthenaK.
+  `mhd/mood_nad_b = mag` (`|B|`). `comps` (`Bx,By,Bz`) matches Python `spd`
+  and AthenaK and is the better detector; it becomes the default once the
+  global NAD scale is decomposition-invariant and the goldens are regenerated.
   `|B|`-only (`mood_nad_b = mag`) is blind to Alfvénic / transverse
   oscillations. Optional `mhd/mood_nad_v = comps|mag` adds velocity.
-  The band width uses `mhd/mood_nad_scale` (default **`gcfl`**: domain range of
+  The band width uses `mhd/mood_nad_scale` (default **`relative`**, a purely
+  local band; `grange`/`gcfl` take a domain-range reduction that is currently
+  computed per block, so they are not decomposition-invariant yet). `gcfl` is the domain range of
   each detection variable, softened by the advective CFL — AthenaK's default).
   Alternatives: `grange` (no CFL factor), `relative`, `delta`. `fallback/atol`
   and `fallback/eps0` floor the band near zero crossings;
