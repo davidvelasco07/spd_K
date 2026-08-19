@@ -694,7 +694,8 @@ void slopes_d(
     double dt,
     bool ay,
     bool az,
-    double gm){
+    double gm,
+    int lim){
 
     double wL;
     double wR;
@@ -721,23 +722,29 @@ void slopes_d(
             //Each one-sided difference uses its own center spacing: the FV
             //sub-grid (Gauss points) is non-uniform, and a shared h breaks the
             //mirror symmetry at reflective walls (spurious wall mass flux)
-            dwx[var] = minmod((wR - w[var])/(x_c[i+1]-x_c[i]),
-                              (w[var] - wL)/(x_c[i]-x_c[i-1]),x_f[i],x_f[i+1]);
+            dwx[var] = limited_slope((wR - w[var])/(x_c[i+1]-x_c[i]),
+                                     (w[var] - wL)/(x_c[i]-x_c[i-1]),
+                                     x_c[i+1]-x_c[i], x_c[i]-x_c[i-1],
+                                     x_f[i],x_f[i+1],lim);
         }
         if constexpr (need_y){
             if(ay){
                 wL=W(off+var,k,j-1,i);
                 wR=W(off+var,k,j+1,i);
-                dwy[var] = minmod((wR - w[var])/(y_c[j+1]-y_c[j]),
-                                  (w[var] - wL)/(y_c[j]-y_c[j-1]),y_f[j],y_f[j+1]);
+                dwy[var] = limited_slope((wR - w[var])/(y_c[j+1]-y_c[j]),
+                                         (w[var] - wL)/(y_c[j]-y_c[j-1]),
+                                         y_c[j+1]-y_c[j], y_c[j]-y_c[j-1],
+                                         y_f[j],y_f[j+1],lim);
             }
         }
         if constexpr (need_z){
             if(az){
                 wL=W(off+var,k-1,j,i);
                 wR=W(off+var,k+1,j,i);
-                dwz[var] = minmod((wR - w[var])/(z_c[k+1]-z_c[k]),
-                                  (w[var] - wL)/(z_c[k]-z_c[k-1]),z_f[k],z_f[k+1]);
+                dwz[var] = limited_slope((wR - w[var])/(z_c[k+1]-z_c[k]),
+                                         (w[var] - wL)/(z_c[k]-z_c[k-1]),
+                                         z_c[k+1]-z_c[k], z_c[k]-z_c[k-1],
+                                         z_f[k],z_f[k+1],lim);
             }
         }
     }
@@ -778,7 +785,8 @@ void compute_fluxes(
     bool ay,
     bool az,
     double gm,
-    bool pred
+    bool pred,
+    int lim
     ){
     //wL/wR hold only the D-direction faces of the two cells adjacent to the
     //face (l = -1, 0); with D compile-time everything stays in registers.
@@ -813,13 +821,14 @@ void compute_fluxes(
             dt,
             ay,
             az,
-            gm);
+            gm,
+            lim);
         else slopes_d<D,false>(
             W,x_c,x_f,y_c,y_f,z_c,z_f,off,
             k + (D==_z_ ? l:0),
             j + (D==_y_ ? l:0),
             i + (D==_x_ ? l:0),
-            (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
+            (wL[l+1]),(wR[l+1]),dt,ay,az,gm,lim);
     //Now we have the reconstructed values at both faces
     //We can then solve the Riemann problem
     //Left Boundary
@@ -867,7 +876,8 @@ void level_flux(
     double gm,
     bool muscl,
     bool pred
-    ){
+    ,
+    int lim){
     double uL[NVAR];
     double uR[NVAR];
     double f[NVAR];
@@ -882,12 +892,12 @@ void level_flux(
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
-                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
+                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm,lim);
             else     slopes_d<D,false>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
-                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm);
+                        (wL[l+1]),(wR[l+1]),dt,ay,az,gm,lim);
         //Face between cell -1 and cell 0: the lower cell supplies the L state
         //at its upper face, the upper cell the R state at its lower face.
         conservatives(wL[0],uL,gm);
@@ -929,6 +939,7 @@ void level_fluxes(
     int Ny = U.Ny;
     int Nz = U.Nz;
     double gm = cfg.gamma;
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
@@ -940,9 +951,9 @@ void level_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
-        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
-        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
     });
 }
 
@@ -966,6 +977,7 @@ void level_fluxes_b(
                   "level_fluxes_b takes row pointers into a Matrix; it needs LayoutRight");
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var;
     double gm = cfg.gamma;
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
@@ -982,9 +994,9 @@ void level_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
-        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
-        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred);
+        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
     });
 }
 
@@ -1009,6 +1021,7 @@ void fallback_fluxes_b(
                   "fallback_fluxes_b takes row pointers into a Matrix; it needs LayoutRight");
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb, nvar=U.n_var, tnv=theta.n_var;
     double gm = cfg.gamma;
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
     FV_Vector u=U.Vector, th=theta.Vector;
@@ -1026,9 +1039,9 @@ void fallback_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
-        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
-        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
     }, "fallback_fluxes_b");
 }
 
@@ -1052,6 +1065,7 @@ void fallback_fluxes(
     int Ny = U.Ny;
     int Nz = U.Nz;
     double gm = cfg.gamma;
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
@@ -1063,8 +1077,8 @@ void fallback_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
-        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
-        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred);
+        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
     });
 }

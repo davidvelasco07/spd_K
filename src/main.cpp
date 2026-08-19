@@ -174,6 +174,17 @@ int main(int argc, char** argv){
         cfg.g[_z_]   = pin.GetOrAddReal("hydro","g3",0.0);
         cfg.fallback = pin.GetOrAddBoolean("job","fallback",true);
         cfg.nad_tolerance = pin.GetOrAddReal("fallback","tolerance",1e-5);
+        //MUSCL/FV slope limiter, shared by the hydro fallback, the vl2/plm lane
+        //and the MHD MOOD low-order levels. minmod is what every golden encodes.
+        string slim = pin.GetOrAddString("fallback","limiter","minmod");
+        if(slim=="minmod")       cfg.limiter = _lim_minmod_;
+        else if(slim=="vanleer") cfg.limiter = _lim_vanleer_;
+        else if(slim=="moncen")  cfg.limiter = _lim_moncen_;
+        else{
+            if(Master) cout<<"ERROR: fallback/limiter = '"<<slim
+                           <<"' not implemented (minmod|vanleer|moncen)"<<endl;
+            exit(1);
+        }
         cfg.nad_atol = pin.GetOrAddReal("fallback","atol",0.0);
         cfg.nad_eps0 = pin.GetOrAddReal("fallback","eps0",1e-12);
         cfg.nad_delta = pin.GetOrAddString("fallback","NAD","relative")=="delta";

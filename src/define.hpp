@@ -68,6 +68,9 @@ enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 enum {_periodic_, _gradfree_, _reflective_};
 enum {_integrator_ader_, _integrator_rk_};
 enum {_rsolver_llf_, _rsolver_hlld_};
+//MUSCL/FV slope limiter (fallback/limiter). minmod is the default and is what
+//every existing golden encodes; see src/muscl.hpp.
+enum {_lim_minmod_, _lim_vanleer_, _lim_moncen_};
 enum {_nad_b_mag_, _nad_b_comps_};          // MHD NAD on |B| or (Bx,By,Bz)
 enum {_nad_v_off_, _nad_v_mag_, _nad_v_comps_}; // MHD NAD velocity: off / |v| / comps
 enum {_nad_scale_relative_, _nad_scale_delta_, _nad_scale_grange_, _nad_scale_gcfl_};

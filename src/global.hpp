@@ -90,6 +90,7 @@ struct RunConfig {
                                          //rather than by an end time.
 
     int rsolver = _rsolver_llf_;         //MHD Riemann solver (faces + edges)
+    int limiter = _lim_minmod_;          //MUSCL/FV slope limiter (fallback/limiter)
     int mood_nad_b = _nad_b_comps_;      //MHD NAD B mode: comps (default) or mag
                                          //(|B|-only is blind to Alfvénic / transverse
                                          //structure; matches AthenaK mood_nad_b=comps
