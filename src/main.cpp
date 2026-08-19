@@ -356,11 +356,43 @@ int main(int argc, char** argv){
             if(cfg.mood_nad_scale==_nad_scale_delta_) cfg.nad_delta = true;
             if(cfg.mood_nad_scale==_nad_scale_relative_) cfg.nad_delta = false;
             //Force a fixed cascade level (diagnostic: pure MUSCL / FO CT update).
+            //Ask BEFORE GetOrAdd: GetOrAdd inserts the key with its default, so
+            //DoesParameterExist afterwards is always true.
+            const bool force_level_given =
+                pin.DoesParameterExist("mhd","mood_force_level");
             cfg.mood_force_level = pin.GetOrAddInteger("mhd","mood_force_level",-1);
             if(cfg.mood_force_level<-1 || cfg.mood_force_level>2){
                 if(Master) cout<<"ERROR: mhd/mood_force_level = "<<cfg.mood_force_level
                                <<" (expected -1|0|1|2)"<<endl;
                 exit(1);
+            }
+            //job/scheme for MHD. It was a silent no-op: cfg.fv_only is read only
+            //by hydro_ader/mesh and cfg.fv_predictor only by hydro.cpp, so
+            //job/scheme=vl2 and job/scheme=plm under system=mhd both produced
+            //output bit-identical to job/scheme=sd -- measured, md5-identical
+            //with detection live and with it pinned. A low-order MHD lane is
+            //reachable only through the cascade level, so map plm onto it and
+            //refuse vl2 rather than let either be reported as a scheme it is not.
+            if(system_name=="mhd" && scheme!="sd"){
+                if(scheme=="vl2"){
+                    if(Master) cout<<"ERROR: job/scheme=vl2 is hydro-only. The "
+                        "MUSCL-Hancock predictor lives in hydro.cpp (cfg.fv_predictor) "
+                        "and the MHD FV flux path has no predictor, so this would run "
+                        "plain PLM under the name vl2. Use job/scheme=plm with "
+                        "time/integrator=rk2 (two-stage, second order, the closest "
+                        "lane to the paper's VL2), and see mhd_fv_fluxes_t if a real "
+                        "MHD predictor is wanted."<<endl;
+                    exit(1);
+                }
+                //plm: pin every cell at the cascade's MUSCL level, which IS
+                //limited-slope PLM on the sub-cell mesh. An explicit
+                //mhd/mood_force_level wins, so the two can still be combined.
+                if(!force_level_given)
+                    cfg.mood_force_level = 1;
+                else if(cfg.mood_force_level != 1 && Master)
+                    cout<<"NOTE: job/scheme=plm asks for the MUSCL level but "
+                          "mhd/mood_force_level="<<cfg.mood_force_level
+                        <<" was set explicitly; the explicit value wins"<<endl;
             }
         }
 

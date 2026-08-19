@@ -39,6 +39,10 @@ plus command-line overrides. Checks per configuration:
                    coarse-fine magnetic-flux telescoping (cf_flux) -- the thing
                    divb cannot see, since divb is per-block and any within-block
                    single-valued EMF passes it
+  mhd_kh_*_p0_2d : p=0 MHD Kelvin-Helmholtz (Stone+2020 fig 22) on a static
+                   patch and under the paper's dynamic shear criterion -- the
+                   low-order PLM lane, which every other mixed-level MHD config
+                   misses because they are all p=3
   mhd_orszag_tang_smr_noemf_2d : the same with the coarse-fine edge-EMF
                    correction switched off. It must FAIL to telescope
                    (cf_flux_sensitive), which is what keeps the cf_flux gate
@@ -643,6 +647,50 @@ CONFIGS = {
         "checks": ["mixed_levels", "mass_strict", "divb"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
+    },
+    "mhd_kh_smr_p0_2d": {
+        # p=0 mixed-level MHD with the cascade: the lane figure 22 actually uses,
+        # and the one every other mixed-level MHD config missed -- they are all
+        # p=3. At p=0 one element IS one cell, so the FV halo (2) exceeds the SD
+        # ghost supply (1) and the coarse-fine transfer runs on a different code
+        # path than at p>=1. Static patch so cf_flux has a stable reference.
+        #
+        # Measured 2026-08-19: CF flux drift 1.0e-20 and the same-level control
+        # EXACTLY 0 over all 136 faces -- the patch-corner residual that p=3
+        # carries (2.2e-04) is absent at p=0.
+        "input": "inputs/kelvin_helmholtz_mhd.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "meshblock/nx1=8", "meshblock/nx2=8",
+                      "time/tlim=0.05", "output/dt=0.025",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x2min=0.13",
+                      "refinement1/x2max=0.37"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
+        "field": "W_cv_N64p0_1_0.dat",
+        "t_end": 0.05,
+    },
+    "mhd_kh_amr_p0_2d": {
+        # The figure-22 lane end to end at test scale: p=0 PLM (cascade pinned at
+        # the MUSCL level), rk2, dynamic AMR driven by the paper's shear criterion
+        # at its 0.01 / 0.005 cuts. 8 block rows so the y = 0.25 / 0.75 shear
+        # layers do NOT land on a row boundary everywhere -- with 4 rows they do,
+        # every row gets tagged, and the mesh refines uniformly, which tests
+        # nothing about mixed levels.
+        #
+        # No cf_flux here: a regrid invalidates the t=0 reference by design, so
+        # the drift is only meaningful on the static lane above.
+        "input": "inputs/kelvin_helmholtz_mhd.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/tlim=0.05", "output/dt=0.025",
+                      "amr/max_level=1", "amr/adapt_interval=2",
+                      "amr/criterion=shear", "amr/refine_threshold=0.01",
+                      "amr/derefine_threshold=0.005"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "field": "W_cv_N64p0_1_0.dat",
+        "t_end": 0.05,
     },
 }
 
