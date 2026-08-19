@@ -269,6 +269,7 @@ struct Mesh : public PhysicsModule {
         FV_Solution E1x, E1y, E1z, E2x, E2y, E2z;
         FV_Solution W_fv, det_old, mhd_cascade;
         FV_Solution UCT1_x, UCT1_y, UCT1_z, UCT2_x, UCT2_y, UCT2_z;
+        SD_Solution mhd_U_ader_sp;
     } pv;
 
     void build_pack_views(){
@@ -282,25 +283,31 @@ struct Mesh : public PhysicsModule {
         pv.W_sp        = sd_pack_view(pack,"W_sp");
         pv.W_cv        = sd_pack_view(pack,"W_cv");
         pv.U_ader_sp   = sd_pack_view(pack,"U_ader_sp");
-        pv.U0_sp       = sd_pack_view(pack,"U0_sp");
+        pv.U0_sp       = sd_pack_view(pack,"U0_sp", true);   //RK only
         pv.T_sweep     = sd_pack_view(pack,"T_sweep");
         pv.U_cv        = sd_pack_view(pack,"U_cv");
-        pv.T_fp_x      = sd_pack_view(pack,"T_fp_x");
-        pv.T_fp_y      = sd_pack_view(pack,"T_fp_y");
-        pv.T_fp_z      = sd_pack_view(pack,"T_fp_z");
         if constexpr (is_mhd){
+            //T_fp_* is a hydro-only scratch; MHD's own path uses U_ader_fp_*.
+            //Everything below the cfg.fallback guard is allocated only when the
+            //MOOD cascade is on (mhd.hpp: `if(cfg.fallback){ ... }`), so asking
+            //for it unconditionally aborts a job/fallback=false run -- which is
+            //exactly what the hardened sd_pack_view reported.
             pv.Bx_fp_x  = sd_pack_view(pack,"Bx_fp_x");
             pv.By_fp_y  = sd_pack_view(pack,"By_fp_y");
             pv.Bz_fp_z  = sd_pack_view(pack,"Bz_fp_z");
+            pv.Ex_ep_yz = sd_pack_view(pack,"Ex_ep_yz");
+            pv.Ey_ep_zx = sd_pack_view(pack,"Ey_ep_zx");
+            pv.Ez_ep_xy = sd_pack_view(pack,"Ez_ep_xy");
+            pv.mhd_U_ader_sp = sd_pack_view(pack,"U_ader_sp");
+            //Everything past here is allocated only when the MOOD cascade is on
+            //(mhd.hpp: `if(cfg.fallback){ ... }`).
+            if(!cfg.fallback) return;
             pv.Bxf      = sd_pack_view(pack,"Bxf");
             pv.Byf      = sd_pack_view(pack,"Byf");
             pv.Bzf      = sd_pack_view(pack,"Bzf");
             pv.TB_x     = sd_pack_view(pack,"TB_x");
             pv.TB_y     = sd_pack_view(pack,"TB_y");
             pv.TB_z     = sd_pack_view(pack,"TB_z");
-            pv.Ex_ep_yz = sd_pack_view(pack,"Ex_ep_yz");
-            pv.Ey_ep_zx = sd_pack_view(pack,"Ey_ep_zx");
-            pv.Ez_ep_xy = sd_pack_view(pack,"Ez_ep_xy");
             pv.B_old_cv = fv_pack_view(pack,"B_old_cv");
             pv.B_new_cv = fv_pack_view(pack,"B_new_cv");
             pv.F0_x     = fv_pack_view(pack,"F0_x");
@@ -342,6 +349,12 @@ struct Mesh : public PhysicsModule {
             pv.UCT2_z   = fv_pack_view(pack,"UCT2_z");
             return;
         }
+        //Hydro's FV/fallback arrays are allocated only under cfg.fallback
+        //(hydro_ader.hpp), same as MHD's MOOD set above.
+        if(!cfg.fallback) return;
+        pv.T_fp_x      = sd_pack_view(pack,"T_fp_x");
+        pv.T_fp_y      = sd_pack_view(pack,"T_fp_y");
+        pv.T_fp_z      = sd_pack_view(pack,"T_fp_z");
         pv.F_x         = fv_pack_view(pack,"F_x");
         pv.F_y         = fv_pack_view(pack,"F_y");
         pv.F_z         = fv_pack_view(pack,"F_z");
@@ -351,12 +364,15 @@ struct Mesh : public PhysicsModule {
         pv.W_new       = fv_pack_view(pack,"W_new");
         pv.theta       = fv_pack_view(pack,"theta");
         pv.flagged     = fv_pack_view(pack,"flagged");
-        pv.cascade     = fv_pack_view(pack,"cascade");
         pv.troubles    = fv_pack_view(pack,"troubles");
         pv.alpha_x     = fv_pack_view(pack,"alpha_x");
         pv.alpha_y     = fv_pack_view(pack,"alpha_y");
         pv.alpha_z     = fv_pack_view(pack,"alpha_z");
         pv.theta_tmp   = fv_pack_view(pack,"theta_tmp");
+        //cascade / F1 / F2 are nested one level deeper for hydro, under
+        //cfg.mood_cascade -- the blend style does not allocate them.
+        if(!cfg.mood_cascade) return;
+        pv.cascade     = fv_pack_view(pack,"cascade");
         pv.F1_x        = fv_pack_view(pack,"F1_x");
         pv.F1_y        = fv_pack_view(pack,"F1_y");
         pv.F1_z        = fv_pack_view(pack,"F1_z");
@@ -852,8 +868,12 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //The FV flux the cascade assembles into: hydro's F_*, MHD's level-0 F0_*.
     FV_Solution& fv_flux_pack(int dim){
-        return dim==_x_ ? pv.F_x : dim==_y_ ? pv.F_y : pv.F_z;
+        if constexpr (is_mhd)
+            return dim==_x_ ? pv.F0_x : dim==_y_ ? pv.F0_y : pv.F0_z;
+        else
+            return dim==_x_ ? pv.F_x : dim==_y_ ? pv.F_y : pv.F_z;
     }
 
     //Conservative flux correction over the fine->coarse table. Hydro only for
@@ -910,8 +930,8 @@ struct Mesh : public PhysicsModule {
 
     //Whichever implementation is selected, for one direction.
     void correct_cf_fv_flux_dim(int dim){
-        if(new_xchg() && !is_mhd) correct_cf_fv_flux_batched(dim);
-        else                      correct_coarse_fine_fv_flux(forest, blocks, dim);
+        if(new_xchg() && (!is_mhd || mhd_batched())) correct_cf_fv_flux_batched(dim);
+        else correct_coarse_fine_fv_flux(forest, blocks, dim);
     }
 
     //Same-level FV flux symmetrization over the side-0 same-level table.
@@ -929,8 +949,8 @@ struct Mesh : public PhysicsModule {
 
     //Whichever implementation is selected, for one direction.
     void symmetrize_fv_flux_dim(int dim){
-        if(new_xchg() && !is_mhd) symmetrize_fv_flux_batched(dim);
-        else                      symmetrize_same_level_fv_flux(forest, blocks, dim);
+        if(new_xchg() && (!is_mhd || mhd_batched())) symmetrize_fv_flux_batched(dim);
+        else symmetrize_same_level_fv_flux(forest, blocks, dim);
     }
 
     //Single-valued FV fluxes at every block interface: the coarse side of a
@@ -1438,14 +1458,15 @@ struct Mesh : public PhysicsModule {
     //from 4 blocks to 256 blocks cost 7.20 s -> 79.94 s per 200 steps on an A100
     //(11.1x) while the same sweep on CPU was flat, so it is pure launch dispatch.
     //SPD_NO_MHD_BATCH=1 restores the per-block path; the two must agree bitwise.
-    //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit. SPD_MHD_BATCH_MASK
+    //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
+    //32 Riemann_Solver. SPD_MHD_BATCH_MASK
     //selects which are batched, which is how a mismatch against the per-block path
     //gets bisected to one phase instead of guessed at.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 15;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 63;
         return (mask & phase) != 0;
     }
 
@@ -1580,6 +1601,37 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //Fluxes_pre + Riemann_Solver over the whole pack. transform_a_to_b_1d is
+    //already pack-aware (it loops sd_for_cells_b), so it needs no twin.
+    void MHD_Fluxes_pre_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        auto& b0 = blocks[0];
+        transform_a_to_b_1d(pv.mhd_U_ader_sp, pv.U_ader_fp_x, b0.sp_to_fp, _x_);
+        transform_a_to_b_1d(pv.mhd_U_ader_sp, pv.U_ader_fp_y, b0.sp_to_fp, _y_);
+        if(az) transform_a_to_b_1d(pv.mhd_U_ader_sp, pv.U_ader_fp_z, b0.sp_to_fp, _z_);
+        if(cfg.rsolver != _rsolver_llf_){
+            mhd_face_B_to_fp_b(pv.U_ader_fp_x, pv.Bx_fp_x, _x_);
+            mhd_face_B_to_fp_b(pv.U_ader_fp_y, pv.By_fp_y, _y_);
+            if(az) mhd_face_B_to_fp_b(pv.U_ader_fp_z, pv.Bz_fp_z, _z_);
+        }
+        mhd_compute_fluxes_b(pv.U_ader_fp_x, pv.F_ader_fp_x, _x_);
+        mhd_compute_fluxes_b(pv.U_ader_fp_y, pv.F_ader_fp_y, _y_);
+        if(az) mhd_compute_fluxes_b(pv.U_ader_fp_z, pv.F_ader_fp_z, _z_);
+        }
+    }
+
+    void MHD_Riemann_Solver_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        mhd_riemann_solver_b(pv.U_ader_fp_x, pv.F_ader_fp_x, _x_);
+        mhd_riemann_solver_b(pv.U_ader_fp_y, pv.F_ader_fp_y, _y_);
+        if(az) mhd_riemann_solver_b(pv.U_ader_fp_z, pv.F_ader_fp_z, _z_);
+        }
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
         //3D mixed-level MOOD needs the genuine line-average of the edge EMF along
@@ -1593,7 +1645,10 @@ struct Mesh : public PhysicsModule {
         { PHASE("mood/begin");
           if(mhd_batched(1)) MOOD_begin_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_begin(); }
-        { PHASE("xchg/Exchange_U_fv"); Exchange_fv_field(&Block::U_old_fv); }
+        //Pack view supplied so this takes the batched transaction-table gather
+        //instead of the per-block forest path -- 10.6% of the fenced advance.
+        { PHASE("xchg/Exchange_U_fv");
+          Exchange_fv_field(&Block::U_old_fv, mhd_batched() ? &pv.U_old_fv : nullptr); }
         { PHASE("mood/after_U_halo");
           if(mhd_batched(2)) MOOD_after_U_halo_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo(); }
@@ -1617,7 +1672,8 @@ struct Mesh : public PhysicsModule {
             int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
             #endif
             if(demoted==0) break;
-            Exchange_fv_field_max(&Block::cascade);
+            Exchange_fv_field_max(&Block::cascade,
+                                  mhd_batched() ? &pv.mhd_cascade : nullptr);
         }
         { PHASE("mood/assemble");
           if(mhd_batched(4)) MOOD_assemble_batched();
@@ -1646,7 +1702,8 @@ struct Mesh : public PhysicsModule {
     void Advance_mhd(){
         if constexpr (!is_mhd) return;
         { PHASE("sd/Fluxes_pre");
-          for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre(); }
+          if(mhd_batched(16)) MHD_Fluxes_pre_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre(); }
         { PHASE("xchg/Exchange_fp"); Exchange_fp(); }
         //Refresh face-B ghosts and re-project into U so CF fluid Riemann
         //sees B consistent with the staggered field (not the prolonged U-B).
@@ -1659,7 +1716,8 @@ struct Mesh : public PhysicsModule {
                            blocks[b].fp_to_sp);
         }
         { PHASE("sd/Riemann_Solver");
-          for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver(); }
+          if(mhd_batched(32)) MHD_Riemann_Solver_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver(); }
         if(forest.max_level()>0){
             PHASE("cf/correct_cf_flux");
             for(int dim=0; dim<3; dim++)

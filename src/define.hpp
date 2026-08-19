@@ -117,6 +117,9 @@ extern int nGH_rt[3];
 #define INDICES t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_]
 #define INDICES_L t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
 #define INDICES_R t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
+//Pack-wide variants: the leading axis carries the block (boff = b*n_ader).
+#define INDICES_L_B boff+t_id,var,NidL[_z_],NidL[_y_],NidL[_x_],nidL[_z_],nidL[_y_],nidL[_x_]
+#define INDICES_R_B boff+t_id,var,NidR[_z_],NidR[_y_],NidR[_x_],nidR[_z_],nidR[_y_],nidR[_x_]
 
 #define NODE nid[_z_],nid[_y_],nid[_x_]
 

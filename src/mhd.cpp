@@ -620,6 +620,65 @@ void mhd_riemann_solver_t(SD_Solution U, SD_Solution F, SD_Solution Bn, SD_Solut
     });
 }
 
+//Pack-wide form of mhd_riemann_solver.
+template<int D,int V1,int V2,int V3,int B1,int B2,int B3>
+void mhd_riemann_solver_t_b(SD_Solution U, SD_Solution F, SD_Solution Bn, SD_Solution UCT){
+    int nb=U.nb;
+    int Nx=U.Nx-(D==_x_), Ny=U.Ny-(D==_y_), Nz=U.Nz-(D==_z_);
+    int px=D==_x_?1:U.nx, py=D==_y_?1:U.ny, pz=D==_z_?1:U.nz;
+    int n=mhd_choose(D,U.nx,U.ny,U.nz);
+    int nader=U.n_ader;
+    int nab=Bn.n_var>=1 ? Bn.n_ader : 1;
+    double gm=cfg.gamma;
+    int rsolver=cfg.rsolver;
+    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    int nau=want_uct ? UCT.n_ader : 1;
+    bool use_bn = (Bn.n_var>=1);
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(nader);
+        double uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
+        int NidL[3],nidL[3],NidR[3],nidR[3];
+        int l=mhd_choose(D,i,j,k);
+        mhd_indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,D);
+        mhd_indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,0  ,D);
+        for(int t_id=0;t_id<nader;t_id++){
+            for(int var=0;var<NMHD;var++){
+                uL[var]=U.Vector(INDICES_L_B);
+                uR[var]=U.Vector(INDICES_R_B);
+            }
+            if(use_bn){
+                double bnL = Bn.Vector(b*nab+0,0,NidL[_z_],NidL[_y_],NidL[_x_],
+                                       nidL[_z_],nidL[_y_],nidL[_x_]);
+                double bnR = Bn.Vector(b*nab+0,0,NidR[_z_],NidR[_y_],NidR[_x_],
+                                       nidR[_z_],nidR[_y_],nidR[_x_]);
+                double bn = 0.5*(bnL+bnR);
+                uL[B1]=uR[B1]=bn;
+            }
+            mhd_riemann(f,uL,uR,V1,V2,V3,B1,B2,B3,gm,rsolver, want_uct?uct:nullptr);
+            for(int var=0;var<NMHD;var++){
+                F.Vector(INDICES_L_B)=f[var];
+                F.Vector(INDICES_R_B)=f[var];
+            }
+            if(want_uct){
+                for(int uv=0;uv<NUCT;uv++){
+                    UCT.Vector(b*nau+t_id,uv,NidL[_z_],NidL[_y_],NidL[_x_],
+                               nidL[_z_],nidL[_y_],nidL[_x_])=uct[uv];
+                    UCT.Vector(b*nau+t_id,uv,NidR[_z_],NidR[_y_],NidR[_x_],
+                               nidR[_z_],nidR[_y_],nidR[_x_])=uct[uv];
+                }
+            }
+        }
+    }, "mhd_riemann_solver_b");
+}
+
+void mhd_riemann_solver_b(SD_Solution U, SD_Solution F, int dim,
+                          SD_Solution Bn, SD_Solution UCT){
+    if(dim==_x_)      mhd_riemann_solver_t_b<_x_,_mvx_,_mvy_,_mvz_,_mbx_,_mby_,_mbz_>(U,F,Bn,UCT);
+    else if(dim==_y_) mhd_riemann_solver_t_b<_y_,_mvy_,_mvz_,_mvx_,_mby_,_mbz_,_mbx_>(U,F,Bn,UCT);
+    else              mhd_riemann_solver_t_b<_z_,_mvz_,_mvx_,_mvy_,_mbz_,_mbx_,_mby_>(U,F,Bn,UCT);
+}
+
 void mhd_riemann_solver(SD_Solution U, SD_Solution F, int dim,
                         SD_Solution Bn, SD_Solution UCT){
     if(dim==_x_)      mhd_riemann_solver_t<_x_,_mvx_,_mvy_,_mvz_,_mbx_,_mby_,_mbz_>(U,F,Bn,UCT);
@@ -632,22 +691,56 @@ void mhd_riemann_solver(SD_Solution U, SD_Solution F, int dim,
 void mhd_face_B_to_fp(SD_Solution U_fp, SD_Solution B_fp, int dim){
     int brow = (dim==_x_?_mbx_:(dim==_y_?_mby_:_mbz_));
     int Nx=U_fp.Nx, Ny=U_fp.Ny, Nz=U_fp.Nz, px=U_fp.nx, py=U_fp.ny, pz=U_fp.nz;
-#ifdef KOKKOS_ENABLE_CUDA
-    SD_Vector_h Ufh = Kokkos::create_mirror_view(U_fp.Vector);
-    SD_Vector_h Bfh = Kokkos::create_mirror_view(B_fp.Vector);
-    Kokkos::deep_copy(Ufh, U_fp.Vector);
-    Kokkos::deep_copy(Bfh, B_fp.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        Ufh(0,brow,k,j,i,kk,jj,ii) = Bfh(0,0,k,j,i,kk,jj,ii);
-    });
-    Kokkos::deep_copy(U_fp.Vector, Ufh);
-#else
+    //This was a HOST round trip under CUDA -- two mirrors and two deep_copies per
+    //block per call for a plain elementwise copy, and it arrived that way with the
+    //UCT/HLLD merge (0973f7f) with no stated reason while the CPU branch did the
+    //identical work as a device kernel. It only runs when rsolver != llf, i.e. in
+    //exactly the HLLD lane figure 22 wants. One kernel, both backends.
     SD_Vector Vuf = U_fp.Vector;
     SD_Vector Vbf = B_fp.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         Vuf(0,brow,k,j,i,kk,jj,ii) = Vbf(0,0,k,j,i,kk,jj,ii);
     });
-#endif
+}
+
+//Pack-wide form of mhd_face_B_to_fp.
+void mhd_face_B_to_fp_b(SD_Solution U_fp, SD_Solution B_fp, int dim){
+    int brow = (dim==_x_?_mbx_:(dim==_y_?_mby_:_mbz_));
+    int nb=U_fp.nb;
+    int Nx=U_fp.Nx, Ny=U_fp.Ny, Nz=U_fp.Nz, px=U_fp.nx, py=U_fp.ny, pz=U_fp.nz;
+    int nau=U_fp.n_ader, nab=B_fp.n_ader;
+    SD_Vector Vuf = U_fp.Vector;
+    SD_Vector Vbf = B_fp.Vector;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        Vuf(b*nau+0,brow,k,j,i,kk,jj,ii) = Vbf(b*nab+0,0,k,j,i,kk,jj,ii);
+    }, "mhd_face_B_to_fp_b");
+}
+
+//Pack-wide form of mhd_compute_fluxes.
+template<int V1,int V2,int V3,int B1,int B2,int B3>
+void mhd_compute_fluxes_t_b(SD_Solution U, SD_Solution F){
+    int nb=U.nb;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    int nader=U.n_ader;
+    double gm=cfg.gamma;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(nader);
+        for(int t_id=0;t_id<nader;t_id++){
+            double u[NMHD], w[NMHD], f[NMHD];
+            for(int var=0;var<NMHD;var++) u[var]=U.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
+            mhd_primitives(u,w,gm);
+            mhd_fluxes(w,f,V1,V2,V3,B1,B2,B3,gm);
+            for(int var=0;var<NMHD;var++) F.Vector(boff+t_id,var,k,j,i,kk,jj,ii)=f[var];
+        }
+    }, "mhd_compute_fluxes_b");
+}
+
+void mhd_compute_fluxes_b(SD_Solution U, SD_Solution F, int dim){
+    if(dim==_x_)      mhd_compute_fluxes_t_b<_mvx_,_mvy_,_mvz_,_mbx_,_mby_,_mbz_>(U,F);
+    else if(dim==_y_) mhd_compute_fluxes_t_b<_mvy_,_mvz_,_mvx_,_mby_,_mbz_,_mbx_>(U,F);
+    else              mhd_compute_fluxes_t_b<_mvz_,_mvx_,_mvy_,_mbz_,_mbx_,_mby_>(U,F);
 }
 
 //----------------------------------------------------------------------------------------

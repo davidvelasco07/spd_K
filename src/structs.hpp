@@ -333,10 +333,25 @@ class SD_Solution{
 //Descriptor for a whole pack, shaped like a per-block SD_Solution but with
 //nb set to the block count and Vector spanning every block. Batched kernels
 //take one of these and index the leading axis as b*n_ader + t_id.
-inline SD_Solution sd_pack_view(BlockPack& pk, const std::string& name){
+//A missing name used to return a default-constructed (empty) view, which a
+//kernel then happily wrote nowhere. That cost real time: MOOD_begin_batched
+//asked for "T_fp_x", which only hydro allocates, and the resulting empty scratch
+//diverged from the per-block path in 3D only. Fail loudly instead.
+inline SD_Solution sd_pack_view(BlockPack& pk, const std::string& name,
+                               bool optional=false){
     SD_Solution s;
     auto it = pk.sd.find(name);
-    if(it == pk.sd.end()) return s;
+    if(it == pk.sd.end()){
+        //Genuinely conditional arrays (U0_sp exists only for RK, the MOOD arrays
+        //only under cfg.fallback) must say so at the call site. Anything else is
+        //a name that was never allocated, and returning an empty view there is
+        //how MOOD_begin_batched came to hand a kernel a view into nothing.
+        if(optional) return s;
+        std::cout<<"ERROR: sd_pack_view: no array named '"<<name
+                 <<"' in the block pack (not allocated in this configuration; "
+                 <<"pass optional=true if that is expected)"<<std::endl;
+        exit(1);
+    }
     const PackMeta& m = pk.meta.at(name);
     s.Vector = it->second;
     s.nb = m.nb; s.n_ader = m.nader; s.n_var = m.nvar;

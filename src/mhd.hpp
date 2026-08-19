@@ -114,6 +114,10 @@ extern void mhd_assign_edge_E_b(FV_Solution E0, FV_Solution E1, FV_Solution E2,
 extern void mhd_compute_primitives_b(FV_Solution U, FV_Solution W);
 extern int  mhd_detection_vars_b(FV_Solution U, FV_Solution det);
 extern void mhd_face_B_to_fv_b(SD_Solution B, FV_Solution Bfv, int dim);
+extern void mhd_face_B_to_fp_b(SD_Solution U_fp, SD_Solution B_fp, int dim);
+extern void mhd_compute_fluxes_b(SD_Solution U, SD_Solution F, int dim);
+extern void mhd_riemann_solver_b(SD_Solution U, SD_Solution F, int dim,
+                                 SD_Solution Bn={}, SD_Solution UCT={});
 extern void mhd_fv_fluxes_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                             Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
                             Matrix z_c, Matrix z_f, int dim, bool muscl);

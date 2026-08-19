@@ -143,10 +143,18 @@ class FV_Solution{
 
 //Whole-pack descriptor (see sd_pack_view). Batched FV kernels index the
 //leading axis as b*n_var + var.
-inline FV_Solution fv_pack_view(BlockPack& pk, const std::string& name){
+//See sd_pack_view: a missing name must not hand back an empty view.
+inline FV_Solution fv_pack_view(BlockPack& pk, const std::string& name,
+                               bool optional=false){
     FV_Solution s;
     auto it = pk.fv.find(name);
-    if(it == pk.fv.end()) return s;
+    if(it == pk.fv.end()){
+        if(optional) return s;
+        std::cout<<"ERROR: fv_pack_view: no array named '"<<name
+                 <<"' in the block pack (not allocated in this configuration; "
+                 <<"pass optional=true if that is expected)"<<std::endl;
+        exit(1);
+    }
     const PackMeta& m = pk.meta.at(name);
     s.Vector = it->second;
     s.nb = m.nb; s.n_var = m.nvar;
