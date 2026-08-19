@@ -1,0 +1,65 @@
+# MHD Kelvin-Helmholtz instability, Athena++ (Stone et al. 2020) figure 22.
+#
+# Figure 22 is figure 21's hydrodynamic setup plus a uniform horizontal field
+# Bx = 0.1, compared at t = 1.5 (the hydro figure is at t = 1.2). Everything
+# else -- the eq.-26 profiles, the box, gamma, the shear refinement criterion
+# and its 0.01 / 0.005 thresholds -- is shared with kelvin_helmholtz.athinput.
+#
+# The paper runs HLLD + PLM + VL2. spd_K equivalents:
+#
+#   MUSCL lane (this file's defaults)
+#       mesh/p=0 job/fallback=true mhd/mood_force_level=1 time/integrator=rk2
+#       Every cell is pinned at MOOD level 1, i.e. PLM reconstruction on the
+#       sub-cell mesh with no detection; rk2 stands in for the paper's VL2
+#       (both two-stage, second order). At p=0 one element IS one cell, so
+#       mesh/nx1 = the cell count.
+#
+#   SDFB lane
+#       mesh/p=3 job/fallback=true time/integrator=rk3 (drop mood_force_level)
+#       (p+1)^2 DoF per element, so mesh/nx1 = D/4 elements for a DxD DoF grid.
+#
+# mhd/rsolver=hlld exists but its edge EMF is still the four-state LLF corner
+# (UCT is not wired in yet), so this file leaves the default llf and the
+# comparison to the paper is honest about that.
+
+<job>
+system   = mhd
+fallback = true
+scheme   = sd
+
+<mesh>
+p    = 0
+nx1  = 256
+nx2  = 256
+nx3  = 1
+x1len = 1.0
+x2len = 1.0
+x1_bc = periodic
+x2_bc = periodic
+
+<meshblock>
+nx1 = 256
+nx2 = 256
+nx3 = 1
+
+<time>
+tlim       = 1.5
+cfl        = 0.4
+integrator = rk2
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver         = llf
+mood_force_level = 1     # pin every cell at MUSCL; -1 restores detection
+
+<problem>
+problem = kelvin_helmholtz
+amp     = 0.1            # uniform Bx (paper: 0.1)
+
+<fallback>
+limiter = minmod         # minmod | vanleer | moncen
+
+<output>
+dt = 0.3
