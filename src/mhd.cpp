@@ -1340,14 +1340,17 @@ void mhd_detect_troubles(FV_Solution U_new, FV_Solution U_old,
 // returns 0.5*slope*(x_R-x_L), i.e. the half-increment from the cell centre to a face.
 KOKKOS_INLINE_FUNCTION
 double mhd_fv_dslope(FV_Vector W, int var, int k, int j, int i, int dim,
-                     Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f){
+                     Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f, int lim){
     double w=W(var,k,j,i), wm, wp;
     if(dim==_x_){ wm=W(var,k,j,i-1); wp=W(var,k,j,i+1);
-        return minmod((wp-w)/(x_c(i+1)-x_c(i)),(w-wm)/(x_c(i)-x_c(i-1)),x_f(i),x_f(i+1)); }
+        return limited_slope((wp-w)/(x_c(i+1)-x_c(i)),(w-wm)/(x_c(i)-x_c(i-1)),
+                             x_c(i+1)-x_c(i),x_c(i)-x_c(i-1),x_f(i),x_f(i+1),lim); }
     if(dim==_y_){ wm=W(var,k,j-1,i); wp=W(var,k,j+1,i);
-        return minmod((wp-w)/(y_c(j+1)-y_c(j)),(w-wm)/(y_c(j)-y_c(j-1)),y_f(j),y_f(j+1)); }
+        return limited_slope((wp-w)/(y_c(j+1)-y_c(j)),(w-wm)/(y_c(j)-y_c(j-1)),
+                             y_c(j+1)-y_c(j),y_c(j)-y_c(j-1),y_f(j),y_f(j+1),lim); }
     wm=W(var,k-1,j,i); wp=W(var,k+1,j,i);
-    return minmod((wp-w)/(z_c(k+1)-z_c(k)),(w-wm)/(z_c(k)-z_c(k-1)),z_f(k),z_f(k+1));
+    return limited_slope((wp-w)/(z_c(k+1)-z_c(k)),(w-wm)/(z_c(k)-z_c(k-1)),
+                         z_c(k+1)-z_c(k),z_c(k)-z_c(k-1),z_f(k),z_f(k+1),lim);
 }
 
 // Copy the staggered face field (SD layout, `dim`-normal) onto the FV face lattice, which
@@ -1383,6 +1386,7 @@ template<int D>
 void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                      Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                      bool muscl){
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     // Drive the face loop from the CELL-array extent (as hydro::fallback_fluxes does):
     // fv_for_faces then covers exactly the active faces, and the +-2 cell reconstruction
     // stays inside the (haloed) 2-ghost frame of W.
@@ -1407,8 +1411,8 @@ void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution
         int kL=k-(D==_z_), jL=j-(D==_y_), iL=i-(D==_x_);
         double wL[NMHD], wR[NMHD], uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
         for(int var=0;var<NMHD;var++){
-            double dL = muscl ? mhd_fv_dslope(W.Vector,var,kL,jL,iL,D,x_c,x_f,y_c,y_f,z_c,z_f) : 0.0;
-            double dR = muscl ? mhd_fv_dslope(W.Vector,var,k ,j ,i ,D,x_c,x_f,y_c,y_f,z_c,z_f) : 0.0;
+            double dL = muscl ? mhd_fv_dslope(W.Vector,var,kL,jL,iL,D,x_c,x_f,y_c,y_f,z_c,z_f,lim) : 0.0;
+            double dR = muscl ? mhd_fv_dslope(W.Vector,var,k ,j ,i ,D,x_c,x_f,y_c,y_f,z_c,z_f,lim) : 0.0;
             wL[var]=W.Vector(var,kL,jL,iL)+dL;   // right face of the left cell
             wR[var]=W.Vector(var,k ,j ,i )-dR;   // left  face of the right cell
         }
@@ -1446,11 +1450,11 @@ KOKKOS_INLINE_FUNCTION
 double mhd_fv_corner_val(FV_Solution W, int var, int ck, int cj, int ci,
                          int dim1, int dim2, double sgn1, double sgn2, bool muscl,
                          Vector x_c, Vector x_f, Vector y_c, Vector y_f,
-                         Vector z_c, Vector z_f){
+                         Vector z_c, Vector z_f, int lim){
     double val = W.Vector(var,ck,cj,ci);
     if(muscl){
-        val += sgn1*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim1,x_c,x_f,y_c,y_f,z_c,z_f);
-        val += sgn2*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim2,x_c,x_f,y_c,y_f,z_c,z_f);
+        val += sgn1*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim1,x_c,x_f,y_c,y_f,z_c,z_f,lim);
+        val += sgn2*mhd_fv_dslope(W.Vector,var,ck,cj,ci,dim2,x_c,x_f,y_c,y_f,z_c,z_f,lim);
     }
     return val;
 }
@@ -1461,7 +1465,7 @@ KOKKOS_INLINE_FUNCTION
 void mhd_edge_recon(FV_Solution Q, int var, int k, int j, int i,
                     int dim_t, int lo, bool muscl,
                     Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
-                    double& qL, double& qR){
+                    double& qL, double& qR, int lim){
     int k0=k, j0=j, i0=i, k1=k, j1=j, i1=i;
     if(dim_t==_x_){ i0=lo; i1=lo+1; }
     else if(dim_t==_y_){ j0=lo; j1=lo+1; }
@@ -1469,17 +1473,17 @@ void mhd_edge_recon(FV_Solution Q, int var, int k, int j, int i,
     qL = Q.Vector(var,k0,j0,i0);
     qR = Q.Vector(var,k1,j1,i1);
     if(muscl){
-        qL += mhd_fv_dslope(Q.Vector,var,k0,j0,i0,dim_t,x_c,x_f,y_c,y_f,z_c,z_f);
-        qR -= mhd_fv_dslope(Q.Vector,var,k1,j1,i1,dim_t,x_c,x_f,y_c,y_f,z_c,z_f);
+        qL += mhd_fv_dslope(Q.Vector,var,k0,j0,i0,dim_t,x_c,x_f,y_c,y_f,z_c,z_f,lim);
+        qR -= mhd_fv_dslope(Q.Vector,var,k1,j1,i1,dim_t,x_c,x_f,y_c,y_f,z_c,z_f,lim);
     }
 }
 
 KOKKOS_INLINE_FUNCTION
 double mhd_edge_interp_a(FV_Solution Q, int var, int k, int j, int i,
                          int dim_t, int lo, bool muscl,
-                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f){
+                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f, int lim){
     double qL, qR;
-    mhd_edge_recon(Q,var,k,j,i,dim_t,lo,muscl,x_c,x_f,y_c,y_f,z_c,z_f,qL,qR);
+    mhd_edge_recon(Q,var,k,j,i,dim_t,lo,muscl,x_c,x_f,y_c,y_f,z_c,z_f,qL,qR,lim);
     double a = 0.5*(qL+qR);
     return a<0.0 ? 0.0 : (a>1.0 ? 1.0 : a);
 }
@@ -1487,9 +1491,9 @@ double mhd_edge_interp_a(FV_Solution Q, int var, int k, int j, int i,
 KOKKOS_INLINE_FUNCTION
 double mhd_edge_interp_d(FV_Solution Q, int var, int k, int j, int i,
                          int dim_t, int lo, bool muscl,
-                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f){
+                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f, int lim){
     double qL, qR;
-    mhd_edge_recon(Q,var,k,j,i,dim_t,lo,muscl,x_c,x_f,y_c,y_f,z_c,z_f,qL,qR);
+    mhd_edge_recon(Q,var,k,j,i,dim_t,lo,muscl,x_c,x_f,y_c,y_f,z_c,z_f,qL,qR,lim);
     double d = 0.5*(qL+qR);
     return d>0.0 ? d : 0.0;
 }
@@ -1507,6 +1511,7 @@ void mhd_uct_corner_E_t(FV_Solution E, FV_Solution Bn1, FV_Solution Bn2,
                         int Nz, int Ny, int Nx,
                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                         bool muscl){
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     const int dim1 = (D==_z_?_x_:(D==_y_?_z_:_y_));
     const int dim2 = (D==_z_?_y_:(D==_y_?_x_:_z_));
     // Face Riemann stores uct[3]=first transverse vel, uct[4]=second. For each face
@@ -1531,24 +1536,24 @@ void mhd_uct_corner_E_t(FV_Solution E, FV_Solution Bn1, FV_Solution Bn2,
         if(dim2==_x_) i2=f2; else if(dim2==_y_) j2=f2; else k2=f2;
 
         // a,d for the (v1,B2) / W-E terms: from dim1-faces, along dim2
-        double aW = mhd_edge_interp_a(UCT1,0,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
+        double aW = mhd_edge_interp_a(UCT1,0,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
         double aE = 1.0 - aW;
-        double dW = mhd_edge_interp_d(UCT1,1,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
-        double dE = mhd_edge_interp_d(UCT1,2,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
+        double dW = mhd_edge_interp_d(UCT1,1,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
+        double dE = mhd_edge_interp_d(UCT1,2,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
         // v1,B2 themselves: from dim2-faces, along dim1
         double v1W, v1E, B2W, B2E;
-        mhd_edge_recon(UCT2,ivt_from_2,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,v1W,v1E);
-        mhd_edge_recon(Bn2,0,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,B2W,B2E);
+        mhd_edge_recon(UCT2,ivt_from_2,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,v1W,v1E,lim);
+        mhd_edge_recon(Bn2,0,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,B2W,B2E,lim);
 
         // a,d for the (v2,B1) / S-N terms: from dim2-faces, along dim1
-        double aS = mhd_edge_interp_a(UCT2,0,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
+        double aS = mhd_edge_interp_a(UCT2,0,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
         double aN = 1.0 - aS;
-        double dS = mhd_edge_interp_d(UCT2,1,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
-        double dN = mhd_edge_interp_d(UCT2,2,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f);
+        double dS = mhd_edge_interp_d(UCT2,1,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
+        double dN = mhd_edge_interp_d(UCT2,2,k2,j2,i2,dim1,lo1,muscl,x_c,x_f,y_c,y_f,z_c,z_f,lim);
         // v2,B1 themselves: from dim1-faces, along dim2
         double v2S, v2N, B1S, B1N;
-        mhd_edge_recon(UCT1,ivt_from_1,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,v2S,v2N);
-        mhd_edge_recon(Bn1,0,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,B1S,B1N);
+        mhd_edge_recon(UCT1,ivt_from_1,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,v2S,v2N,lim);
+        mhd_edge_recon(Bn1,0,k1,j1,i1,dim2,lo2,muscl,x_c,x_f,y_c,y_f,z_c,z_f,B1S,B1N,lim);
 
         E.Vector(0,k,j,i) = (aW*v1W*B2W + aE*v1E*B2E)
                           - (aS*v2S*B1S + aN*v2N*B1N)
@@ -1575,6 +1580,7 @@ template<int D>
 void mhd_four_state_E_t(FV_Solution E, FV_Solution W,
                         Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                         bool muscl){
+    const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     // Drive from the CELL-array extent so the transverse +-2 reconstruction stays inside
     // W's haloed 2-ghost frame (see mhd_fv_fluxes_t).
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
@@ -1598,21 +1604,21 @@ void mhd_four_state_E_t(FV_Solution E, FV_Solution W,
             double sgn1 = (o1==-1)? 1.0 : -1.0;
             double sgn2 = (o2==-1)? 1.0 : -1.0;
             double rho = mhd_fv_corner_val(W,_mrho_,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                           x_c,x_f,y_c,y_f,z_c,z_f);
+                                           x_c,x_f,y_c,y_f,z_c,z_f,lim);
             double p   = mhd_fv_corner_val(W,_mprs_,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                           x_c,x_f,y_c,y_f,z_c,z_f);
+                                           x_c,x_f,y_c,y_f,z_c,z_f,lim);
             if(rho<=rho_min) rho=W.Vector(_mrho_,ck,cj,ci);
             if(p<=p_min)     p  =W.Vector(_mprs_,ck,cj,ci);
             double V1 = mhd_fv_corner_val(W,v1v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                          x_c,x_f,y_c,y_f,z_c,z_f);
+                                          x_c,x_f,y_c,y_f,z_c,z_f,lim);
             double V2 = mhd_fv_corner_val(W,v2v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                          x_c,x_f,y_c,y_f,z_c,z_f);
+                                          x_c,x_f,y_c,y_f,z_c,z_f,lim);
             double B1 = mhd_fv_corner_val(W,b1v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                          x_c,x_f,y_c,y_f,z_c,z_f);
+                                          x_c,x_f,y_c,y_f,z_c,z_f,lim);
             double B2 = mhd_fv_corner_val(W,b2v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                          x_c,x_f,y_c,y_f,z_c,z_f);
+                                          x_c,x_f,y_c,y_f,z_c,z_f,lim);
             double B3 = mhd_fv_corner_val(W,b3v,ck,cj,ci,dim1,dim2,sgn1,sgn2,muscl,
-                                          x_c,x_f,y_c,y_f,z_c,z_f);
+                                          x_c,x_f,y_c,y_f,z_c,z_f,lim);
             Esum += V1*B2 - V2*B1;
             double c = sqrt((gm*p + B1*B1 + B2*B2 + B3*B3)/rho);
             Sp1 = max(Sp1, fabs(V1)+c);
@@ -1748,6 +1754,31 @@ double mhd_ic_vortex(int var, double x, double y, double z, ProblemParams pp){
 
 // Wu & Shu (2018) strongly magnetized MHD blast (Balsara et al. 2025 §8.1).
 // Uniform rho=1, v=0, p=p0 except r<radius where p=p1, Bx=amp.
+// Smooth-interface Kelvin-Helmholtz for MHD: Stone et al. (2020) figure 22,
+// which is figure 21's hydro setup plus a uniform horizontal field Bx = 0.1
+// (here pp.amp, matching mhd_ic_blast/mhd_ic_jet). Reference time t = 1.5.
+//
+// The profile MUST stay identical to the hydro kelvin_helmholtz() in
+// initial_conditions.cpp -- the point of the test is that the two differ only
+// by B. That includes the correction of the paper's eq. 26 typo: it writes the
+// tanh argument as |y - 0.25|, which gives ONE interface, a density contrast of
+// 1.5 and a velocity jump of 0.5, contradicting its own text and leaving the
+// state non-periodic in y. The intended argument is (|y| - 0.25).
+KOKKOS_INLINE_FUNCTION
+double mhd_ic_kelvin_helmholtz(int var, double x, double y, ProblemParams pp){
+    const double Lsh = 0.01;   //shear layer thickness
+    const double amp = 0.01;   //velocity perturbation amplitude
+    const double sig = 0.2;    //thickness of the perturbed layer
+    double dy = fabs(y - 0.5*LENGHT) - 0.25;
+    double s  = tanh(dy/Lsh);
+    if(var==_mrho_) return 1.5 - 0.5*s;
+    if(var==_mvx_)  return 0.5*s;
+    if(var==_mvy_)  return amp*cos(4*PI*x)*exp(-(dy*dy)/(sig*sig));
+    if(var==_mprs_) return 2.5;
+    if(var==_mbx_)  return pp.amp;
+    return 0.0;
+}
+
 KOKKOS_INLINE_FUNCTION
 double mhd_ic_blast(int var, double x, double y, double z, ProblemParams pp){
     double xr = x - pp.cx;
@@ -1805,6 +1836,7 @@ double mhd_ic_primitive(int problem, int var, double x, double y, double z, Prob
     if(problem==_ic_mhd_vortex_) return mhd_ic_vortex(var,x,y,z,pp);
     if(problem==_ic_mhd_blast_)   return mhd_ic_blast(var,x,y,z,pp);
     if(problem==_ic_mhd_jet_)     return mhd_ic_jet(var,x,y,z,pp);
+    if(problem==_ic_kelvin_helmholtz_) return mhd_ic_kelvin_helmholtz(var,x,y,pp);
     return mhd_ic_orszag_tang(var,x,y,z);
 }
 
@@ -1842,6 +1874,11 @@ double mhd_ic_vector_potential(int problem, int dim, double x, double y, double 
     }
     if(problem==_ic_mhd_jet_){
         if(dim==_z_) return -pp.amp*x;
+        return 0.0;
+    }
+    //KH (fig 22): uniform Bx = pp.amp. Bx = dAz/dy - dAy/dz, so Az = amp*y.
+    if(problem==_ic_kelvin_helmholtz_){
+        if(dim==_z_) return pp.amp*y;
         return 0.0;
     }
     const double B0 = 1.0/sqrt(4.0*PI);
