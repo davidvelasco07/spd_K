@@ -901,6 +901,74 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
     }
 }
 
+//Coarse-fine correction for the MOOD cascade's FV-lattice edge EMF.
+//
+//The flux correction (correct_coarse_fine_fv_flux) restricts over the two
+//transverse directions of a FACE, weighted by amr_RS_cv -- the fraction of a
+//coarse cell each fine cell covers. An EDGE is not a face: the quantity is a
+//line integral along the direction the edge RUNS, so the restriction is over
+//that one direction, and along the remaining transverse direction the coarse
+//edge position simply COINCIDES with every other fine edge position.
+//
+//In true 2D (z inactive) the only family is Ez, whose edge runs along z -- a
+//single degenerate cell. Both reductions therefore vanish and the correction is
+//pure injection of the coincident fine corner onto the coarse one. That is
+//exactly what keeps the assembled EMF single-valued across a level jump, which
+//is what makes the cascade's CT update divergence-free there.
+//
+//3D needs the genuine line-average along the edge direction and is NOT done
+//here; Mesh guards against reaching it (see MHD_MOOD_update).
+template<typename Block>
+void correct_coarse_fine_fv_emf(BlockForest& forest, std::vector<Block>& blocks, int dim){
+    if constexpr (!std::is_same_v<Block, MHD_ader>) { (void)forest;(void)blocks;(void)dim; return; }
+    else {
+    if(forest.max_level()==0 || !cfg.active[dim]) return;
+    if(cfg.active[_z_]) return;                 //3D: guarded by the caller
+    if(dim!=_x_ && dim!=_y_) return;
+    GHOST_LOCALS;
+    const int t = (dim==_x_) ? _y_ : _x_;       //the direction the coarse edge shares
+    for(int side=0; side<2; side++){
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t q=0; q<g.fi_ib.size(); q++){
+            const int ib = g.fi_ib[q];
+            FV_Solution C = blocks[ib].E0z;
+            SD_Solution S = blocks[ib].W_cv;
+            const int Ncx=(S.Nx-2*NGHx)*S.nx, Ncy=(S.Ny-2*NGHy)*S.ny;
+            const int lo_n = (dim==_x_?sghx:sghy);
+            const int Nn   = (dim==_x_?Ncx:Ncy);
+            const int lo_t = (t==_x_?sghx:sghy);
+            const int Nt   = (t==_x_?Ncx:Ncy);
+            const int cface = (side==0 ? lo_n : lo_n+Nn);   //own boundary edge line
+            const int fface = (side==0 ? lo_n+Nn : lo_n);   //fine block's far end
+            const int ns = (int)g.fi_jb[q].size();
+            for(int sub=0; sub<ns; sub++){
+                FV_Solution F = blocks[g.fi_jb[q][sub]].E0z;
+                //Which half of the coarse face this fine neighbour covers,
+                //along the shared transverse direction.
+                const int half = sub & 1;
+                const int base = lo_t + half*(Nt/2);
+                const int m    = Nt/2;
+                //m+1 coarse edges over this half; coarse edge r sits on fine
+                //edge 2r of the neighbour (its cells are half as wide).
+                for(int r=0; r<=m; r++){
+                    const int cj = base + r;
+                    const int fj = lo_t + 2*r;
+                    const int ci = (dim==_x_) ? cface : cj;
+                    const int cJ = (dim==_x_) ? cj    : cface;
+                    const int fi = (dim==_x_) ? fface : fj;
+                    const int fJ = (dim==_x_) ? fj    : fface;
+                    auto Cv=C.Vector; auto Fv=F.Vector;
+                    Kokkos::parallel_for("cf_fv_emf", flat_range(0,flat_total(1)),
+                        KOKKOS_LAMBDA(const unsigned){
+                            Cv(0,0,cJ,ci) = Fv(0,0,fJ,fi);
+                        });
+                }
+            }
+        }
+    }
+    }
+}
+
 //Like forest_exchange_fv but coarse-fine takes the max (MOOD cascade index:
 //a demotion on either side of a level jump must be visible to both).
 static void fv_max_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,
@@ -956,6 +1024,8 @@ template void symmetrize_same_level_fv_flux<Hydro_ader>(BlockForest&, std::vecto
 template void symmetrize_same_level_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void correct_coarse_fine_fv_emf<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
+template void correct_coarse_fine_fv_emf<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
                                              FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,

@@ -1294,8 +1294,33 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++) blocks[b].mood_set_gscales(gs);
     }
 
+    //Flux AND edge-EMF consistency for the assembled cascade set. The flux half
+    //reuses enforce_fv_flux_consistency; the EMF half has no counterpart
+    //elsewhere, because the SD correct_coarse_fine_emf works on the SD edge
+    //arrays that MOOD rebuilds on the FV lattice and then never corrected.
+    //Without it the assembled EMF is multi-valued at a level jump and the CT
+    //update stops being divergence-free there.
+    void enforce_fv_emf_consistency(){
+        if constexpr (!is_mhd) return;
+        if(forest.max_level()==0) return;
+        //Diagnostic A/B, same spirit as SPD_NO_PACK / SPD_NO_DEREFINE: skipping
+        //this is what the cascade did before the correction existed.
+        static const bool off = getenv("SPD_NO_FV_EMF")!=nullptr;
+        if(off) return;
+        for(int dim=0; dim<3; dim++)
+            if(cfg.active[dim]) correct_coarse_fine_fv_emf(forest, blocks, dim);
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
+        //3D mixed-level MOOD needs the genuine line-average of the edge EMF along
+        //the edge direction, which correct_coarse_fine_fv_emf does not implement.
+        //Refuse rather than run a silently non-divergence-free cascade.
+        if(forest.max_level()>0 && cfg.active[_z_]){
+            if(Master) cout<<"ERROR: MHD MOOD on a mixed-level mesh is 2D-only for now "
+                             "(the 3D coarse-fine edge-EMF restriction is not implemented)"<<endl;
+            exit(1);
+        }
         for(int b=0;b<nblocks;b++) blocks[b].mood_begin();
         Exchange_fv_field(&Block::U_old_fv);
         for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo();
@@ -1309,6 +1334,7 @@ struct Mesh : public PhysicsModule {
             //FallbackAMRScheme.mood_loop does with _enforce_flux_consistency().
             for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
             enforce_fv_flux_consistency();
+            enforce_fv_emf_consistency();
             int demoted = 0;
             for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect();
             #ifdef MPI
@@ -1319,6 +1345,7 @@ struct Mesh : public PhysicsModule {
         }
         for(int b=0;b<nblocks;b++) blocks[b].mood_assemble();
         enforce_fv_flux_consistency();
+        enforce_fv_emf_consistency();
         for(int b=0;b<nblocks;b++) blocks[b].mood_commit_assembled();
         //Interior face-B sync is safe only on uniform meshes; mixed-level
         //uses ghost exchange instead (EMF correction owns CF telescoping).

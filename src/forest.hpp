@@ -152,6 +152,9 @@ template<typename Block>
 void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Block>&, int dim);
+
+template<typename Block>
+void correct_coarse_fine_fv_emf(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void symmetrize_same_level_fv_flux(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
