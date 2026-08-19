@@ -148,6 +148,11 @@ void forest_sync_face_B(BlockForest&, std::vector<Block>&,
                         SD_Solution Block::*, int dim);
 template<typename Block>
 void correct_coarse_fine_flux(BlockForest&, std::vector<Block>&, int dim);
+//Transfer-matrix selection, shared so the batched SD gather picks exactly what
+//the per-block forest_exchange_sd picks (they must agree bitwise).
+Matrix prolong_mat_for(const SD_Solution& U, int dim);
+Matrix restrict_mat_for(const SD_Solution& U, int dim);
+
 template<typename Block>
 void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>

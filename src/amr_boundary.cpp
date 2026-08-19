@@ -97,13 +97,13 @@ static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
 }
 
 //Pick SP or FP transfer matrices from the transverse point count of U.
-static Matrix prolong_mat_for(const SD_Solution& U, int dim){
+Matrix prolong_mat_for(const SD_Solution& U, int dim){
     int nt = (dim==_x_ ? U.ny : (dim==_y_ ? U.nx : U.nx));
     //Inactive transverse dims report n=1; prefer SP matrices then.
     if(nt == (int)amr_P_fp.extent(1)) return amr_P_fp;
     return amr_P;
 }
-static Matrix restrict_mat_for(const SD_Solution& U, int dim){
+Matrix restrict_mat_for(const SD_Solution& U, int dim){
     int nt = (dim==_x_ ? U.ny : (dim==_y_ ? U.nx : U.nx));
     if(nt == (int)amr_RF_fp.extent(0)) return amr_RF_fp;
     return amr_RF;

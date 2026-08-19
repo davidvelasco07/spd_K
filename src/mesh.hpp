@@ -1051,11 +1051,114 @@ struct Mesh : public PhysicsModule {
                     forest_exchange_fv_same(forest, blocks, member, dim);
     }
 
+    //All relations of one SD field for one direction, as batched gathers over the
+    //same transaction tables the flux points use. This is forest_exchange_sd's
+    //work with the per-block loop removed: that loop was 45.5% of the fenced
+    //mixed-level MHD advance, all of it in the face-B exchange, which runs twice
+    //a step over every leaf.
+    //
+    //The semantics line up exactly, which is why the fp gathers can be reused
+    //verbatim: forest_exchange_sd with cf_prolong=true does copy_face_to_ghost on
+    //BOTH the coarser and the finer side, i.e. a pure ghost fill. (The
+    //set_interface_flux variant that also writes the shared interior face belongs
+    //to forest_sync_face_B, a different function -- do not conflate them.)
+    //
+    //Matrices come from prolong_mat_for / restrict_mat_for on the pack view, not
+    //the bare amr_P / amr_RF that gather_all_fp passes: the per-block path selects
+    //them per array, and face B is one of the arrays where the choice differs.
+    //cf_prolong must be true here: the cf_prolong=false variant mirrors the
+    //coarse-fine ghosts instead of transferring them, and mirror_face_to_ghost has
+    //no batched form. Exchange_sd_field keeps that case on the per-block path, so
+    //the edge-EMF exchange (Exchange_E_mhd, 15.1%) is not covered yet.
+    void gather_all_sd(SD_Solution& P, SD_Solution Block::*member, int dim,
+                       bool cf_prolong){
+        (void)member;
+        for(int side=0; side<2; side++){
+            gather_fp_same(P, xt_[dim][side].recv, xt_[dim][side].send,
+                           xt_[dim][side].n, dim, side);
+            if(cf_prolong){
+                gather_fp_coarser(P, xtco_[dim][side].recv, xtco_[dim][side].send,
+                                  xtco_[dim][side].sub, xtco_[dim][side].n,
+                                  dim, side, prolong_mat_for(P, dim));
+                gather_fp_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                                xtfi_[dim][side].sub, xtfi_[dim][side].n,
+                                dim, side, restrict_mat_for(P, dim));
+            }
+            for(int ib : forest.face_groups[dim][side].bc_ib)
+                apply_domain_bc_fp(blocks[ib].*member, dim, side);
+        }
+        //SPD_BREAK_SDGATHER=1 perturbs one entry, which validates the comparison
+        //itself: unless this makes Exchange_sd_check report a difference, the check
+        //is blind and its "agreement" means nothing. Two weaker controls were tried
+        //first and BOTH passed for the wrong reason -- omitting the same-level
+        //write is invisible because the exchange runs twice a step and the ghosts
+        //already hold the right values, and gathering from the opposite side turns
+        //out to be a no-op on an all-same face table.
+        //Done with a 0-D deep_copy rather than a device lambda: nvcc cannot
+        //generate its stub for a __device__ lambda inside a member function that
+        //also takes a pointer-to-member parameter (it compiles on the host build
+        //and fails only under CUDA, which is a bad way to find out).
+        if(getenv("SPD_BREAK_SDGATHER")){
+            auto sv = Kokkos::subview(P.Vector,0,0,0,0,0,0,0,0);
+            double v = 0.0;
+            Kokkos::deep_copy(v, sv);
+            v += 1.0;
+            Kokkos::deep_copy(sv, v);
+        }
+    }
+
+    //SPD_EXCHANGE_CHECK=1: run both implementations from the same pre-state and
+    //report the first element where they disagree, the forest path being the
+    //reference. Same harness the FV and fp exchanges are checked with.
+    void Exchange_sd_check(SD_Solution& P, SD_Solution Block::*member, int dim,
+                           bool cf_prolong){
+        SD_Vector pre("sdchk_pre", P.Vector.layout());
+        SD_Vector packed("sdchk_pk", P.Vector.layout());
+        Kokkos::deep_copy(pre, P.Vector);
+        gather_all_sd(P, member, dim, cf_prolong);
+        Kokkos::deep_copy(packed, P.Vector);
+        Kokkos::deep_copy(P.Vector, pre);
+        forest_exchange_sd(forest, blocks, member, dim, cf_prolong);
+        //Direct max-diff, always printed: report_exchange_diff has a report cap
+        //the fp exchange consumes first, so relying on it here reports nothing
+        //whether the gather is right or wrong.
+        {
+            auto a = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), P.Vector);
+            auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), packed);
+            double worst = 0.0; long nbad = 0;
+            for(size_t i0=0;i0<a.extent(0);i0++)
+            for(size_t i1=0;i1<a.extent(1);i1++)
+            for(size_t i2=0;i2<a.extent(2);i2++)
+            for(size_t i3=0;i3<a.extent(3);i3++)
+            for(size_t i4=0;i4<a.extent(4);i4++)
+            for(size_t i5=0;i5<a.extent(5);i5++)
+            for(size_t i6=0;i6<a.extent(6);i6++)
+            for(size_t i7=0;i7<a.extent(7);i7++){
+                double d = fabs(a(i0,i1,i2,i3,i4,i5,i6,i7)-b(i0,i1,i2,i3,i4,i5,i6,i7));
+                if(d>0){ nbad++; worst = worst>d?worst:d; }
+            }
+            if(Master)
+                std::cout<<"[sdchk] dim="<<dim<<" step="<<this->n_step
+                         <<"  differing="<<nbad<<"  max|forest-batched|="<<worst<<std::endl;
+        }
+    }
+
     void Exchange_sd_field(SD_Solution Block::*member, int dim,
-                           bool cf_prolong=true){
+                           bool cf_prolong=true, SD_Solution* packed=nullptr){
         if(!cfg.active[dim]) return;
         if(nblocks<=1 && forest.max_level()==0) return;
         if(forest.max_level()>0){
+            //A field with a whole-pack view goes through the tables; one without
+            //still takes the per-block forest path.
+            //SPD_NO_SD_GATHER=1 forces the per-block forest path for SD fields
+            //alone, so the batched gather can be A/B'd without also switching the
+            //fp and FV exchanges the way SPD_OLD_XCHG does.
+            static const bool no_sd_gather = getenv("SPD_NO_SD_GATHER")!=nullptr;
+            if(new_xchg() && packed && cf_prolong && !no_sd_gather){
+                if(exchange_check()) Exchange_sd_check(*packed, member, dim, cf_prolong);
+                else                 gather_all_sd(*packed, member, dim, cf_prolong);
+                return;
+            }
             forest_exchange_sd(forest, blocks, member, dim, cf_prolong);
             return;
         }
@@ -1398,10 +1501,10 @@ struct Mesh : public PhysicsModule {
     //Writes only ghost faces — does not overwrite CT-owned interior faces.
     void Exchange_face_B_mhd(){
         if constexpr (!is_mhd) return;
-        Exchange_sd_field(&Block::Bx_fp_x, _x_, true);
-        Exchange_sd_field(&Block::By_fp_y, _y_, true);
+        Exchange_sd_field(&Block::Bx_fp_x, _x_, true, &pv.Bx_fp_x);
+        Exchange_sd_field(&Block::By_fp_y, _y_, true, &pv.By_fp_y);
         if(cfg.active[_z_])
-            Exchange_sd_field(&Block::Bz_fp_z, _z_, true);
+            Exchange_sd_field(&Block::Bz_fp_z, _z_, true, &pv.Bz_fp_z);
     }
 
     //Global NAD scales for mood_nad_scale=grange|gcfl. The reduction is over the
