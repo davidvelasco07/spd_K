@@ -56,6 +56,8 @@ extern void mhd_compute_E(SD_Solution E, SD_Solution W_sp,
 extern void mhd_E_riemann_solver(SD_Solution E, int dim, int v_index);
 extern void mhd_B_to_U(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
                        SD_Solution Tx, SD_Solution Ty, SD_Solution Tz, Matrix fp_to_sp);
+extern void mhd_B_to_U_b(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
+                         Matrix fp_to_sp);
 extern void mhd_compute_B_sp_from_fp(SD_Solution Bcc, SD_Solution Bx, SD_Solution By,
                                      SD_Solution Bz, Matrix fp_to_sp);
 

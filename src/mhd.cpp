@@ -1187,34 +1187,22 @@ void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
 
 // Interpolate a single-var face field (fp along `dim`) to solution points, writing
 // into var-row `brow` of the (8-var) conservative array U.
+//Project the staggered face field onto one conserved row of the fp state.
+//
+//This used to take a HOST round trip under CUDA: pull all of U and all of B to a
+//mirror, do the work on the host, push the whole U mirror back -- per block, per
+//direction, per call. 01a2913 fixed the correctness half of that (the push had no
+//matching pull, so every other variable came back as whatever the fresh mirror
+//held, and MHD produced a zero/NaN state from t=0 on CUDA while the CPU suite
+//stayed green). The cost half remained, and it was the single largest phase of
+//the mixed-level MHD advance: 33.7% of the fenced time on a 352-leaf AMR mesh.
+//
+//The device kernel writes ONLY row brow, in place, so it cannot disturb the other
+//variables -- which is what made the mirror dangerous in the first place. One
+//kernel, both backends, no mirrors.
 static void project_face_to_row(SD_Solution U, int brow, SD_Solution B, Matrix fp_to_sp, int dim){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
     int q=mhd_choose(dim,B.nx,B.ny,B.nz);
-#ifdef KOKKOS_ENABLE_CUDA
-    Matrix_h Fh = setup_mirror(fp_to_sp);
-    setup_pull(fp_to_sp, Fh);
-    SD_Vector_h Uh = Kokkos::create_mirror_view(U.Vector);
-    SD_Vector_h Bh = Kokkos::create_mirror_view(B.Vector);
-    //Pull U before touching it. This kernel writes ONE row (brow) but the
-    //deep_copy below pushes the WHOLE mirror back, so without this every other
-    //variable is overwritten with whatever the fresh mirror held. The #else
-    //path writes U in place and is unaffected, which is why the suite has
-    //always been green on CPU while MHD produced a zero/NaN state from t=0 on
-    //CUDA: W_sp lost rho/v/p here, then cons_to_prim_cv divided by rho = 0.
-    Kokkos::deep_copy(Uh, U.Vector);
-    Kokkos::deep_copy(Bh, B.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        int nid[3];
-        double u=0;
-        int id=mhd_choose(dim,ii,jj,kk);
-        for(int ll=0;ll<q;ll++){
-            mhd_indices_n(nid,kk,jj,ii,ll,dim);
-            u += Bh(0,0,k,j,i,NODE)*Fh(id,ll);
-        }
-        Uh(0,brow,k,j,i,kk,jj,ii)=u;
-    });
-    Kokkos::deep_copy(U.Vector, Uh);
-#else
     SD_Vector Vu = U.Vector;
     SD_Vector Vb = B.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
@@ -1227,7 +1215,35 @@ static void project_face_to_row(SD_Solution U, int brow, SD_Solution B, Matrix f
         }
         Vu(0,brow,k,j,i,kk,jj,ii)=u;
     });
-#endif
+}
+
+//Pack-wide form: one launch over every block.
+static void project_face_to_row_b(SD_Solution U, int brow, SD_Solution B,
+                                  Matrix fp_to_sp, int dim){
+    int nb=U.nb;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    int q=mhd_choose(dim,B.nx,B.ny,B.nz);
+    int nau=U.n_ader, nab=B.n_ader;
+    SD_Vector Vu = U.Vector;
+    SD_Vector Vb = B.Vector;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        int nid[3];
+        double u=0;
+        int id=mhd_choose(dim,ii,jj,kk);
+        for(int ll=0;ll<q;ll++){
+            mhd_indices_n(nid,kk,jj,ii,ll,dim);
+            u += Vb(b*nab+0,0,k,j,i,NODE)*fp_to_sp(id,ll);
+        }
+        Vu(b*nau+0,brow,k,j,i,kk,jj,ii)=u;
+    }, "project_face_to_row_b");
+}
+
+void mhd_B_to_U_b(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
+                  Matrix fp_to_sp){
+    if(cfg.active[_x_]) project_face_to_row_b(U,_mbx_,Bx,fp_to_sp,_x_);
+    if(cfg.active[_y_]) project_face_to_row_b(U,_mby_,By,fp_to_sp,_y_);
+    if(cfg.active[_z_]) project_face_to_row_b(U,_mbz_,Bz,fp_to_sp,_z_);
 }
 
 void mhd_B_to_U(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,

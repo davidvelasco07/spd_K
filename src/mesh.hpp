@@ -1459,14 +1459,14 @@ struct Mesh : public PhysicsModule {
     //(11.1x) while the same sweep on CPU was flat, so it is pure launch dispatch.
     //SPD_NO_MHD_BATCH=1 restores the per-block path; the two must agree bitwise.
     //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
-    //32 Riemann_Solver. SPD_MHD_BATCH_MASK
+    //32 Riemann_Solver, 64 B_to_U. SPD_MHD_BATCH_MASK
     //selects which are batched, which is how a mismatch against the per-block path
     //gets bisected to one phase instead of guessed at.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 63;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 127;
         return (mask & phase) != 0;
     }
 
@@ -1710,10 +1710,14 @@ struct Mesh : public PhysicsModule {
         if(forest.max_level()>0){
             { PHASE("xchg/Exchange_face_B"); Exchange_face_B_mhd(); }
             PHASE("sd/B_to_U");
-            for(int b=0;b<nblocks;b++)
-                mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
-                           blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_, blocks[b].Tz_,
-                           blocks[b].fp_to_sp);
+            if(mhd_batched(64))
+                mhd_B_to_U_b(pv.U_sp, pv.Bx_fp_x, pv.By_fp_y, pv.Bz_fp_z,
+                             blocks[0].fp_to_sp);
+            else
+                for(int b=0;b<nblocks;b++)
+                    mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
+                               blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
+                               blocks[b].Tz_, blocks[b].fp_to_sp);
         }
         { PHASE("sd/Riemann_Solver");
           if(mhd_batched(32)) MHD_Riemann_Solver_batched();

@@ -1,3 +1,5 @@
+#include <map>
+#include <string>
 #include "spd_k.hpp"
 #include "forest.hpp"
 #include <type_traits>
@@ -37,15 +39,60 @@ void fv_sub_bits_d(int sub, int dim, int actx, int acty, int actz,
     }
 }
 
+struct ScratchKey {
+    std::string nm; int na, nv, Nz, Ny, Nx, nz, ny, nx;
+    bool operator<(const ScratchKey& o) const {
+        if(nm!=o.nm) return nm<o.nm;
+        if(na!=o.na) return na<o.na;
+        if(nv!=o.nv) return nv<o.nv;
+        if(Nz!=o.Nz) return Nz<o.Nz;
+        if(Ny!=o.Ny) return Ny<o.Ny;
+        if(Nx!=o.Nx) return Nx<o.Nx;
+        if(nz!=o.nz) return nz<o.nz;
+        if(ny!=o.ny) return ny<o.ny;
+        return nx<o.nx;
+    }
+};
+static std::map<ScratchKey, SD_Vector>* scratch_pool = nullptr;
+
+//Scratch buffer shaped like `ref`.
+//
+//This used to Kokkos::resize a fresh View on EVERY call, i.e. one allocation per
+//coarse-fine pair per exchange, and the face-B exchange alone runs twice a step.
+//That is the same View-init churn that dominated the hydro regrid path (b4acfcc:
+//over half of all kernel launches were View inits). Cache the allocation instead,
+//keyed by name and shape: every call site holds exactly one scratch at a time and
+//releases it before the next iteration, so a per-name buffer is never aliased.
+//
+//The deep_copy to zero is deliberate, not leftover: resize on a
+//default-constructed View zero-initialises, and the callers that do NOT deep_copy
+//the coarse state in first rely on that for whatever the transfer does not write.
+//Keeping the zero makes the reuse bit-identical to the allocation it replaces.
 static SD_Solution make_scratch_like(const SD_Solution& ref, const char* name){
+    if(!scratch_pool){
+        scratch_pool = new std::map<ScratchKey, SD_Vector>();
+        //The pool holds device Views. A function-local static would be destroyed
+        //AFTER Kokkos::finalize, which Kokkos reports as a late deallocation and
+        //turns into a non-zero exit -- the suite saw "command failed" on two MHD
+        //configs whose physics was perfectly fine. Release it inside finalize,
+        //the same way main.cpp resets its global operator matrices.
+        Kokkos::push_finalize_hook([](){ delete scratch_pool; scratch_pool = nullptr; });
+    }
+    ScratchKey key{name, ref.n_ader, ref.n_var, ref.Nz, ref.Ny, ref.Nx,
+                   ref.nz, ref.ny, ref.nx};
+    auto it = scratch_pool->find(key);
+    if(it == scratch_pool->end())
+        it = scratch_pool->emplace(key, SD_Vector(name, ref.n_ader, ref.n_var,
+                                                  ref.Nz, ref.Ny, ref.Nx,
+                                                  ref.nz, ref.ny, ref.nx)).first;
     SD_Solution s;
     s.n_ader = ref.n_ader;
     s.n_var = ref.n_var;
     s.Nx = ref.Nx; s.Ny = ref.Ny; s.Nz = ref.Nz;
     s.nx = ref.nx; s.ny = ref.ny; s.nz = ref.nz;
     snprintf(s.label, sizeof(s.label), "%s", name);
-    Kokkos::resize(s.Vector, ref.n_ader, ref.n_var, ref.Nz, ref.Ny, ref.Nx,
-                   ref.nz, ref.ny, ref.nx);
+    s.Vector = it->second;
+    Kokkos::deep_copy(s.Vector, 0.0);
     return s;
 }
 
@@ -950,19 +997,24 @@ void correct_coarse_fine_fv_emf(BlockForest& forest, std::vector<Block>& blocks,
                 const int m    = Nt/2;
                 //m+1 coarse edges over this half; coarse edge r sits on fine
                 //edge 2r of the neighbour (its cells are half as wide).
-                for(int r=0; r<=m; r++){
-                    const int cj = base + r;
-                    const int fj = lo_t + 2*r;
-                    const int ci = (dim==_x_) ? cface : cj;
-                    const int cJ = (dim==_x_) ? cj    : cface;
-                    const int fi = (dim==_x_) ? fface : fj;
-                    const int fJ = (dim==_x_) ? fj    : fface;
-                    auto Cv=C.Vector; auto Fv=F.Vector;
-                    Kokkos::parallel_for("cf_fv_emf", flat_range(0,flat_total(1)),
-                        KOKKOS_LAMBDA(const unsigned){
-                            Cv(0,0,cJ,ci) = Fv(0,0,fJ,fi);
-                        });
-                }
+                //
+                //One kernel over the whole run of r, not one per r. It was
+                //written as a launch PER EDGE POINT, which measured 11.5% of the
+                //fenced advance on a 352-leaf AMR mesh -- thousands of launches
+                //of a single scalar copy each, twice per step.
+                const int xn = (dim==_x_);
+                auto Cv=C.Vector; auto Fv=F.Vector;
+                Kokkos::parallel_for("cf_fv_emf", flat_range(0,flat_total(m+1)),
+                    KOKKOS_LAMBDA(const unsigned rr){
+                        const int r  = (int)rr;
+                        const int cj = base + r;
+                        const int fj = lo_t + 2*r;
+                        const int ci = xn ? cface : cj;
+                        const int cJ = xn ? cj    : cface;
+                        const int fi = xn ? fface : fj;
+                        const int fJ = xn ? fj    : fface;
+                        Cv(0,0,cJ,ci) = Fv(0,0,fJ,fi);
+                    });
             }
         }
     }
