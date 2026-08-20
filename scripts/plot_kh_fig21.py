@@ -17,6 +17,7 @@ import re
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.colors import LogNorm
 import numpy as np
 
 from plot_kh import load_rho, last_output
@@ -53,6 +54,10 @@ def main():
     ap.add_argument("--scheme", required=True, help="label, e.g. 'MUSCL'")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tlabel", default="1.2")
+    ap.add_argument("--dmin", type=float, default=1e-6,
+                    help="floor of the log difference scale")
+    ap.add_argument("--dmax", type=float, default=1.0,
+                    help="ceiling of the log difference scale")
     args = ap.parse_args()
 
     f_uni, f_amr = last_output(args.uniform), last_output(args.amr)
@@ -77,14 +82,20 @@ def main():
         ax.set_title(name, fontsize=11)
         plt.colorbar(im, ax=ax, fraction=0.046, label=r"$\rho$")
 
-    lim = max(float(np.nanpercentile(np.abs(frac), 99.5)), 1e-12)
-    im = axes[1, 0].imshow(frac, origin="lower", extent=ext, cmap="RdBu_r",
-                           vmin=-lim, vmax=lim, interpolation="nearest")
+    # Log scale on |difference|, as the paper draws this panel: the error spans
+    # several decades and lives in thin filaments, so a linear diverging scale
+    # shows the roll edges and hides everything else. Fixed decades by default so
+    # that two of these figures (e.g. spd_K and AthenaK) are directly comparable;
+    # override with --dmin/--dmax.
+    adiff = np.abs(frac)
+    im = axes[1, 0].imshow(np.maximum(adiff, args.dmin), origin="lower", extent=ext,
+                           cmap="inferno", norm=LogNorm(vmin=args.dmin, vmax=args.dmax),
+                           interpolation="nearest")
     axes[1, 0].set_title(
-        f"fractional difference in $\\rho$ (AMR $-$ uniform)\n"
-        f"max |.| = {np.abs(frac).max():.3f}, rms = {frac.std():.4f}", fontsize=11)
+        f"|fractional difference| in $\\rho$ (AMR $-$ uniform)\n"
+        f"max = {adiff.max():.3f}, rms = {frac.std():.4f}", fontsize=11)
     plt.colorbar(im, ax=axes[1, 0], fraction=0.046,
-                 label=r"$(\rho_{\rm AMR}-\rho_{\rm uni})/\rho_{\rm uni}$")
+                 label=r"$|\rho_{\rm AMR}-\rho_{\rm uni}|/\rho_{\rm uni}$")
 
     ax = axes[1, 1]
     if blocks:
