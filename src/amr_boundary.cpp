@@ -963,6 +963,10 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
 //exactly what keeps the assembled EMF single-valued across a level jump, which
 //is what makes the cascade's CT update divergence-free there.
 //
+//It is not the whole story at a CORNER of a refined patch: this writes into the
+//blocks that share a FACE with a fine block, and one more block touches that
+//corner point. See spread_fv_emf_corners_b below, which finishes the job.
+//
 //3D needs the genuine line-average along the edge direction and is NOT done
 //here; Mesh guards against reaching it (see MHD_MOOD_update).
 template<typename Block>
@@ -1019,6 +1023,47 @@ void correct_coarse_fine_fv_emf(BlockForest& forest, std::vector<Block>& blocks,
         }
     }
     }
+}
+
+//Patch-corner spread for the cascade's FV-lattice edge EMF (2D: Ez only).
+//
+//correct_coarse_fine_fv_emf above injects the coincident fine value over the
+//whole face a coarse block shares with finer neighbours -- the two END points
+//of that face included, since they are edge points like any other. At a CORNER
+//of a refined patch that leaves one block out: the DIAGONAL coarse block
+//touches the same corner point but shares a face with no fine block, so it
+//keeps its own value while both of its coarse neighbours now carry the fine
+//one. Flux telescoping over the faces BETWEEN them then breaks at that one end
+//point -- which is what the cf_flux gate's same-level control measures at
+//2.21e-04 with the correction ON, on exactly the 16 of 88 pairs that terminate
+//on a patch corner. Nothing is wrong with the value; it is in three of the four
+//blocks that share the point.
+//
+//The quantity being made single-valued is a POINT value of Ez, so this is a
+//copy: no restriction matrix, no quadrature, nothing to get wrong but the two
+//indices. Mesh::build_emf_corner_table groups every block corner by its index
+//on the FINEST level's block lattice -- integer shifts, so blocks at different
+//levels that touch a point land in the same group with no tolerance involved --
+//and for each group spanning more than one level it hands the finest block's
+//value to the coarser ones. That covers a patch corner, an L-shaped patch's
+//corner and a three-level corner with the same rule, which a walk over face
+//neighbours does not. It runs after BOTH face directions.
+//
+//One kernel over the whole table. A launch per corner would reintroduce exactly
+//what f089a35 had to undo in the face pass. Every (block, corner) belongs to
+//exactly one group and every group writes each of its blocks at most once, so no
+//two transactions touch the same slot and the order they run in does not matter.
+void spread_fv_emf_corners_b(FV_Solution E, IntVector tab, int ntr){
+    if(ntr <= 0) return;
+    const int nvar = E.n_var;
+    Kokkos::parallel_for("fv_emf_corner", flat_range(0,flat_total(ntr)),
+        KOKKOS_LAMBDA(const unsigned q){
+            const int t  = 6*(int)q;
+            const int sb = tab(t+0)*nvar, si = tab(t+1), sj = tab(t+2);
+            const int db = tab(t+3)*nvar, di = tab(t+4), dj = tab(t+5);
+            for(int var=0; var<nvar; var++)
+                E.Vector(db+var,0,dj,di) = E.Vector(sb+var,0,sj,si);
+        });
 }
 
 //Like forest_exchange_fv but coarse-fine takes the max (MOOD cascade index:

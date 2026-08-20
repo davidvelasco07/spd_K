@@ -233,6 +233,7 @@ struct Mesh : public PhysicsModule {
         build_pack_views();
         build_neighbor_tables();
         build_xchg_tables();
+        build_emf_corner_table();
     }
 
     //Per-block geometry that batched kernels need by block index: element
@@ -552,6 +553,101 @@ struct Mesh : public PhysicsModule {
             push_table(xt_[dim][side],   r,  s,  b);
             push_table(xtco_[dim][side], cr, cs, cb);
             push_table(xtfi_[dim][side], fr, fs, fb);
+        }
+    }
+
+    //--------------------------------------------------------------------------
+    //Patch-corner transactions for the cascade's FV-lattice edge EMF: 6 ints per
+    //entry, (src block, src i, src j, dst block, dst i, dst j). Pure topology,
+    //so it is built with the forest rather than per step. What it is FOR is in
+    //spread_fv_emf_corners_b (amr_boundary.cpp): the face correction leaves the
+    //corner point of a refined patch multi-valued in the one block that touches
+    //that point without sharing a face with any fine block.
+    struct EmfCornerTable { IntVector t; int n = 0; };
+    EmfCornerTable ect_;
+    //Corner groups that are not the ordinary two-level, four-block case: a
+    //corner where three levels meet, or more than four blocks at one point. The
+    //same rule handles them, but a mesh that produces them is worth knowing
+    //about, so the count is reported with the cf_flux line rather than left
+    //silent -- see the note at the test itself for what sits just past it.
+    int emf_corner_odd_ = 0;
+
+    void build_emf_corner_table(){
+        ect_ = EmfCornerTable{};
+        emf_corner_odd_ = 0;
+        if constexpr (!is_mhd) return;
+        else {
+        //E0z exists only under the MOOD cascade, and the face correction this
+        //completes is 2D-only (MHD_MOOD_update refuses 3D mixed levels).
+        if(!cfg.fallback || forest.max_level()==0 || cfg.active[_z_]) return;
+        GHOST_LOCALS;
+        const int Lmax = forest.max_level();
+        //Key: the corner's index on the FINEST level's block lattice. Two blocks
+        //at different levels that touch the same corner produce the same key by
+        //integer shift -- no coordinate comparison and no tolerance, which is
+        //what makes this independent of the arithmetic it is correcting. The
+        //fold is applied only where the domain really wraps: on a non-periodic
+        //side the high edge is NOT the low edge, and folding it would pair the
+        //two ends of the domain.
+        struct Touch { int ib, i, j, level; };
+        std::map<std::pair<long,long>, std::vector<Touch>> corners;
+        const long Nfx = (long)forest.N_base[_x_] << Lmax;
+        const long Nfy = (long)forest.N_base[_y_] << Lmax;
+        const bool wx = (forest.bc[_x_]==_periodic_), wy = (forest.bc[_y_]==_periodic_);
+        for(int ib=0; ib<nblocks; ib++){
+            const MeshBlock& b = forest.blocks[ib];
+            const int sh = Lmax - b.level;
+            //The same extents the face pass derives, from the same array.
+            SD_Solution S = blocks[ib].W_cv;
+            const int Ncx = (S.Nx-2*NGHx)*S.nx, Ncy = (S.Ny-2*NGHy)*S.ny;
+            for(int cy=0; cy<2; cy++)
+            for(int cx=0; cx<2; cx++){
+                long kx = (long)(b.logical[_x_]+cx) << sh;
+                long ky = (long)(b.logical[_y_]+cy) << sh;
+                if(wx) kx %= Nfx;
+                if(wy) ky %= Nfy;
+                corners[{kx,ky}].push_back({ib, cx ? sghx+Ncx : sghx,
+                                                cy ? sghy+Ncy : sghy, b.level});
+            }
+        }
+        std::vector<int> e;
+        for(const auto& kv : corners){
+            const std::vector<Touch>& v = kv.second;
+            int Lhi = -1; size_t src = 0;
+            for(size_t k=0; k<v.size(); k++)
+                if(v[k].level > Lhi){ Lhi = v[k].level; src = k; }
+            bool jump = false;
+            for(const Touch& t : v) if(t.level != Lhi) jump = true;
+            //All one level: the point is already single-valued (the gate's
+            //same-level control over faces carrying real flux is exactly 0), so
+            //there is nothing to spread and nothing to perturb.
+            if(!jump) continue;
+            //A corner spanning three levels at once is legal -- 2:1 balance
+            //constrains faces, not corners -- and the same rule handles it, but
+            //it is worth knowing when a mesh produces one, because the one case
+            //this construction genuinely cannot see lives next door: a block
+            //whose corner falls at the MIDPOINT of a coarser block's face is
+            //not a corner of that block, so it never joins its group. The face
+            //pass owns that point (it is an interior point of the coarse face
+            //line) and takes it from the face neighbour, which is the right
+            //value unless a third, finer level touches it diagonally.
+            int Llo = Lhi;
+            for(const Touch& t : v) Llo = std::min(Llo, t.level);
+            if(Lhi-Llo > 1 || v.size() > 4) emf_corner_odd_++;
+            for(size_t k=0; k<v.size(); k++){
+                //Blocks at the source's own level already agree with it bitwise;
+                //writing between them could only reorder round-off.
+                if(v[k].level == Lhi) continue;
+                e.push_back(v[src].ib); e.push_back(v[src].i); e.push_back(v[src].j);
+                e.push_back(v[k].ib);   e.push_back(v[k].i);   e.push_back(v[k].j);
+            }
+        }
+        if(e.empty()) return;
+        ect_.n = (int)e.size()/6;
+        ect_.t = IntVector("emf_corner", e.size());
+        auto h = setup_mirror(ect_.t);
+        for(size_t k=0; k<e.size(); k++) h(k)=e[k];
+        setup_push(ect_.t, h);
         }
     }
 
@@ -1581,6 +1677,11 @@ struct Mesh : public PhysicsModule {
         if(off) return;
         for(int dim=0; dim<3; dim++)
             if(cfg.active[dim]) correct_coarse_fine_fv_emf(forest, blocks, dim);
+        //After BOTH directions, because what this spreads into the diagonal
+        //block is the value the face pass wrote. SPD_NO_EMF_CORNER=1 is the A/B
+        //that decides whether a change in the gate came from here.
+        static const bool no_corner = getenv("SPD_NO_EMF_CORNER")!=nullptr;
+        if(!no_corner) spread_fv_emf_corners_b(pv.E0z, ect_.t, ect_.n);
     }
 
     //Batched MHD phases. The per-block loops they replace were the whole cost of
@@ -2432,6 +2533,12 @@ struct Mesh : public PhysicsModule {
                          <<" interfaces, "<<cf_bad<<" bad"
                          <<"  | same-level control = "<<sld
                          <<" over "<<n_same;
+                //The patch-corner spread that the same-level control exists
+                //to measure: how many corner points it makes single-valued, and
+                //how many of those are the unusual multi-level kind.
+                if(getenv("SPD_CF_VERBOSE")) std::cout<<"  | "<<ect_.n<<" emf corners";
+                if(emf_corner_odd_>0)
+                    std::cout<<"  | "<<emf_corner_odd_<<" multi-level corners";
                 //A negative drift is not a measurement: either this is the
                 //first output (the t=0 reference is only now being taken) or a
                 //regrid changed the interface set and the old reference no

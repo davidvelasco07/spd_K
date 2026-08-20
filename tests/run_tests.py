@@ -47,6 +47,11 @@ plus command-line overrides. Checks per configuration:
                    correction switched off. It must FAIL to telescope
                    (cf_flux_sensitive), which is what keeps the cf_flux gate
                    above from silently becoming vacuous
+  mhd_orszag_tang_smr_nocorner_2d : the same with only the PATCH-CORNER spread
+                   switched off (SPD_NO_EMF_CORNER=1). The coarse-fine drift
+                   stays clean there and the SAME-LEVEL control goes to 2.2e-04,
+                   so it is the negative control for the second half of
+                   check_cf_flux the way noemf_2d is for the first
 
 Every configuration is additionally gated on all dumps being finite, before
 any tolerance is applied.
@@ -615,6 +620,34 @@ CONFIGS = {
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
     },
+    "mhd_orszag_tang_smr_nocorner_2d": {
+        # NEGATIVE CONTROL for the same-level half of check_cf_flux, added with
+        # the patch-corner spread. Identical to mhd_orszag_tang_smr_fb_lvl1_2d
+        # with ONLY the corner spread off, so the coarse-fine drift stays at
+        # 1.4e-17 while the same-level control returns to what it was before the
+        # spread existed: the corner point of the patch is multi-valued in the
+        # coarse block diagonal to it, and the two coarse-coarse faces that
+        # terminate there stop telescoping.
+        #
+        # Measured 2026-08-19: spread on 1.39e-17, off 2.21e-04, with divb at
+        # 1.59e-12 in BOTH -- the same blindness that made divb useless for
+        # gating step 5 makes it useless here.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mhd/mood_force_level=1",
+                      "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
+                      "time/integrator=rk3", "time/tlim=0.01", "output/dt=0.005",
+                      "amr/max_level=1", "amr/adapt_interval=0",
+                      "refinement1/level=1", "refinement1/x1min=0.375",
+                      "refinement1/x1max=0.625", "refinement1/x2min=0.375",
+                      "refinement1/x2max=0.625"],
+        "env": {"SPD_NO_EMF_CORNER": "1"},
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "divb", "sl_flux_sensitive"],
+        "sl_floor": 1e-6,
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.01,
+    },
     "mhd_orszag_tang_amr_fb_2d": {
         # Dynamic AMR with the cascade live: regrid + face-B transfer + the
         # coarse-fine corrections all in one lane.
@@ -884,10 +917,20 @@ def check_cf_flux(stdout, limit):
     coarse-fine face -- exactly zero for a telescoping scheme -- plus the same
     measurement over SAME-level faces as a control on the instrument itself.
 
-    The same-level number is reported, not gated: it is a known, separate
-    incompleteness (the patch-corner edge value is not shared with the coarse
-    block diagonal to the patch), and pinning it here would make this check
-    fail for a reason that has nothing to do with the level jump.
+    The same-level number is GATED too, as of the patch-corner spread. It used
+    to be reported and not gated, because the corner point of a refined patch
+    was left multi-valued in the one coarse block that touches it without
+    sharing a face with any fine block -- 2.21e-04 on exactly the 16 of 88 OT
+    pairs that terminate on a patch corner, with the coarse-fine correction
+    itself working (1.4e-17). spread_fv_emf_corners_b hands that block the value
+    its two neighbours already took from the fine side, which brings the control
+    to 1.39e-17, i.e. to the same round-off as the coarse-fine number. Gating it
+    is what keeps that from silently coming back: SPD_NO_EMF_CORNER=1 restores
+    the old behaviour and must turn this red.
+
+    Note the negative control (SPD_NO_FV_EMF=1) has a CLEAN same-level number --
+    with nothing injected, nothing becomes multi-valued -- so the two halves of
+    this check fail in different configurations, not together.
     """
     vals = [float(v) for v in re.findall(
         r"CF flux drift = ([-\d.e+]+(?:inf)?)", stdout)]
@@ -907,6 +950,14 @@ def check_cf_flux(stdout, limit):
         return False, "no CF flux measurement with a t=0 reference"
     worst_same = max([v for v in same if v >= 0], default=-1.0)
     ok = np.isfinite(worst) and worst < limit
+    # The control is only gated where it was measured: a regrid resets its
+    # reference exactly as it resets the coarse-fine one, and -1 means "no
+    # measurement", not "no drift".
+    if ok and worst_same >= 0 and not (np.isfinite(worst_same) and worst_same < limit):
+        return False, (f"same-level control = {worst_same:.3e} exceeds the limit "
+                       f"{limit:.1e} while the coarse-fine drift is clean "
+                       f"({worst:.3e}): the patch-corner EMF value is "
+                       "multi-valued again")
     return ok, (f"CF flux drift = {worst:.3e} (limit {limit:.1e}); "
                 f"same-level control = {worst_same:.3e}")
 
@@ -929,6 +980,27 @@ def check_cf_flux_sensitive(stdout, floor):
     ok = worst > floor
     return ok, (f"correction OFF -> CF flux drift = {worst:.3e} "
                 f"(must exceed {floor:.1e}, else the paired gate is vacuous)")
+
+
+def check_sl_flux_sensitive(stdout, floor):
+    """Negative control for the same-level half of check_cf_flux.
+
+    The patch-corner spread is what brought the same-level control from 2.21e-04
+    to round-off, and check_cf_flux now gates it. That gate has the same way of
+    going quiet as the coarse-fine one: if the corner point stopped being
+    measured at all, the control would read clean and prove nothing. This config
+    switches the spread off (SPD_NO_EMF_CORNER=1) and requires the control to be
+    LARGE. It failing means the same-level gate has become vacuous, not that the
+    code regressed.
+    """
+    same = [float(v) for v in re.findall(
+        r"same-level control = ([-\d.e+]+(?:inf)?)", stdout)]
+    worst = max([v for v in same if v >= 0], default=-1.0)
+    if worst < 0:
+        return False, "no same-level control with a t=0 reference"
+    ok = worst > floor
+    return ok, (f"corner spread OFF -> same-level control = {worst:.3e} "
+                f"(must exceed {floor:.1e}, else the same-level gate is vacuous)")
 
 
 def check_mixed_levels(outdir, cfg):
@@ -1039,6 +1111,9 @@ def main():
             elif chk == "cf_flux_sensitive":
                 ok, msg = check_cf_flux_sensitive(stdout,
                                                   cfg.get("cf_floor", 1e-6))
+            elif chk == "sl_flux_sensitive":
+                ok, msg = check_sl_flux_sensitive(stdout,
+                                                 cfg.get("sl_floor", 1e-6))
             elif chk == "golden":
                 if args.skip_golden and not args.regen_goldens:
                     print(f"[SKIP] {name}: golden (skipped)")
