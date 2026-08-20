@@ -222,6 +222,11 @@ struct Mesh : public PhysicsModule {
         //the block count, so every array is reallocated with a new leading
         //extent and the old slices must not keep it alive.
         pack.reset(nblocks);
+        //Fenced per step: `amr/build_solvers` measured 826 ms PER REGRID at 600
+        //leaves (21.5 s of a 73 s fenced total) and is what makes the AMR lane's
+        //cost per cell-update degrade 34x over a run. Splitting it says which
+        //part -- constructing the block objects, or rebuilding the tables.
+        { STAGE("amr/bs_make_blocks");
         for(int ib=0; ib<nblocks; ib++){
             const MeshBlock& b = forest.blocks[ib];
             const BlockForest::BlockKey key = forest.block_key(ib);
@@ -238,12 +243,13 @@ struct Mesh : public PhysicsModule {
             geom_keys_.push_back(key);
             blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib], ib, run_ic));
         }
-        build_geometry_pack();
-        build_pack_views();
-        build_rk_pairs();
-        build_neighbor_tables();
-        build_xchg_tables();
-        build_emf_corner_table();
+        }
+        { STAGE("amr/bs_geom_pack");  build_geometry_pack(); }
+        { STAGE("amr/bs_pack_views"); build_pack_views(); }
+        { STAGE("amr/bs_rk_pairs");   build_rk_pairs(); }
+        { STAGE("amr/bs_nbr_tables"); build_neighbor_tables(); }
+        { STAGE("amr/bs_xchg_tables");build_xchg_tables(); }
+        { STAGE("amr/bs_emf_corner"); build_emf_corner_table(); }
     }
 
     //Per-block geometry that batched kernels need by block index: element

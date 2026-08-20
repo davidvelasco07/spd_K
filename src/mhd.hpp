@@ -305,16 +305,30 @@ struct MHD_ader : public PhysicsModule {
         alloc(U_ader_sp, "U_ader_sp",1,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         alloc(U_ader_fp_x, "U_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
         alloc(F_ader_fp_x, "F_ader_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,1);
-        BC_fp_x.init(X_dim,cfg.bc[_x_],1,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
+        //Each Boundaries::init allocates four Views and a Mesh-owned block never
+        //reads them: the only readers are apply_fp_boundaries and
+        //apply_E_boundaries, both guarded by standalone_, while Mesh drives
+        //ghosts through the batched transaction tables. At nine objects per block
+        //that was ~36 device allocations per block REBUILT ON EVERY REGRID --
+        //`amr/bs_make_blocks` measured 570 ms per regrid at ~600 leaves, 16.5 s
+        //of a 21.4 s amr/build_solvers, itself 23.5% of the run's fenced total.
+        //The standalone path and the unit tests still allocate them.
+        if(standalone) BC_fp_x.init(X_dim,cfg.bc[_x_],1,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
         alloc(U_ader_fp_y, "U_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
         alloc(F_ader_fp_y, "F_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
-        BC_fp_y.init(Y_dim,cfg.bc[_y_],1,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
+        if(standalone) BC_fp_y.init(Y_dim,cfg.bc[_y_],1,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
         alloc(U_ader_fp_z, "U_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
         alloc(F_ader_fp_z, "F_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
-        BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
-        UCT_fp_x.init("UCT_fp_x",1,NUCT,Z_dim,Y_dim,X_dim,0,0,1);
-        UCT_fp_y.init("UCT_fp_y",1,NUCT,Z_dim,Y_dim,X_dim,0,1,0);
-        UCT_fp_z.init("UCT_fp_z",1,NUCT,Z_dim,Y_dim,X_dim,1,0,0);
+        if(standalone) BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
+        //UCT face coefficients: three NUCT-variable SD arrays per block, read
+        //only under `use_uct`, which is hardwired false (the tree computes the
+        //four-state LLF corner EMF). Allocating them per block per regrid is pure
+        //cost; when UCT is wired in this becomes `if(standalone || use_uct)`.
+        if(use_uct || standalone){
+            UCT_fp_x.init("UCT_fp_x",1,NUCT,Z_dim,Y_dim,X_dim,0,0,1);
+            UCT_fp_y.init("UCT_fp_y",1,NUCT,Z_dim,Y_dim,X_dim,0,1,0);
+            UCT_fp_z.init("UCT_fp_z",1,NUCT,Z_dim,Y_dim,X_dim,1,0,0);
+        }
 
         alloc(Bx_fp_x, "Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
         alloc(By_fp_y, "By_fp_y",1,1,Z_dim,Y_dim,X_dim,0,1,0);
@@ -332,12 +346,12 @@ struct MHD_ader : public PhysicsModule {
         alloc(Ey_ep_zx, "Ey_ep_zx",1,NEMHD,Z_dim,Y_dim,X_dim,1,0,1);
         alloc(Ez_ep_xy, "Ez_ep_xy",1,NEMHD,Z_dim,Y_dim,X_dim,0,1,1);
 
-        BC_Ey_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_fp,Y_dim.n_sp,1);
-        BC_Ez_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_fp,1);
-        BC_Ex_ep_y.init(Y_dim,cfg.bc[_y_],1,NEMHD,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_fp,1,X_dim.n_sp);
-        BC_Ez_ep_y.init(Y_dim,cfg.bc[_y_],1,NEMHD,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_fp);
-        BC_Ex_ep_z.init(Z_dim,cfg.bc[_z_],1,NEMHD,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_fp,X_dim.n_sp);
-        BC_Ey_ep_z.init(Z_dim,cfg.bc[_z_],1,NEMHD,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
+        if(standalone) BC_Ey_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_fp,Y_dim.n_sp,1);
+        if(standalone) BC_Ez_ep_x.init(X_dim,cfg.bc[_x_],1,NEMHD,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_fp,1);
+        if(standalone) BC_Ex_ep_y.init(Y_dim,cfg.bc[_y_],1,NEMHD,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_fp,1,X_dim.n_sp);
+        if(standalone) BC_Ez_ep_y.init(Y_dim,cfg.bc[_y_],1,NEMHD,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_fp);
+        if(standalone) BC_Ex_ep_z.init(Z_dim,cfg.bc[_z_],1,NEMHD,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_fp,X_dim.n_sp);
+        if(standalone) BC_Ey_ep_z.init(Z_dim,cfg.bc[_z_],1,NEMHD,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_fp);
 
         if(cfg.fallback){
             alloc(U_old_fv, "U_old_fv",NMHD,Z_dim,Y_dim,X_dim,0,0,0);
@@ -351,12 +365,12 @@ struct MHD_ader : public PhysicsModule {
             alloc(det_new, "det_new",8,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(troubles, "troubles",1,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(cascade, "cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
-            BCu_x.init(X_dim,cfg.bc[_x_],NMHD,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
-            BCu_y.init(Y_dim,cfg.bc[_y_],NMHD,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
-            BCu_z.init(Z_dim,cfg.bc[_z_],NMHD,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
-            BCs_x.init(X_dim,cfg.bc[_x_],1,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
-            BCs_y.init(Y_dim,cfg.bc[_y_],1,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
-            BCs_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
+            if(standalone) BCu_x.init(X_dim,cfg.bc[_x_],NMHD,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
+            if(standalone) BCu_y.init(Y_dim,cfg.bc[_y_],NMHD,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
+            if(standalone) BCu_z.init(Z_dim,cfg.bc[_z_],NMHD,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
+            if(standalone) BCs_x.init(X_dim,cfg.bc[_x_],1,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
+            if(standalone) BCs_y.init(Y_dim,cfg.bc[_y_],1,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
+            if(standalone) BCs_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
 
             alloc(F0_x, "F0_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1); alloc(F1_x, "F1_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
             alloc(F2_x, "F2_x",NMHD,Z_dim,Y_dim,X_dim,0,0,1);
@@ -381,18 +395,18 @@ struct MHD_ader : public PhysicsModule {
             //Transverse halos for face B and the UCT coefficients (the edge
             //reconstruction is cell-centred transversally). FV_Boundaries are not
             //pack-allocated, so these keep .init().
-            BCb_x_y.init(Y_dim,cfg.bc[_y_],1,Bx_old.Nz,nGHy,Bx_old.Nx);
-            BCb_x_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Bx_old.Ny,Bx_old.Nx);
-            BCb_y_x.init(X_dim,cfg.bc[_x_],1,By_old.Nz,By_old.Ny,nGHx);
-            BCb_y_z.init(Z_dim,cfg.bc[_z_],1,nGHz,By_old.Ny,By_old.Nx);
-            BCb_z_x.init(X_dim,cfg.bc[_x_],1,Bz_old.Nz,Bz_old.Ny,nGHx);
-            BCb_z_y.init(Y_dim,cfg.bc[_y_],1,Bz_old.Nz,nGHy,Bz_old.Nx);
-            BCu_x_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_x.Nz,nGHy,UCT1_x.Nx);
-            BCu_x_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_x.Ny,UCT1_x.Nx);
-            BCu_y_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_y.Nz,UCT1_y.Ny,nGHx);
-            BCu_y_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_y.Ny,UCT1_y.Nx);
-            BCu_z_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_z.Nz,UCT1_z.Ny,nGHx);
-            BCu_z_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_z.Nz,nGHy,UCT1_z.Nx);
+            if(standalone) BCb_x_y.init(Y_dim,cfg.bc[_y_],1,Bx_old.Nz,nGHy,Bx_old.Nx);
+            if(standalone) BCb_x_z.init(Z_dim,cfg.bc[_z_],1,nGHz,Bx_old.Ny,Bx_old.Nx);
+            if(standalone) BCb_y_x.init(X_dim,cfg.bc[_x_],1,By_old.Nz,By_old.Ny,nGHx);
+            if(standalone) BCb_y_z.init(Z_dim,cfg.bc[_z_],1,nGHz,By_old.Ny,By_old.Nx);
+            if(standalone) BCb_z_x.init(X_dim,cfg.bc[_x_],1,Bz_old.Nz,Bz_old.Ny,nGHx);
+            if(standalone) BCb_z_y.init(Y_dim,cfg.bc[_y_],1,Bz_old.Nz,nGHy,Bz_old.Nx);
+            if(standalone) BCu_x_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_x.Nz,nGHy,UCT1_x.Nx);
+            if(standalone) BCu_x_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_x.Ny,UCT1_x.Nx);
+            if(standalone) BCu_y_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_y.Nz,UCT1_y.Ny,nGHx);
+            if(standalone) BCu_y_z.init(Z_dim,cfg.bc[_z_],NUCT,nGHz,UCT1_y.Ny,UCT1_y.Nx);
+            if(standalone) BCu_z_x.init(X_dim,cfg.bc[_x_],NUCT,UCT1_z.Nz,UCT1_z.Ny,nGHx);
+            if(standalone) BCu_z_y.init(Y_dim,cfg.bc[_y_],NUCT,UCT1_z.Nz,nGHy,UCT1_z.Nx);
             alloc(B_old_cv, "B_old_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
             alloc(B_new_cv, "B_new_cv",4,Z_dim,Y_dim,X_dim,0,0,0);
 

@@ -187,21 +187,77 @@ struct PackMeta {
 
 struct BlockPack {
     int nb = 1;            //number of meshblocks in the pack
+    int nb_cap = 0;        //meshblocks the ALLOCATION holds; see reset()
     bool active = false;   //false => callers allocate per-block as before
     std::map<std::string, SD_Vector> sd;
     std::map<std::string, FV_Vector> fv;
     std::map<std::string, PackMeta>  meta;
 
-    void reset(int n){ nb=n; active=true; sd.clear(); fv.clear(); meta.clear(); }
+    //THE REGRID COST WAS HERE. reset() used to clear the maps, so every pack
+    //array was freed and reallocated (Kokkos zero-fills on allocation) on every
+    //regrid: `amr/build_solvers` measured 826 ms per regrid at 600 leaves --
+    //21.5 s of a 73 s fenced total, and the AMR lane's cost per cell-update
+    //degraded 34x over a run as regrids became frequent, while AthenaK's stayed
+    //flat. Nothing about the DATA needs reallocating: every block of a pack has
+    //the same extents, so a mesh with fewer blocks than the allocation holds is
+    //the same arrays with a shorter block axis.
+    //
+    //So: allocate at a CAPACITY, and on regrid re-slice instead of reallocating.
+    //Arrays are only rebuilt when the mesh outgrows the capacity, and then with
+    //headroom so a growing mesh does not reallocate on every pass. The capacity
+    //is a high-water mark, which is what bounds the memory.
+    //
+    //SPD_NO_PACK_REUSE=1 restores the reallocating path (the A/B reference).
+    //SPD_PACK_REUSE_ZERO=1 reuses but zeroes on reuse, which separates "the
+    //reuse is wrong" from "something reads a slot the new mesh never wrote".
+    static bool no_reuse(){
+        static const bool v = getenv("SPD_NO_PACK_REUSE") != nullptr;
+        return v;
+    }
+    static bool reuse_zero(){
+        static const bool v = getenv("SPD_PACK_REUSE_ZERO") != nullptr;
+        return v;
+    }
 
-    //Allocate the pack on first request, then hand out block ib's slice.
+    void reset(int n){
+        active = true;
+        if(!no_reuse() && n <= nb_cap && !(sd.empty() && fv.empty())){
+            nb = n;
+            for(auto& kv : meta) kv.second.nb = n;   //views span n blocks now
+            if(reuse_zero()){
+                for(auto& kv : sd) Kokkos::deep_copy(kv.second, 0.0);
+                for(auto& kv : fv) Kokkos::deep_copy(kv.second, 0.0);
+            }
+            return;
+        }
+        nb = n;
+        //12.5% headroom: enough that a mesh growing block by block does not
+        //reallocate every time, small enough not to inflate the high-water mark.
+        nb_cap = n + n/8 + 1;
+        sd.clear(); fv.clear(); meta.clear();
+    }
+
+    //Allocate the pack on first request, then hand out block ib's slice. The
+    //allocation spans nb_cap blocks; meta.nb is the CURRENT count, which is what
+    //pack views hand to the kernels as their block-axis bound.
     SD_Vector sd_slice(const std::string& name, int ib, int nader, int nvar,
                        int Nz, int Ny, int Nx, int nz, int ny, int nx){
         auto it = sd.find(name);
         if(it == sd.end()){
             it = sd.emplace(name,
-                SD_Vector(name, nb*nader, nvar, Nz, Ny, Nx, nz, ny, nx)).first;
+                SD_Vector(name, nb_cap*nader, nvar, Nz, Ny, Nx, nz, ny, nx)).first;
             meta[name] = PackMeta{nb,nader,nvar,Nz,Ny,Nx,nz,ny,nx};
+        } else {
+            //A reused array must have the shape the caller now expects; every
+            //block of a pack shares extents, so a mismatch means the pack is
+            //being reused across a configuration change, which it cannot be.
+            const PackMeta& m = meta.at(name);
+            if(m.nader!=nader || m.nvar!=nvar || m.Nz!=Nz || m.Ny!=Ny || m.Nx!=Nx
+               || m.nz!=nz || m.ny!=ny || m.nx!=nx){
+                std::cout<<"ERROR: pack array '"<<name<<"' reused with a different"
+                         <<" shape; the pack cannot outlive an extent change"<<std::endl;
+                exit(1);
+            }
         }
         return Kokkos::subview(it->second,
             Kokkos::make_pair(ib*nader,(ib+1)*nader),
@@ -214,8 +270,15 @@ struct BlockPack {
         auto it = fv.find(name);
         if(it == fv.end()){
             it = fv.emplace(name,
-                FV_Vector(name, nb*nvar, Nz, Ny, Nx)).first;
+                FV_Vector(name, nb_cap*nvar, Nz, Ny, Nx)).first;
             meta[name] = PackMeta{nb,1,nvar,Nz,Ny,Nx,1,1,1};
+        } else {
+            const PackMeta& m = meta.at(name);
+            if(m.nvar!=nvar || m.Nz!=Nz || m.Ny!=Ny || m.Nx!=Nx){
+                std::cout<<"ERROR: pack array '"<<name<<"' reused with a different"
+                         <<" shape; the pack cannot outlive an extent change"<<std::endl;
+                exit(1);
+            }
         }
         return Kokkos::subview(it->second,
             Kokkos::make_pair(ib*nvar,(ib+1)*nvar),
