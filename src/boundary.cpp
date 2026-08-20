@@ -196,6 +196,58 @@ void sync_shared_face_sd(
     });
 }
 
+//The same shared-face identity as sync_shared_face_sd above, over the whole pack:
+//one launch per direction instead of one per BLOCK per direction.
+//
+//This was the last per-block host loop in the tree, and it was invisible to every
+//AMR profile because Mesh only calls it when max_level == 0. On a UNIFORM
+//multiblock mesh it dominated everything: fenced at 2048^2 in blocks of 16^2 it
+//was 2.465 s of a 3.166 s total (77.8%) against 0.044 s in blocks of 128^2 -- 56x
+//for the same total cells, from ~32k launches per stage at 16384 blocks.
+//
+//Both sides live in one pack, so the neighbour is a leading-axis offset rather
+//than a second array, and the per-block side type is read on the device from the
+//same typL table block_boundary_fv_b uses -- which is how the reference's
+//`if(typeL == _gradfree_) return;` survives batching: at a gradfree boundary the
+//block keeps its own face.
+void sync_shared_face_sd_b(SD_Solution U, IntVector nbrL, IntVector typL, int dim){
+    const int nb = U.nb;
+    if(nb <= 0) return;
+    const int Nx = dim==_x_ ? 1 : U.Nx;
+    const int Ny = dim==_y_ ? 1 : U.Ny;
+    const int Nz = dim==_z_ ? 1 : U.Nz;
+    const int px = dim==_x_ ? 1 : U.nx;
+    const int py = dim==_y_ ? 1 : U.ny;
+    const int pz = dim==_z_ ? 1 : U.nz;
+    const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    const int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    const int nader = U.n_ader, nvar = U.n_var;
+    //Negative control for the side-type skip, same idea as SPD_BREAK_SDGATHER:
+    //SPD_BREAK_SYNCB=1 copies across a gradfree boundary too. If a gradfree lane
+    //is bit-identical WITH this set, the A/B never exercised the early return and
+    //says nothing about it.
+    static const bool ignore_type = getenv("SPD_BREAK_SYNCB") != nullptr;
+    const int honour_type = ignore_type ? 0 : 1;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        if(honour_type && typL(b) == _gradfree_) return;
+        const int boff  = b*nader;
+        const int boffL = nbrL(b)*nader;
+        int Nid[3], nid[3];
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++){
+            //Source: the left neighbour's last active element, last point.
+            indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            const double v = U.Vector(boffL+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                                     nid[_z_],nid[_y_],nid[_x_]);
+            //Destination: my first active element, first point.
+            indices(Nid,nid,k,j,i,kk,jj,ii,1,0,dim);
+            U.Vector(boff+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],
+                                   nid[_z_],nid[_y_],nid[_x_]) = v;
+        }
+    }, "sync_shared_face_sd_b");
+}
+
 KOKKOS_INLINE_FUNCTION
 void fv_indices(int* N_id, int k, int j, int i, int l, int dim){
     //Returns the indeces according to the dimension

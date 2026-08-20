@@ -143,6 +143,9 @@ extern void symmetrize_same_level_fv_flux_b(FV_Solution, IntVector, IntVector,
 //the two sub-faces share; see the kernel.
 extern void correct_cf_fv_emf_b(FV_Solution, IntVector, IntVector, IntVector,
                                 IntVector, int, int, int, int, int, int);
+//Shared-face identity for the staggered field over the whole pack; the last
+//per-block host loop, and only reachable on a uniform mesh. See the kernel.
+extern void sync_shared_face_sd_b(SD_Solution, IntVector, IntVector, int);
 //Patch-corner spread for the cascade's FV-lattice edge EMF: one table entry
 //per corner point that the face correction leaves multi-valued.
 extern void spread_fv_emf_corners_b(FV_Solution, IntVector, int);

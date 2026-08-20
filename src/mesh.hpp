@@ -1825,6 +1825,18 @@ struct Mesh : public PhysicsModule {
     void Sync_face_B_mhd(){
         if constexpr (!is_mhd) return;
         if(nblocks<=1 && forest.max_level()==0) return;
+        //Batched: one launch per direction over the pack, mask bit 16384. The
+        //per-block loop below was the last one in the tree and it is 77.8% of a
+        //16^2-block uniform multiblock run; see sync_shared_face_sd_b. Only the
+        //uniform path is batched, which is also the only path Mesh reaches --
+        //MHD_MOOD_update and Advance_mhd both call this under max_level == 0.
+        if(forest.max_level()==0 && mhd_batched(16384) && nbrL_[_x_].size()>0){
+            sync_shared_face_sd_b(pv.Bx_fp_x, nbrL_[_x_], typL_[_x_], _x_);
+            sync_shared_face_sd_b(pv.By_fp_y, nbrL_[_y_], typL_[_y_], _y_);
+            if(cfg.active[_z_])
+                sync_shared_face_sd_b(pv.Bz_fp_z, nbrL_[_z_], typL_[_z_], _z_);
+            return;
+        }
         auto sync_same = [&](SD_Solution Block::*member, int dim){
             if(!cfg.active[dim]) return;
             if(forest.max_level()==0){
@@ -1921,7 +1933,8 @@ struct Mesh : public PhysicsModule {
     //bookkeeping tasks (save_state, copy_cons, cons_to_prim, combine, B_to_U,
     //compute_dt), 1024 mood/detect, 2048 cf/correct_cf_emf (the SD edge lattice),
     //4096 cf/enforce_fv_emf (the cascade's FV edge lattice), 8192 the pinned-level
-    //dead-work skip (NOT a batching, a whole-phase skip -- see pinned_level()).
+    //dead-work skip (NOT a batching, a whole-phase skip -- see pinned_level()),
+    //16384 sync/face_B (uniform meshes only).
     //SPD_MHD_BATCH_MASK selects which are batched, which is how a mismatch
     //against the per-block path gets bisected to one phase instead of guessed at.
     //Mind the arithmetic when picking one: 4095 leaves bit 2048 SET.
@@ -1966,7 +1979,7 @@ struct Mesh : public PhysicsModule {
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 16383;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 32767;
         return (mask & phase) != 0;
     }
 
