@@ -539,7 +539,38 @@ struct Hydro_ader : public PhysicsModule{
         Write(W_cv,n_output++);
     }
 
-    void copy_ader(SD_Solution U, SD_Solution U_ader){
+    //--------------------------------------------------------------------------
+    //SYSTEM HOOKS. Mesh calls these by one name for both systems, so a
+    //step-level task has no `if constexpr (is_hydro)` in it. That fork is how
+    //every batching regression got in: the hydro side was updated, the MHD side
+    //sat in the `else` of the same function, and nothing marked it as stale.
+    //Add a hook here and in MHD_ader rather than a branch in Mesh.
+    //--------------------------------------------------------------------------
+
+    //Primitives over a whole pack.
+    static void primitives_b(SD_Solution U, SD_Solution W){ compute_primitives(U,W); }
+
+    //CFL dt over a whole pack. No MPI reduction here -- Mesh::ComputeDt owns
+    //that for both systems.
+    static double dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
+        return compute_dt_b(W,hx,hy,hz,nu);
+    }
+
+    //State the RK integrator saves and recombines, as (saved, live) pack-array
+    //names. ONE list drives both TaskSaveState and TaskCombine, so the two
+    //cannot disagree about what the state is -- which for MHD they nearly did,
+    //each carrying its own four-line copy of the face-field list.
+    static constexpr std::array<std::pair<const char*,const char*>,1> rk_state(){
+        return {{{"U0_sp","U_sp"}}};
+    }
+
+    //Does the flux/EMF path read W_sp WITHIN a stage? MHD's compute_E does;
+    //hydro builds its fluxes from U directly. A scheme property, not duplication.
+    static constexpr bool prim_at_stage_start = false;
+
+    //STATIC: it reads only its arguments' extents, so it is a system hook like
+    //the ones above and Mesh can call it as Block::copy_ader for either system.
+    static void copy_ader(SD_Solution U, SD_Solution U_ader){
         ////indices: t,nvar,N,n
         int Nx = U.Nx;
         int Ny = U.Ny;

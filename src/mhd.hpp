@@ -637,6 +637,42 @@ struct MHD_ader : public PhysicsModule {
     //large p is. If that is ever shown to cap the achievable order, add the
     //PLUTO-style fourth-order correction (a Laplacian term in the conversion)
     //rather than going back to averaging the primitives.
+    //--------------------------------------------------------------------------
+    //SYSTEM HOOKS -- the counterparts of Hydro_ader's. See the comment there:
+    //Mesh calls these by one name for both systems so the step-level tasks carry
+    //no `if constexpr (is_hydro)`. Add a hook, not a branch.
+    //--------------------------------------------------------------------------
+
+    static void primitives_b(SD_Solution U, SD_Solution W){ mhd_compute_primitives_b(U,W); }
+
+    //MHD allocates U_ader_sp with n_ader = 1 (see the alloc below: it is RK-only),
+    //so broadcasting the state into the ADER stages is a straight copy.
+    //Hydro_ader::copy_ader is the general n_ader form; both are reached as
+    //Block::copy_ader.
+    static void copy_ader(SD_Solution U, SD_Solution U_ader){
+        Kokkos::deep_copy(U_ader.Vector, U.Vector);
+    }
+
+    //nu is hydro's viscosity; MHD has no viscous dt term. Mesh::ComputeDt owns
+    //the MPI reduction for both systems.
+    static double dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
+        (void)nu;
+        return mhd_compute_dt_b(W,hx,hy,hz);
+    }
+
+    //The RK state is the conserved volume state AND the staggered face field --
+    //miss the latter and the CT half of an RK stage is not restored.
+    static constexpr std::array<std::pair<const char*,const char*>,4> rk_state(){
+        return {{{"U0_sp","U_sp"},
+                 {"B0x_fp_x","Bx_fp_x"},
+                 {"B0y_fp_y","By_fp_y"},
+                 {"B0z_fp_z","Bz_fp_z"}}};
+    }
+
+    //compute_E reads W_sp inside the stage, so the primitives must be current at
+    //the top of one.
+    static constexpr bool prim_at_stage_start = true;
+
     void cons_to_prim_cv(){
         transform_sp_to_cv(U_sp, U_cv);
         mhd_compute_primitives(U_cv, W_cv);

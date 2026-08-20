@@ -231,6 +231,7 @@ struct Mesh : public PhysicsModule {
         }
         build_geometry_pack();
         build_pack_views();
+        build_rk_pairs();
         build_neighbor_tables();
         build_xchg_tables();
         build_emf_corner_table();
@@ -488,6 +489,23 @@ struct Mesh : public PhysicsModule {
     //the host re-deriving them per block per launch.
     IntVector nbrL_[3], nbrR_[3], typL_[3], typR_[3];
 
+    //Views for Block::rk_state(), resolved once per pack rather than per stage:
+    //the PackViews rationale applies -- the hot loop does no map lookups. Pairs
+    //are (saved, live).
+    std::vector<std::pair<SD_Solution,SD_Solution>> rk_pairs_;
+
+    void build_rk_pairs(){
+        rk_pairs_.clear();
+        //Only when the RK state is really used -- the same condition
+        //AssembleTasks registers TaskSaveState under -- because hydro allocates
+        //U0_sp for RK only, and asking the pack for a name it does not have is
+        //(correctly) fatal.
+        if(!(cfg.integrator==_integrator_rk_ || is_mhd)) return;
+        for(const auto& a : Block::rk_state())
+            rk_pairs_.emplace_back(sd_pack_view(pack, a.first),
+                                   sd_pack_view(pack, a.second));
+    }
+
     void build_neighbor_tables(){
         for(int dim=0; dim<3; dim++){
             nbrL_[dim] = IntVector("nbrL", nblocks);
@@ -587,14 +605,21 @@ struct Mesh : public PhysicsModule {
     //silent -- see the note at the test itself for what sits just past it.
     int emf_corner_odd_ = 0;
 
+    static bool no_emf_corner(){
+        static const bool v = getenv("SPD_NO_EMF_CORNER") != nullptr;
+        return v;
+    }
+
     void build_emf_corner_table(){
         ect_ = EmfCornerTable{};
         emf_corner_odd_ = 0;
         if constexpr (!is_mhd) return;
         else {
-        //E0z exists only under the MOOD cascade, and the face correction this
-        //completes is 2D-only (MHD_MOOD_update refuses 3D mixed levels).
-        if(!cfg.fallback || forest.max_level()==0 || cfg.active[_z_]) return;
+        //Pure topology, so it serves BOTH lattices: the cascade's E0z (under
+        //cfg.fallback) and the SD path's Ez_ep_xy (which exists either way). Do
+        //not gate it on cfg.fallback -- that left the SD corner unfixed. 2D only,
+        //matching both corrections (MHD_MOOD_update refuses 3D mixed levels).
+        if(forest.max_level()==0 || cfg.active[_z_]) return;
         GHOST_LOCALS;
         const int Lmax = forest.max_level();
         //Key: the corner's index on the FINEST level's block lattice. Two blocks
@@ -1695,8 +1720,7 @@ struct Mesh : public PhysicsModule {
         //After BOTH directions, because what this spreads into the diagonal
         //block is the value the face pass wrote. SPD_NO_EMF_CORNER=1 is the A/B
         //that decides whether a change in the gate came from here.
-        static const bool no_corner = getenv("SPD_NO_EMF_CORNER")!=nullptr;
-        if(!no_corner) spread_fv_emf_corners_b(pv.E0z, ect_.t, ect_.n);
+        if(!no_emf_corner()) spread_fv_emf_corners_b(pv.E0z, ect_.t, ect_.n);
     }
 
     //Batched MHD phases. The per-block loops they replace were the whole cost of
@@ -1802,6 +1826,15 @@ struct Mesh : public PhysicsModule {
     int MOOD_detect_batched(){
         if constexpr (!is_mhd) return 0;
         else {
+        //MHD_ader::mood_detect opens with exactly this guard, and the batched
+        //form MUST mirror it: at a pinned cascade level there is nothing to
+        //detect, and running the detection anyway writes U_new_fv, B_new_cv,
+        //troubles and cascade where the per-block path wrote nothing -- which
+        //changes the assembled flux. Missing it made the two paths differ on the
+        //p=0 dynamic AMR lane while every lane I had checked (all with detection
+        //LIVE) agreed. The mirror image of the trap in CLAUDE.md rule 2: check
+        //the feature both ON and OFF.
+        if(cfg.mood_force_level>=0) return 0;
         const bool az = cfg.active[_z_];
         auto& b0 = blocks[0];
         //mood_fluid_update(false)
@@ -2067,6 +2100,12 @@ struct Mesh : public PhysicsModule {
             PHASE("cf/correct_cf_emf");
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) correct_coarse_fine_emf(forest, blocks, dim);
+            //After BOTH directions, for the same reason as the cascade's version:
+            //correct_coarse_fine_emf writes the shared FACE and leaves the patch
+            //corner multi-valued in the block diagonal to it.
+            if constexpr (is_mhd)
+                if(!no_emf_corner())
+                    spread_sd_emf_corners_b(pv.Ez_ep_xy, ect_.t, ect_.n);
         }
         if(cfg.fallback) MHD_MOOD_update();
         else {
@@ -2169,22 +2208,19 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskSaveState(Driver* d, int stage){
-        //FENCED. These RK bookkeeping tasks were outside every PHASE scope, and
-        //on a mixed-level MHD mesh they are most of the step: the fenced total
-        //came to 2.5 s of a 20 s evolution, so the profile that said
-        //cf/correct_cf_emf is 66-72% was describing an eighth of the run.
-        PHASE("rk/save_state");
+        //FENCED, and system-agnostic: the state to save comes from
+        //Block::rk_state(), so this task does not know or care which system it is
+        //running. TaskCombine below walks the SAME list in reverse, which is what
+        //keeps a save and its recombination from disagreeing.
+        //
         //One copy per ARRAY over the whole pack, not one per block: the blocks'
         //views are slices of it, so this is the same bytes in one launch. The
         //per-block loop was 0.517 s of hydro's 0.771 s fenced total and 1.915 s
         //of MHD's 9.704 s (352 leaves, 109 steps).
+        PHASE("rk/save_state");
         if(rk_batched()){
-            Kokkos::deep_copy(pv.U0_sp.Vector, pv.U_sp.Vector);
-            if constexpr (is_mhd){
-                Kokkos::deep_copy(pv.B0x_fp_x.Vector, pv.Bx_fp_x.Vector);
-                Kokkos::deep_copy(pv.B0y_fp_y.Vector, pv.By_fp_y.Vector);
-                Kokkos::deep_copy(pv.B0z_fp_z.Vector, pv.Bz_fp_z.Vector);
-            }
+            for(const auto& q : rk_pairs_)
+                Kokkos::deep_copy(q.first.Vector, q.second.Vector);
             return TaskStatus::complete;
         }
         for(int b=0;b<nblocks;b++){
@@ -2202,11 +2238,19 @@ struct Mesh : public PhysicsModule {
         Region r("TaskCopyCons");
         PHASE("rk/copy_cons");
         sync_block_dt();
+        if(rk_batched()){
+            //copy_ader is general in n_ader and already spans the pack; for a
+            //one-stage (RK) system it is exactly the deep_copy the MHD branch
+            //used to do per block.
+            Block::copy_ader(pv.U_sp, pv.U_ader_sp);
+            //The one real difference between the systems here, named rather than
+            //branched on: MHD's compute_E reads W_sp inside the stage.
+            if constexpr (Block::prim_at_stage_start)
+                Block::primitives_b(pv.U_sp, pv.W_sp);
+            return TaskStatus::complete;
+        }
         if constexpr (is_hydro){
             blocks[0].copy_ader(pv.U_sp, pv.U_ader_sp);
-        } else if(rk_batched()){
-            Kokkos::deep_copy(pv.mhd_U_ader_sp.Vector, pv.U_sp.Vector);
-            mhd_compute_primitives_b(pv.U_sp, pv.W_sp);
         } else {
             for(int b=0;b<nblocks;b++){
                 Kokkos::deep_copy(blocks[b].U_ader_sp.Vector, blocks[b].U_sp.Vector);
@@ -2228,16 +2272,19 @@ struct Mesh : public PhysicsModule {
         PHASE("rk/combine");
         if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0){
             double a = d->rk_a[stage-1];
+            if(rk_batched()){
+                //The same Block::rk_state() list TaskSaveState walks, with the
+                //roles reversed: combine writes the live array from the saved
+                //one. combine_solution already takes a pack (nb = U.nb,
+                //sd_for_cells_b), which is how the hydro path always spanned
+                //every block in one launch while MHD called it per block, four
+                //times.
+                for(const auto& q : rk_pairs_)
+                    combine_solution(q.second, q.first, a);
+                return TaskStatus::complete;
+            }
             if constexpr (is_hydro){
                 combine_solution(pv.U_sp, pv.U0_sp, a);
-            } else if(rk_batched()){
-                //combine_solution already takes a pack (nb = U.nb, sd_for_cells_b),
-                //which is how the hydro call above spans every block in one
-                //launch; MHD was calling the same function per block, four times.
-                combine_solution(pv.U_sp,    pv.U0_sp,    a);
-                combine_solution(pv.Bx_fp_x, pv.B0x_fp_x, a);
-                combine_solution(pv.By_fp_y, pv.B0y_fp_y, a);
-                combine_solution(pv.Bz_fp_z, pv.B0z_fp_z, a);
             } else {
                 for(int b=0;b<nblocks;b++){
                     combine_solution(blocks[b].U_sp, blocks[b].U0_sp, a);
@@ -2270,17 +2317,19 @@ struct Mesh : public PhysicsModule {
     TaskStatus TaskConsToPrim(Driver* d, int stage){
         Region r("TaskConsToPrim");
         PHASE("rk/cons_to_prim");
+        if(rk_batched()){
+            //The two systems did the SAME three steps under different names:
+            //primitives at the solution points (W_sp feeds the AMR criteria),
+            //sp->cv, primitives on the cell averages. One spelling now.
+            Block::primitives_b(pv.U_sp, pv.W_sp);
+            transform_sp_to_cv_batched(pv.U_sp, pv.U_cv);
+            Block::primitives_b(pv.U_cv, pv.W_cv);
+            return TaskStatus::complete;
+        }
         if constexpr (is_hydro){
-            compute_primitives(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
+            compute_primitives(pv.U_sp, pv.W_sp);
             transform_sp_to_cv_batched(pv.U_sp, pv.U_cv);
             compute_primitives(pv.U_cv, pv.W_cv);
-        } else if(rk_batched()){
-            //cons_to_prim_cv() is transform_sp_to_cv + primitives on the CV
-            //array; both have whole-pack forms (transform_a_to_b takes a pack,
-            //as MOOD_begin_batched already uses it).
-            mhd_compute_primitives_b(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
-            transform_a_to_b(pv.U_sp, pv.U_cv, pv.T_sweep, blocks[0].sp_to_cv);
-            mhd_compute_primitives_b(pv.U_cv, pv.W_cv);
         } else {
             for(int b=0;b<nblocks;b++){
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
@@ -2303,14 +2352,18 @@ struct Mesh : public PhysicsModule {
         PHASE("rk/compute_dt");
         this->Dt = 1e300;
         bool diverged = false;
-        if constexpr (is_hydro){
-            //One launch for the whole pack: the block is an index in the
-            //reduction, not a host loop around it. On an AMR forest the loop
-            //cost one launch per leaf per step.
-            this->Dt = compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p, nu_);
+        if(rk_batched()){
+            //One launch for the whole pack, one name for both systems: the block
+            //is an index in the reduction, not a host loop around it. On an AMR
+            //forest the loop cost one launch per leaf per step -- and for MHD one
+            //MPI_Allreduce per leaf as well, which is why the reduction now lives
+            //here instead of inside the kernel wrapper.
+            this->Dt = Block::dt_b(pv.W_cv, hx_p, hy_p, hz_p, nu_);
+            if(!std::isfinite(this->Dt)) diverged = true;
             //SPD_DT_CHECK=1 cross-checks the packed reduction against the
-            //per-block loop it replaced.
-            if(getenv("SPD_DT_CHECK")){
+            //per-block loop it replaced (hydro only: MHD's per-block form
+            //reduces internally, so the two are not comparable term by term).
+            if constexpr (is_hydro) if(getenv("SPD_DT_CHECK")){
                 double ref = 1e300;
                 for(int b=0;b<nblocks;b++)
                     ref = std::min(ref, compute_dt(blocks[b].W_cv,
@@ -2320,11 +2373,8 @@ struct Mesh : public PhysicsModule {
                              <<std::setprecision(17)<<this->Dt<<" loop "<<ref
                              <<" nb "<<nblocks<<std::endl;
             }
-        } else if(rk_batched()){
-            //One reduction over the pack. The loop it replaces also did one
-            //MPI_Allreduce PER BLOCK.
-            this->Dt = mhd_compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p);
-            if(!std::isfinite(this->Dt)) diverged = true;
+        } else if constexpr (is_hydro){
+            this->Dt = compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p, nu_);
         } else {
             for(int b=0;b<nblocks;b++){
                 double db = mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h);
@@ -2332,6 +2382,17 @@ struct Mesh : public PhysicsModule {
                 this->Dt = std::min(this->Dt, db);
             }
         }
+        //ONE reduction for both systems, and for both paths. The per-block MHD
+        //loop below still reduces inside each call, so this is a min of minima
+        //there; hydro's packed kernel had NO reduction at all, which was a latent
+        //MPI bug (dt would not have been global).
+        #ifdef MPI
+        {
+            double g;
+            MPI_Allreduce(&this->Dt,&g,1,MPI_DOUBLE,MPI_MIN,Comm);
+            this->Dt = g;
+        }
+        #endif
         if(diverged || !std::isfinite(this->Dt)){
             if(Master)
                 std::cout<<std::endl<<"ERROR: non-finite dt at step "<<this->n_step

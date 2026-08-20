@@ -812,13 +812,10 @@ double mhd_compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz){
                 reduce = reduce < dt_min ? reduce : dt_min;
             }
         });
-    #ifdef MPI
-    double g;
-    MPI_Allreduce(&min_value,&g,1,MPI_DOUBLE,MPI_MIN,Comm);
-    return g;
-    #else
+    //NO MPI reduction here, deliberately: Mesh::ComputeDt reduces once for both
+    //systems. Hydro's compute_dt_b has never reduced internally, and a shared
+    //name for the two must not hide an asymmetry in what it means.
     return min_value;
-    #endif
 }
 
 //----------------------------------------------------------------------------------------

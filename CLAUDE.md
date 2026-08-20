@@ -35,13 +35,28 @@ Keep the per-block path and gate the batched one behind a switch:
 16 Fluxes_pre, 32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 RK
 bookkeeping, 1024 mood/detect; default 2047), `SPD_NO_MHD_BATCH`,
 `SPD_NO_RK_BATCH`, `SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both
-paths. Verify on a **mixed-level** mesh, and **with the feature that exercises the
-code actually turned on** — the batched detection segfaulted on the first run with
-`mood_force_level=-1` and looked perfect at `=1`, where detection returns
-immediately.
+paths. Verify on a **mixed-level** mesh, and with the feature that exercises the
+code turned **both ON and OFF** — both directions have already bitten:
+
+- ON: the batched detection segfaulted on its first run at `mood_force_level=-1`
+  and looked perfect at `=1`, where detection returns immediately.
+- OFF: the same batched detection then differed from the per-block path at
+  `mood_force_level=1`, because it was missing `mood_detect`'s opening
+  `if(cfg.mood_force_level>=0) return 0;` and ran the whole detection where the
+  reference did nothing. Every lane checked at the time had detection live.
+
+A batched path must reproduce its reference's EARLY RETURNS, not just its
+arithmetic.
 
 A single mask bit per phase is what lets a mismatch be bisected to one phase in
-one run instead of guessed at.
+one run instead of guessed at. Mind the arithmetic when you pick a mask: 1023
+leaves bit 512 SET, so `SPD_MHD_BATCH_MASK=1023` is a detection-only A/B, not a
+per-block reference. The full per-block reference is `SPD_MHD_BATCH_MASK=511`
+plus `SPD_NO_RK_BATCH=1`.
+
+**A comparison over zero files reports IDENTICAL.** Count the dumps and say
+"CHECK VOID" when there are none — a label with a space in it once broke the run
+directories and both sides hashed nothing.
 
 ## 3. If it is not inside a `PHASE()` scope, it does not exist
 

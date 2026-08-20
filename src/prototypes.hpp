@@ -141,6 +141,8 @@ extern void symmetrize_same_level_fv_flux_b(FV_Solution, IntVector, IntVector,
 //Patch-corner spread for the cascade's FV-lattice edge EMF: one table entry
 //per corner point that the face correction leaves multi-valued.
 extern void spread_fv_emf_corners_b(FV_Solution, IntVector, int);
+//The same spread on the SD edge-point lattice, off the same table.
+extern void spread_sd_emf_corners_b(SD_Solution, IntVector, int);
 //Whole-pack MHD primitives and dt: the block is a kernel axis, not a host loop.
 extern void mhd_compute_primitives_b(SD_Solution, SD_Solution);
 extern double mhd_compute_dt_b(SD_Solution, Vector, Vector, Vector);

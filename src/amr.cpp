@@ -1220,18 +1220,49 @@ void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
     Matrix_h rf_fp("rf_fp", m, 2*m);
     for(int j=0;j<m;j++)
     for(int b=0;b<2*m;b++) rf_fp(j,b)=0.0;
-    //Simple, stable restrict: each coarse fp node is the average of the two
-    //fine-half interpolants at that node (rows of the Lagrange R from
-    //unique-ish fine nodes). Equivalent to 0.5*(P_left^+ + P_right^+)
-    //evaluated back — implement as equal-weight gathering of the matching
-    //fine indices after mapping through the half.
+    //Restrict each coarse fp node from the fine half that CONTAINS it, by
+    //evaluating that half's Lagrange interpolant at the node's position inside
+    //the half. This is the partner of amr_P_fp above (which interpolates the
+    //coarse polynomial at the fine nodes) and it is exact for polynomials up to
+    //degree m-1, not just for constants.
     //
-    //Practical Stage-4 choice that preserves constants: coarse[j] =
-    //0.5*(fine_left[j] + fine_right[j]). Encoded as R(j, j)=R(j, m+j)=0.5.
+    //At every node where a fine node COINCIDES with the coarse one the weights
+    //collapse to injection on their own, with no special case: x_fp[0]=0 maps to
+    //the left half's node 0, x_fp[m-1]=1 to the right half's node m-1, and (odd p
+    //only, where the GL set contains 0.5) x_fp=0.5 to the left half's node m-1.
+    //Those coincident nodes are the whole point: the flux points are NOT
+    //equispaced -- flux_points() gives {0, GL nodes of order p, 1} -- so the
+    //interior coarse nodes have no fine twin and must be interpolated, while the
+    //two ENDPOINTS are exactly the nodes coarse-fine flux telescoping pins.
+    //
+    //WHAT THIS REPLACES, and why it was wrong: rf_fp(j,j)=rf_fp(j,m+j)=0.5, i.e.
+    //coarse[j] = 0.5*(fine_left[j] + fine_right[j]). Those two fine nodes sit at
+    //0.5*x_fp[j] and 0.5*x_fp[j]+0.5 -- two DIFFERENT physical points, and neither
+    //is the coarse node at x_fp[j] unless x_fp[j]=0. Its own comment called it a
+    //"practical Stage-4 choice that preserves constants": it does, and nothing
+    //more. At j=0 it averaged the shared endpoint with the coarse midpoint value,
+    //which is precisely the identity telescoping needs, so the SD path drifted
+    //2.54e-03 on every coarse-fine interface where the FV cascade path drifts
+    //1e-17.
+    //
+    //AthenaK does the same thing in its own idiom (src/bvals/flux_correct_fc.cpp):
+    //average ALONG the edge direction, take the coincident value ACROSS it --
+    //never an average of two different transverse points.
+    double* xh_l = malloc_host<double>(m);
+    double* xh_r = malloc_host<double>(m);
+    for(int j=0;j<m;j++){ xh_l[j] = 2.0*x_fp[j]; xh_r[j] = 2.0*x_fp[j]-1.0; }
+    Matrix_h Lfp_l("rf_fp_left", m, m), Lfp_r("rf_fp_right", m, m);
+    lagrange_matrix(Lfp_l, x_fp, xh_l, m, m);
+    lagrange_matrix(Lfp_r, x_fp, xh_r, m, m);
     for(int j=0;j<m;j++){
-        rf_fp(j, j)   = 0.5;
-        rf_fp(j, m+j) = 0.5;
+        //<= 0.5 puts the coarse midpoint (odd p) on the LEFT half's right
+        //endpoint: injection either way, and the two halves share that node.
+        if(x_fp[j] <= 0.5 + 1e-12)
+            for(int i=0;i<m;i++) rf_fp(j, i)   = Lfp_l(j,i);
+        else
+            for(int i=0;i<m;i++) rf_fp(j, m+i) = Lfp_r(j,i);
     }
+    free(xh_l); free(xh_r);
     amr_RF_fp = Matrix("amr_RF_fp", m, 2*m);
     Kokkos::deep_copy(amr_RF_fp, rf_fp);
     free(x_fine_fp);

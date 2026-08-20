@@ -1066,6 +1066,46 @@ void spread_fv_emf_corners_b(FV_Solution E, IntVector tab, int ntr){
         });
 }
 
+//The same patch-corner spread, on the SD EDGE-POINT lattice (Ez_ep_xy).
+//
+//correct_coarse_fine_emf has exactly the shape spread_fv_emf_corners_b was
+//written for: it restricts the fine trace onto the coarse block's shared FACE
+//and stops there, so the corner point of a refined patch stays multi-valued in
+//the coarse block DIAGONAL to it. Measured on the SD lane after amr_RF_fp was
+//fixed: coarse-fine drift 1.04e-17 (was 2.54e-03) while the same-level control
+//sat at 3.17e-07 on exactly 16 of 88 pairs -- the same count and the same block
+//pairs the FV lattice showed before its corner spread.
+//
+//Same table (Mesh::build_emf_corner_table): it is pure topology, so one table
+//serves both lattices. The table stores the corner as an FV face index, which is
+//either the low edge (nGH) or the high one, and that single bit is all this needs
+//to place the corner on the SD (element, point) lattice: low is (first active
+//element, point 0), high is (last active element, point q-1) -- the convention
+//cf_face_flux uses for a staggered direction.
+void spread_sd_emf_corners_b(SD_Solution E, IntVector tab, int ntr){
+    if(ntr <= 0) return;
+    GHOST_LOCALS;
+    const int nader=E.n_ader, nvar=E.n_var;
+    const int Nex = E.Nx - 2*NGHx, Ney = E.Ny - 2*NGHy;
+    const int qx = E.nx, qy = E.ny;
+    const int gx=ghx, gy=ghy, kz=ghz, sgx=sghx, sgy=sghy;
+    Kokkos::parallel_for("sd_emf_corner", flat_range(0,flat_total(ntr)),
+        KOKKOS_LAMBDA(const unsigned q){
+            const int t  = 6*(int)q;
+            const int sb = tab(t+0), si = tab(t+1), sj = tab(t+2);
+            const int db = tab(t+3), di = tab(t+4), dj = tab(t+5);
+            const int sxh=(si>sgx), syh=(sj>sgy), dxh=(di>sgx), dyh=(dj>sgy);
+            const int sex = sxh ? gx+Nex-1 : gx, spx = sxh ? qx-1 : 0;
+            const int sey = syh ? gy+Ney-1 : gy, spy = syh ? qy-1 : 0;
+            const int dex = dxh ? gx+Nex-1 : gx, dpx = dxh ? qx-1 : 0;
+            const int dey = dyh ? gy+Ney-1 : gy, dpy = dyh ? qy-1 : 0;
+            for(int t_id=0; t_id<nader; t_id++)
+            for(int var=0; var<nvar; var++)
+                E.Vector(db*nader+t_id,var,kz,dey,dex,0,dpy,dpx) =
+                E.Vector(sb*nader+t_id,var,kz,sey,sex,0,spy,spx);
+        });
+}
+
 //Like forest_exchange_fv but coarse-fine takes the max (MOOD cascade index:
 //a demotion on either side of a level jump must be visible to both).
 static void fv_max_finer(FV_Solution U, FV_Solution& f0, FV_Solution& f1,

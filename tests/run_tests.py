@@ -552,6 +552,8 @@ CONFIGS = {
     "mhd_field_loop_smr_2d": {
         # Statically refined patch; field loop crosses the coarse-fine boundary.
         # Pure SD CT + EMF correction (short tlim: longer advection still drifts).
+        # cf_flux GATED as of the amr_RF_fp fix + the SD corner spread: this lane
+        # went 8.5e-04 -> 1.37e-18, same-level control 1.64e-03 -> exactly 0.
         "input": "inputs/field_loop.athinput",
         "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
                       "meshblock/nx1=4", "meshblock/nx2=4",
@@ -561,12 +563,18 @@ CONFIGS = {
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
         "ndim": 2,
-        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.02,
     },
     "mhd_orszag_tang_smr_2d": {
         # Short OT with static refinement (no fallback): mass + divb + mixed levels
+        # + cf_flux. GATED AS OF THE amr_RF_fp FIX: this SD lane used to drift
+        # 2.54e-03 on every coarse-fine interface (same-level 1.63e-03), which is
+        # why it was left ungated -- the note in the handoff said quarantining it
+        # "would turn 4 green configs red". Restricting each coarse fp node from
+        # the fine half that CONTAINS it, plus the SD patch-corner spread, takes it
+        # to 1.39e-17 with the same-level control at exactly 0.
         "input": "inputs/orszag_tang.athinput",
         "overrides": ["job/fallback=false", "mesh/nx1=16", "mesh/nx2=16",
                       "mesh/nx3=1", "meshblock/nx1=4", "meshblock/nx2=4",
@@ -576,7 +584,7 @@ CONFIGS = {
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
         "ndim": 2,
-        "checks": ["mixed_levels", "mass_strict", "divb"],
+        "checks": ["mixed_levels", "mass_strict", "divb", "cf_flux"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.01,
     },
