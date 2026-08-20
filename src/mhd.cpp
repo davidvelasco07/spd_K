@@ -791,6 +791,68 @@ double interp_cc_to_edge(const SD_Solution& W, int pvar,
 // E: edge array (8-var), staggered at the edge points of `dim`.
 // B1,B2: transverse face fields (single-var). Bcc unused (kept for signature symmetry).
 // W_sp: cell-centered primitives (8-var).
+//Pack-wide twin of interp_cc_to_edge. `boff` offsets the leading (block x ader)
+//axis; the local loop counters are renamed off `a`/`b` because `b` is the block.
+KOKKOS_INLINE_FUNCTION
+double interp_cc_to_edge_b(const SD_Solution& W, int boff, int pvar,
+                           int k,int j,int i,int kk,int jj,int ii,
+                           int dim, const Matrix& sp_to_fp, int q){
+    double v=0;
+    for(int q2=0;q2<q;q2++) for(int q1=0;q1<q;q1++){
+        double s;
+        if(dim==_z_)      s = W.Vector(boff,pvar,k,j,i,kk,q2,q1)*sp_to_fp(jj,q2)*sp_to_fp(ii,q1);
+        else if(dim==_y_) s = W.Vector(boff,pvar,k,j,i,q2,jj,q1)*sp_to_fp(kk,q2)*sp_to_fp(ii,q1);
+        else              s = W.Vector(boff,pvar,k,j,i,q2,q1,ii)*sp_to_fp(kk,q2)*sp_to_fp(jj,q1);
+        v += s;
+    }
+    return v;
+}
+
+//Pack-wide form of mhd_compute_E.
+void mhd_compute_E_b(SD_Solution E, SD_Solution W_sp,
+                     SD_Solution B1, SD_Solution B2, SD_Solution Bcc,
+                     Matrix sp_to_fp, int dim){
+    int nb=E.nb;
+    int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz, px=E.nx, py=E.ny, pz=E.nz;
+    int q=W_sp.nx;
+    int v1_var = mhd_choose(dim,_mvy_,_mvz_,_mvx_);
+    int v2_var = mhd_choose(dim,_mvz_,_mvx_,_mvy_);
+    int b3_var = mhd_choose(dim,_mbx_,_mby_,_mbz_);
+    int qsp = W_sp.nx;
+    int nae=E.n_ader, naw=W_sp.n_ader, na1=B1.n_ader, na2=B2.n_ader;
+    (void)Bcc;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        const int eo=b*nae, wo=b*naw, o1=b*na1, o2=b*na2;
+        double b1=0,b2=0;
+        for(int ll=0;ll<q;ll++){
+            if(dim==_z_){
+                b1 += B1.Vector(o1,0,k,j,i,kk,ll,ii)*sp_to_fp(jj,ll);
+                b2 += B2.Vector(o2,0,k,j,i,kk,jj,ll)*sp_to_fp(ii,ll);
+            } else if(dim==_y_){
+                b1 += B1.Vector(o1,0,k,j,i,kk,jj,ll)*sp_to_fp(ii,ll);
+                b2 += B2.Vector(o2,0,k,j,i,ll,jj,ii)*sp_to_fp(kk,ll);
+            } else {
+                b1 += B1.Vector(o1,0,k,j,i,ll,jj,ii)*sp_to_fp(kk,ll);
+                b2 += B2.Vector(o2,0,k,j,i,kk,ll,ii)*sp_to_fp(jj,ll);
+            }
+        }
+        double v1  = interp_cc_to_edge_b(W_sp,wo,v1_var,k,j,i,kk,jj,ii,dim,sp_to_fp,qsp);
+        double v2  = interp_cc_to_edge_b(W_sp,wo,v2_var,k,j,i,kk,jj,ii,dim,sp_to_fp,qsp);
+        double B3  = interp_cc_to_edge_b(W_sp,wo,b3_var,k,j,i,kk,jj,ii,dim,sp_to_fp,qsp);
+        double rho = interp_cc_to_edge_b(W_sp,wo,_mrho_,k,j,i,kk,jj,ii,dim,sp_to_fp,qsp);
+        double prs = interp_cc_to_edge_b(W_sp,wo,_mprs_,k,j,i,kk,jj,ii,dim,sp_to_fp,qsp);
+        E.Vector(eo,0,k,j,i,kk,jj,ii) = v1*b2 - v2*b1;
+        E.Vector(eo,1,k,j,i,kk,jj,ii) = b1;
+        E.Vector(eo,2,k,j,i,kk,jj,ii) = b2;
+        E.Vector(eo,3,k,j,i,kk,jj,ii) = v1;
+        E.Vector(eo,4,k,j,i,kk,jj,ii) = v2;
+        E.Vector(eo,5,k,j,i,kk,jj,ii) = B3;
+        E.Vector(eo,6,k,j,i,kk,jj,ii) = rho;
+        E.Vector(eo,7,k,j,i,kk,jj,ii) = prs;
+    }, "mhd_compute_E_b");
+}
+
 void mhd_compute_E(SD_Solution E, SD_Solution W_sp,
                    SD_Solution B1, SD_Solution B2, SD_Solution Bcc,
                    Matrix sp_to_fp, int dim){
@@ -958,6 +1020,30 @@ void mhd_E_riemann(double* es, const double* eL, const double* eR,
         mhd_E_riemann_hlld(es,eL,eR,v_index,gm);
     else
         mhd_E_riemann_llf(es,eL,eR,v_index,gm);
+}
+
+//Pack-wide form of mhd_E_riemann_solver.
+void mhd_E_riemann_solver_b(SD_Solution E, int dim, int v_index){
+    int nb=E.nb;
+    int Nx=E.Nx-(dim==_x_), Ny=E.Ny-(dim==_y_), Nz=E.Nz-(dim==_z_);
+    int px=dim==_x_?1:E.nx, py=dim==_y_?1:E.ny, pz=dim==_z_?1:E.nz;
+    int n=mhd_choose(dim,E.nx,E.ny,E.nz);
+    int nader=E.n_ader;
+    double gm=cfg.gamma;
+    int rsolver=cfg.rsolver;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(nader);
+        int NidL[3],nidL[3],NidR[3],nidR[3];
+        int l=mhd_choose(dim,i,j,k);
+        mhd_indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,dim);
+        mhd_indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,0  ,dim);
+        int t_id=0;
+        double eL[NEMHD], eR[NEMHD], es[NEMHD];
+        for(int var=0;var<NEMHD;var++){ eL[var]=E.Vector(INDICES_L_B); eR[var]=E.Vector(INDICES_R_B); }
+        mhd_E_riemann(es,eL,eR,v_index,gm,rsolver);
+        for(int var=0;var<NEMHD;var++){ E.Vector(INDICES_L_B)=es[var]; E.Vector(INDICES_R_B)=es[var]; }
+    }, "mhd_E_riemann_solver_b");
 }
 
 void mhd_E_riemann_solver(SD_Solution E, int dim, int v_index){

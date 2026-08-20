@@ -1589,14 +1589,14 @@ struct Mesh : public PhysicsModule {
     //(11.1x) while the same sweep on CPU was flat, so it is pure launch dispatch.
     //SPD_NO_MHD_BATCH=1 restores the per-block path; the two must agree bitwise.
     //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
-    //32 Riemann_Solver, 64 B_to_U. SPD_MHD_BATCH_MASK
+    //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann. SPD_MHD_BATCH_MASK
     //selects which are batched, which is how a mismatch against the per-block path
     //gets bisected to one phase instead of guessed at.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 127;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 511;
         return (mask & phase) != 0;
     }
 
@@ -1762,6 +1762,39 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //Compute_E and E_Riemann_Solver over the whole pack, in the same order the
+    //per-block MHD_ader methods use.
+    void MHD_Compute_E_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        auto& b0 = blocks[0];
+        mhd_compute_E_b(pv.Ez_ep_xy, pv.W_sp, pv.Bx_fp_x, pv.By_fp_y, pv.U_sp,
+                        b0.sp_to_fp, _z_);
+        if(az){
+            mhd_compute_E_b(pv.Ey_ep_zx, pv.W_sp, pv.Bz_fp_z, pv.Bx_fp_x, pv.U_sp,
+                            b0.sp_to_fp, _y_);
+            mhd_compute_E_b(pv.Ex_ep_yz, pv.W_sp, pv.By_fp_y, pv.Bz_fp_z, pv.U_sp,
+                            b0.sp_to_fp, _x_);
+        }
+        }
+    }
+
+    void MHD_E_Riemann_batched(){
+        if constexpr (!is_mhd) return;
+        else {
+        const bool az = cfg.active[_z_];
+        if(az) mhd_E_riemann_solver_b(pv.Ey_ep_zx, _x_, 4);
+        mhd_E_riemann_solver_b(pv.Ez_ep_xy, _x_, 3);
+        mhd_E_riemann_solver_b(pv.Ez_ep_xy, _y_, 4);
+        if(az){
+            mhd_E_riemann_solver_b(pv.Ex_ep_yz, _y_, 3);
+            mhd_E_riemann_solver_b(pv.Ex_ep_yz, _z_, 4);
+            mhd_E_riemann_solver_b(pv.Ey_ep_zx, _z_, 3);
+        }
+        }
+    }
+
     void MHD_MOOD_update(){
         if constexpr (!is_mhd) return;
         //3D mixed-level MOOD needs the genuine line-average of the edge EMF along
@@ -1858,10 +1891,12 @@ struct Mesh : public PhysicsModule {
                 if(cfg.active[dim]) correct_cf_flux_dim(dim);
         }
         { PHASE("sd/Compute_E");
-          for(int b=0;b<nblocks;b++) blocks[b].Compute_E(); }
+          if(mhd_batched(128)) MHD_Compute_E_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].Compute_E(); }
         { PHASE("xchg/Exchange_E"); Exchange_E_mhd(); }
         { PHASE("sd/E_Riemann_Solver");
-          for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver(); }
+          if(mhd_batched(256)) MHD_E_Riemann_batched();
+          else for(int b=0;b<nblocks;b++) blocks[b].E_Riemann_Solver(); }
         if(forest.max_level()>0){
             PHASE("cf/correct_cf_emf");
             for(int dim=0; dim<3; dim++)
