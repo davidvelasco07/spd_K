@@ -227,6 +227,11 @@ struct Mesh : public PhysicsModule {
         //cost per cell-update degrade 34x over a run. Splitting it says which
         //part -- constructing the block objects, or rebuilding the tables.
         { STAGE("amr/bs_make_blocks");
+        //Reserve first: a Block holds ~100 View handles, so growing the vector
+        //by push_back copies (and refcount-bumps) every block already in it,
+        //log(nblocks) times per regrid.
+        blocks.reserve(nblocks); Xd.reserve(nblocks); Yd.reserve(nblocks);
+        Zd.reserve(nblocks); geom_keys_.reserve(nblocks);
         for(int ib=0; ib<nblocks; ib++){
             const MeshBlock& b = forest.blocks[ib];
             const BlockForest::BlockKey key = forest.block_key(ib);
@@ -3056,8 +3061,30 @@ struct Mesh : public PhysicsModule {
         SD_Solution Bx, By, Bz;
     };
 
+    //The pre-regrid snapshot, in its own pack that SURVIVES regrids (the main
+    //pack is torn down by build_block_solvers, which is why this cannot share
+    //it). Otherwise it is four device allocations per block per regrid --
+    //`amr/snapshot` measured 67 ms per regrid at ~600 leaves.
+    //
+    //Only the "snap" tag is packed. The "pro" temporaries in
+    //transfer_from_snapshot are ping-ponged (`cur = tmp`) inside one block's
+    //prolongation chain, so handing them the same slice twice would alias the
+    //source and destination of prolongate_snap.
+    BlockPack snap_pack_;
+
     BlockSnap make_empty_snap(int ib, const char* tag){
         BlockSnap s;
+        const bool packed = (std::string(tag) == "snap");
+        if(packed){
+            s.U.init_packed(snap_pack_, ib, "snap_U", blocks[ib].n_ader,
+                            blocks[ib].nvar, Zd[ib], Yd[ib], Xd[ib], 0, 0, 0);
+            if constexpr (is_mhd){
+                s.Bx.init_packed(snap_pack_, ib, "snap_Bx", 1, 1, Zd[ib], Yd[ib], Xd[ib], 0, 0, 1);
+                s.By.init_packed(snap_pack_, ib, "snap_By", 1, 1, Zd[ib], Yd[ib], Xd[ib], 0, 1, 0);
+                s.Bz.init_packed(snap_pack_, ib, "snap_Bz", 1, 1, Zd[ib], Yd[ib], Xd[ib], 1, 0, 0);
+            }
+            return s;
+        }
         s.U.init(std::string(tag)+"_U", blocks[ib].n_ader, blocks[ib].nvar,
                  Zd[ib], Yd[ib], Xd[ib], 0, 0, 0);
         if constexpr (is_mhd){
@@ -3363,6 +3390,7 @@ struct Mesh : public PhysicsModule {
         }
         std::vector<BlockSnap> snap(nblocks);
         { STAGE("amr/snapshot");
+          snap_pack_.reset(nblocks);   //keeps its allocation; see BlockPack::reset
           for(int ib=0; ib<nblocks; ib++){
               snap[ib] = make_empty_snap(ib, "snap");
               capture_block_snap(ib, snap[ib]);

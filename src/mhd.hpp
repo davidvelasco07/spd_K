@@ -278,12 +278,16 @@ struct MHD_ader : public PhysicsModule {
 
         //Alias the one per-run operator set (build_sd_operators) instead of
         //rebuilding six matrices and their host mirrors per block per adapt.
-        //MHD is RK-only, so wt stays the single unit stage weight it always was
-        //rather than being taken from the operator set.
+        //
+        //wt comes from it too, now. MHD is RK-only and build_sd_operators sets
+        //o.wt = {1.0} under RK (polynomials.cpp), which is exactly what this used
+        //to allocate and fill for itself: one device allocation plus a fill PER
+        //BLOCK PER REGRID for a single number that never differs. Views are
+        //refcounted, so aliasing keeps the data alive even when `ops` points at
+        //the local set below.
         SDOperators local_ops;
         if(!ops){ build_sd_operators(local_ops, p, x_sp, x_fp); ops = &local_ops; }
-        Kokkos::resize(wt,1);
-        Kokkos::deep_copy(wt,1.0);
+        wt = ops->wt;
         sp_to_fp  = ops->sp_to_fp;
         fp_to_sp  = ops->fp_to_sp;
         dfp_to_sp = ops->dfp_to_sp;
