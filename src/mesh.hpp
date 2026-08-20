@@ -269,7 +269,7 @@ struct Mesh : public PhysicsModule {
         FV_Solution Bx_old, Bx_new, By_old, By_new, Bz_old, Bz_new;
         FV_Solution F1m_x, F1m_y, F1m_z, F2m_x, F2m_y, F2m_z;
         FV_Solution E1x, E1y, E1z, E2x, E2y, E2z;
-        FV_Solution W_fv, det_old, mhd_cascade;
+        FV_Solution W_fv, det_old, det_new, mhd_cascade;
         FV_Solution UCT1_x, UCT1_y, UCT1_z, UCT2_x, UCT2_y, UCT2_z;
         SD_Solution mhd_U_ader_sp;
     } pv;
@@ -347,6 +347,15 @@ struct Mesh : public PhysicsModule {
             pv.E2z      = fv_pack_view(pack,"E2z");
             pv.W_fv     = fv_pack_view(pack,"W_fv");
             pv.det_old  = fv_pack_view(pack,"det_old");
+            pv.det_new  = fv_pack_view(pack,"det_new");
+            //`troubles` is assigned again further down, but that line is past the
+            //`return` that ends this MHD branch -- so for MHD it was never
+            //assigned at all and stayed a default-constructed (empty) view.
+            //fv_pack_view's hardening cannot catch this: it aborts on a name
+            //MISSING FROM THE PACK, not on a pv field nobody asked for. Writing
+            //through the empty view is a straight segfault, which is how the
+            //batched detection announced it.
+            pv.troubles = fv_pack_view(pack,"troubles");
             pv.mhd_cascade = fv_pack_view(pack,"cascade");
             pv.UCT1_x   = fv_pack_view(pack,"UCT1_x");
             pv.UCT1_y   = fv_pack_view(pack,"UCT1_y");
@@ -1698,14 +1707,14 @@ struct Mesh : public PhysicsModule {
     //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
     //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 the RK
     //bookkeeping tasks (save_state, copy_cons, cons_to_prim, combine, B_to_U,
-    //compute_dt). SPD_MHD_BATCH_MASK selects which are batched, which is how a
-    //mismatch against the per-block path gets bisected to one phase instead of
-    //guessed at.
+    //compute_dt), 1024 mood/detect. SPD_MHD_BATCH_MASK selects which are batched,
+    //which is how a mismatch against the per-block path gets bisected to one
+    //phase instead of guessed at.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 1023;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 2047;
         return (mask & phase) != 0;
     }
 
@@ -1773,6 +1782,53 @@ struct Mesh : public PhysicsModule {
         transform_a_to_b_2d_b(pv.Bxf, pv.Bx_fp_x, pv.TB_x, b0.cv_to_sp, _x_);
         transform_a_to_b_2d_b(pv.Byf, pv.By_fp_y, pv.TB_y, b0.cv_to_sp, _y_);
         if(az) transform_a_to_b_2d_b(pv.Bzf, pv.Bz_fp_z, pv.TB_z, b0.cv_to_sp, _z_);
+        }
+    }
+
+    //mood_detect over the whole pack, in MHD_ader::mood_detect's order.
+    //
+    //THIS WAS THE LARGEST REMAINING PER-BLOCK LOOP IN THE CODE, and every profile
+    //in the project missed it because they all pinned mhd/mood_force_level=1,
+    //where mood_detect() returns immediately and reads 0.000 s. With detection
+    //live (mood_force_level=-1, the default) on a 352-leaf mesh over 200 steps it
+    //was 21.280 s of a 24.471 s fenced total -- 87% -- against 1.683 s for
+    //cf/correct_cf_emf. Per block per revision it ran ~13 kernels AND ended in a
+    //device->host reduction for the demoted count, so 654 calls x 352 blocks came
+    //to ~230k host syncs. Hydro has had FV_detect_batched since the hydro
+    //batching went in; this is its MHD counterpart.
+    //
+    //The demoted count is one reduction over the pack (update_cascade_b), not one
+    //per block, which is what removes the syncs.
+    int MOOD_detect_batched(){
+        if constexpr (!is_mhd) return 0;
+        else {
+        const bool az = cfg.active[_z_];
+        auto& b0 = blocks[0];
+        //mood_fluid_update(false)
+        fv_update_solution_b(pv.U_new_fv, pv.U_old_fv, pv.U_cv,
+                             pv.F0_x, fvx_p, pv.F0_y, fvy_p, pv.F0_z, fvz_p,
+                             b0.wt, 0, dt, 0);
+        //mood_ct_update: mood_reset_face_B, then the three face updates and the
+        //cell-centred field, exactly as MOOD_commit_batched does for the commit.
+        transform_a_to_b_2d_b(pv.Bx_fp_x, pv.Bxf, pv.TB_x, b0.sp_to_cv, _x_);
+        transform_a_to_b_2d_b(pv.By_fp_y, pv.Byf, pv.TB_y, b0.sp_to_cv, _y_);
+        if(az) transform_a_to_b_2d_b(pv.Bz_fp_z, pv.Bzf, pv.TB_z, b0.sp_to_cv, _z_);
+        fv_update_B_solution_b(pv.Bx_new, pv.Bx_old, pv.Bxf, pv.E0y, pv.E0z,
+                               fvy_p, fvz_p, b0.wt, dt, 0, _x_, 1);
+        fv_update_B_solution_b(pv.By_new, pv.By_old, pv.Byf, pv.E0z, pv.E0x,
+                               fvz_p, fvx_p, b0.wt, dt, 0, _y_, 1);
+        if(az)
+            fv_update_B_solution_b(pv.Bz_new, pv.Bz_old, pv.Bzf, pv.E0x, pv.E0y,
+                                   fvx_p, fvy_p, b0.wt, dt, 0, _z_, 1);
+        compute_B_cv_from_cf_b(pv.B_new_cv, pv.Bxf, pv.Byf, pv.Bzf, b0.fp_to_cv);
+        mhd_set_candidate_B_b(pv.U_new_fv, pv.B_new_cv);
+        const int nd = mhd_detection_vars_b(pv.U_new_fv, pv.det_new);
+        //One mesh-wide gscale array (Mesh::mhd_reduce_nad_gscales pushes the same
+        //values into every block), so block 0's copy speaks for the pack.
+        mhd_NAD_b(pv.det_new, pv.det_old, pv.troubles, cfg.nad_tolerance,
+                  nd, b0.nad_gscale);
+        mhd_PAD_b(pv.U_new_fv, pv.troubles);
+        return update_cascade_b(pv.troubles, pv.mhd_cascade, 2);
         }
     }
 
@@ -1939,7 +1995,8 @@ struct Mesh : public PhysicsModule {
             { PHASE("cf/enforce_fv_emf");  enforce_fv_emf_consistency(); }
             int demoted = 0;
             { PHASE("mood/detect");
-              for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect(); }
+              if(mhd_batched(1024)) demoted = MOOD_detect_batched();
+              else for(int b=0;b<nblocks;b++) demoted += blocks[b].mood_detect(); }
             #ifdef MPI
             int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
             #endif

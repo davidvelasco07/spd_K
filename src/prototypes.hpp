@@ -144,6 +144,9 @@ extern void spread_fv_emf_corners_b(FV_Solution, IntVector, int);
 //Whole-pack MHD primitives and dt: the block is a kernel axis, not a host loop.
 extern void mhd_compute_primitives_b(SD_Solution, SD_Solution);
 extern double mhd_compute_dt_b(SD_Solution, Vector, Vector, Vector);
+//Whole-pack MOOD detection: NAD + PAD over the block axis.
+extern void mhd_NAD_b(FV_Solution, FV_Solution, FV_Solution, double, int, const double*);
+extern void mhd_PAD_b(FV_Solution, FV_Solution);
 extern void gather_fp_coarser(SD_Solution, IntVector, IntVector, IntVector,
                               int, int, int, Matrix);
 extern void gather_fp_finer(SD_Solution, IntVector, IntVector, IntVector,

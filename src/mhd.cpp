@@ -1607,6 +1607,88 @@ void mhd_PAD(FV_Solution U, FV_Solution troubles){
     });
 }
 
+//Batched NAD/PAD over the block axis. Same arithmetic and same loop order as the
+//pair above, so the batched cascade is bit-identical to the per-block one; the FV
+//pack folds the block into the leading axis as b*n_var.
+//
+//`gscale` is ONE array for the whole mesh, not per block:
+//Mesh::mhd_reduce_nad_gscales combines the partials across blocks (and MPI) and
+//pushes the same result into every block (mood_set_gscales), and the non-global
+//scales (`relative`, `delta`) do not read it at all.
+void mhd_NAD_b(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles,
+               double tol, int nvar, const double* gscale){
+    int Nx=det_old.Nx, Ny=det_old.Ny, Nz=det_old.Nz, nb=det_old.nb;
+    const int dnv=det_old.n_var, tnv=troubles.n_var;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    bool moore=cfg.nad_moore;
+    int scale=cfg.mood_nad_scale;
+    double atol=cfg.nad_atol, eps0=cfg.nad_eps0;
+    double gs[8];
+    for(int v=0;v<8;v++) gs[v]=(gscale && v<nvar) ? gscale[v] : 0.0;
+
+    fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int dof=b*dnv, tof=b*tnv;
+        double trouble=0;
+        for(int var=0;var<nvar;var++){
+            double u_new=det_new.Vector(dof+var,k,j,i);
+            double mx=det_old.Vector(dof+var,k,j,i);
+            double mn=mx;
+            if(moore){
+                for(int dk=-(int)az;dk<=(int)az;dk++)
+                for(int dj=-(int)ay;dj<=(int)ay;dj++)
+                for(int di=-(int)ax;di<=(int)ax;di++){
+                    double u=det_old.Vector(dof+var,k+dk,j+dj,i+di);
+                    mx=max(mx,u); mn=min(mn,u);
+                }
+            } else {
+                if(ax){ double l=det_old.Vector(dof+var,k,j,i-1),r=det_old.Vector(dof+var,k,j,i+1); mx=max(mx,max(l,r)); mn=min(mn,min(l,r)); }
+                if(ay){ double l=det_old.Vector(dof+var,k,j-1,i),r=det_old.Vector(dof+var,k,j+1,i); mx=max(mx,max(l,r)); mn=min(mn,min(l,r)); }
+                if(az){ double l=det_old.Vector(dof+var,k-1,j,i),r=det_old.Vector(dof+var,k+1,j,i); mx=max(mx,max(l,r)); mn=min(mn,min(l,r)); }
+            }
+            double eps_m, eps_p;
+            if(scale==_nad_scale_grange_ || scale==_nad_scale_gcfl_){
+                double eps=max(tol*gs[var], atol);
+                eps_m=max(eps, eps0*fabs(mn));
+                eps_p=max(eps, eps0*fabs(mx));
+            }else if(scale==_nad_scale_delta_){
+                double eps=max(tol*(mx-mn), atol);
+                eps_m=eps_p=eps;
+            }else{
+                eps_m=max(fabs(mn)*tol, atol);
+                eps_p=max(fabs(mx)*tol, atol);
+            }
+            mn-=eps_m; mx+=eps_p;
+            if(!isfinite(u_new) || u_new>mx || u_new<mn) trouble=1;
+        }
+        troubles.Vector(tof+0,k,j,i)=trouble;
+    }, "mhd_NAD_b");
+}
+
+void mhd_PAD_b(FV_Solution U, FV_Solution troubles){
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb;
+    const int unv=U.n_var, tnv=troubles.n_var;
+    double gm=cfg.gamma, mrho=cfg.pad_min_rho, mP=cfg.pad_min_P;
+    fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
+        const int uof=b*unv, tof=b*tnv;
+        bool bad=false;
+        for(int var=0;var<NMHD;var++){
+            if(!isfinite(U.Vector(uof+var,k,j,i))){ bad=true; break; }
+        }
+        double rho=U.Vector(uof+_mrho_,k,j,i);
+        double Ekin=0.5*(U.Vector(uof+_mvx_,k,j,i)*U.Vector(uof+_mvx_,k,j,i)
+                        +U.Vector(uof+_mvy_,k,j,i)*U.Vector(uof+_mvy_,k,j,i)
+                        +U.Vector(uof+_mvz_,k,j,i)*U.Vector(uof+_mvz_,k,j,i))/rho;
+        double Emag=0.5*(U.Vector(uof+_mbx_,k,j,i)*U.Vector(uof+_mbx_,k,j,i)
+                        +U.Vector(uof+_mby_,k,j,i)*U.Vector(uof+_mby_,k,j,i)
+                        +U.Vector(uof+_mbz_,k,j,i)*U.Vector(uof+_mbz_,k,j,i));
+        double p=(U.Vector(uof+_mprs_,k,j,i)-Ekin-Emag)*(gm-1.);
+        if(bad || !isfinite(p) || !isfinite(Ekin) || !isfinite(Emag))
+            troubles.Vector(tof+0,k,j,i)=1;
+        if(rho<mrho || rho>rho_max) troubles.Vector(tof+0,k,j,i)=1;
+        if(p<mP || p>p_max)         troubles.Vector(tof+0,k,j,i)=1;
+    }, "mhd_PAD_b");
+}
+
 // Full MHD detection: build detection variables from the candidate/old cell-averaged
 // conserved states, run NAD (B components or |B|), then the magnetic PAD. `troubles`
 // (row 0) holds the per-cell flag consumed by the MOOD cascade (face/edge mask pooling).

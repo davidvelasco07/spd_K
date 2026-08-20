@@ -1,0 +1,61 @@
+---
+description: spd_K — the block index is a kernel axis, never a host loop over blocks
+alwaysApply: true
+---
+
+# No host loops over blocks (spd_K)
+
+Full development rules are in `CLAUDE.md` at the repo root. This is the one that
+gets broken most often.
+
+**Do not write `for (int b = 0; b < nblocks; b++)` in code that runs per step or
+per stage.** Every meshblock carries the same element count regardless of its
+refinement level, so a pack of blocks is rectangular and ONE launch spans all of
+them. Use the whole-pack views (`pv.*`) with a `*_b` kernel (`sd_for_cells_b`,
+`fv_for_cells_b`, `sd_min_cells_b`, `fv_for_cells_ngh_b`, ...). SD packs fold the
+block into the leading axis as `b*n_ader`, FV packs as `b*n_var`.
+
+Measured cost of getting this wrong, in this repo:
+
+- FV halo exchanges: 7.81M launches / 131.5 s -> 606k / 28.5 s (4.6x)
+- MHD advance phases: mixed-level advance 448.9 -> 80.2 s (5.6x)
+- RK bookkeeping (save_state, copy_cons, cons_to_prim, combine, B_to_U,
+  compute_dt): MHD AMR lane 92.19 -> 34.50 s at 1600 leaves (2.67x). These were
+  74% of MHD's fenced time and 13.4x the hydro cost of the SAME work, only
+  because the hydro side had already been batched and the MHD side sat in the
+  `else` branch of the same `if constexpr`.
+- MOOD detection: 21.3 s of a 24.5 s fenced total (87%), and invisible in every
+  profile because they all pinned `mhd/mood_force_level=1`, where detection
+  returns immediately.
+
+## Do
+
+```cpp
+mhd_compute_primitives_b(pv.U_sp, pv.W_sp);          // one launch, all blocks
+this->Dt = mhd_compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p);
+Kokkos::deep_copy(pv.U0_sp.Vector, pv.U_sp.Vector);  // blocks are slices of the pack
+```
+
+## Do not
+
+```cpp
+for (int b = 0; b < nblocks; b++) {                  // BAD in a per-step path
+    mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
+    double db = mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h);
+    this->Dt = std::min(this->Dt, db);               // worse: a device->host sync per block
+}
+```
+
+A per-block reduction that returns to the host is the expensive shape: it is a
+fence per block per step. `mood_detect` ended in one, which is how 654 calls
+became ~230k host syncs.
+
+Legitimate exceptions, and nothing else: setup and regrid
+(`build_block_solvers`), host-side scalar bookkeeping with no launches
+(`sync_block_dt`), output-time diagnostics. Write a comment saying which.
+
+**Keep the per-block path behind a switch and prove bitwise agreement.** Add a
+`SPD_MHD_BATCH_MASK` bit (or `SPD_NO_RK_BATCH`-style flag), then md5 the dumps of
+both paths on a MIXED-LEVEL mesh with the feature that exercises the code turned
+on. Also put the new work inside a `PHASE()` scope, or it will not appear in
+`SPD_PHASE_TIMES=1` and the next person to profile will optimise the wrong thing.
