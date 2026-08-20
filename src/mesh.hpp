@@ -1909,15 +1909,53 @@ struct Mesh : public PhysicsModule {
     //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 the RK
     //bookkeeping tasks (save_state, copy_cons, cons_to_prim, combine, B_to_U,
     //compute_dt), 1024 mood/detect, 2048 cf/correct_cf_emf (the SD edge lattice),
-    //4096 cf/enforce_fv_emf (the cascade's FV edge lattice).
+    //4096 cf/enforce_fv_emf (the cascade's FV edge lattice), 8192 the pinned-level
+    //dead-work skip (NOT a batching, a whole-phase skip -- see pinned_level()).
     //SPD_MHD_BATCH_MASK selects which are batched, which is how a mismatch
     //against the per-block path gets bisected to one phase instead of guessed at.
     //Mind the arithmetic when picking one: 4095 leaves bit 2048 SET.
+    //DEAD-WORK SKIP at a pinned cascade level, gated on mask bit 8192.
+    //
+    //`mhd_assign_edge_E_b` and `assign_face_flux_b` overwrite the level-0 arrays
+    //wherever the pooled cascade level is >= 1, over exactly the faces that bound
+    //an active cell (`fv_for_faces`, M = N-2*nGH+1) -- which is the range the
+    //fluid and CT updates read. So with `mhd/mood_force_level >= 1` the cascade
+    //is uniformly >= 1, every slot that is ever read gets overwritten, and
+    //everything feeding level 0 is computed and thrown away: the whole SD
+    //flux/EMF path (27.9% of the fenced advance at paper scale) plus the
+    //level-0 candidate build inside mood_begin. Symmetrically at level 0 the
+    //cascade never reaches 1, so `after_U_halo`'s F1/F2 and E1/E2 are all dead
+    //(30.3%, the largest phase); at level 1 or 2 exactly one of each pair is.
+    //
+    //-1 (detection live) skips NOTHING: the detector reads every level.
+    //
+    //CONSEQUENCE TO KNOW BEFORE ADDING A DIAGNOSTIC: with the skip live the SD
+    //flux and edge-EMF arrays (F_ader_fp_*, E*_ep_*) hold the PREVIOUS step's
+    //values at a pinned level. Anything new that reads them -- an output, a divB
+    //variant, a gate -- must either run at level -1/0 or force this off. What is
+    //still maintained every step: face B (Bx_fp_x etc., via Exchange_face_B and
+    //the CT commit), U_sp/U_cv, and the FV lattice, which is what `report_divb`
+    //and the `cf_flux` gate read (the pinned lane
+    //`mhd_orszag_tang_smr_fb_lvl1_2d` exercises exactly that).
+    //Which level is pinned, or -1 for none. Only meaningful with the cascade on.
+    int pinned_level() const {
+        if(!cfg.fallback) return -1;
+        if(!mhd_batched(8192)) return -1;
+        return cfg.mood_force_level;
+    }
+    //The level-0 SD flux/EMF path produces nothing that survives assembly.
+    bool sd_path_dead() const { return pinned_level() >= 1; }
+    //Is cascade level L (1 or 2) ever read?
+    bool cascade_level_live(int L) const {
+        const int p = pinned_level();
+        return p < 0 || p == L;
+    }
+
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 8191;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 16383;
         return (mask & phase) != 0;
     }
 
@@ -1939,17 +1977,29 @@ struct Mesh : public PhysicsModule {
         //pv.T_fp_* here handed the kernel an empty view. It went unnoticed in 2D
         //because face_integral_b only touches the scratch when BOTH transverse
         //directions are active; with z on it diverged from the per-block path.
-        if(cfg.active[_x_])
-            face_integral_b(pv.F_ader_fp_x, pv.F0_x, pv.U_ader_fp_x, b0.sp_to_cv, 0, _x_);
-        if(cfg.active[_y_])
-            face_integral_b(pv.F_ader_fp_y, pv.F0_y, pv.U_ader_fp_y, b0.sp_to_cv, 0, _y_);
-        if(az)
-            face_integral_b(pv.F_ader_fp_z, pv.F0_z, pv.U_ader_fp_z, b0.sp_to_cv, 0, _z_);
-        if(az){
-            edge_integral_b(pv.Ex_ep_yz, pv.E0x, b0.sp_to_cv, 0, _x_);
-            edge_integral_b(pv.Ey_ep_zx, pv.E0y, b0.sp_to_cv, 0, _y_);
+        //Projecting the SD flux/EMF onto the FV lattice IS level 0: at a pinned
+        //level >= 1 the assembly overwrites every F0/E0 slot the fluid and CT
+        //updates can read, so these six projections are computed and discarded.
+        if(!sd_path_dead()){
+            if(cfg.active[_x_])
+                face_integral_b(pv.F_ader_fp_x, pv.F0_x, pv.U_ader_fp_x, b0.sp_to_cv, 0, _x_);
+            if(cfg.active[_y_])
+                face_integral_b(pv.F_ader_fp_y, pv.F0_y, pv.U_ader_fp_y, b0.sp_to_cv, 0, _y_);
+            if(az)
+                face_integral_b(pv.F_ader_fp_z, pv.F0_z, pv.U_ader_fp_z, b0.sp_to_cv, 0, _z_);
+            if(az){
+                edge_integral_b(pv.Ex_ep_yz, pv.E0x, b0.sp_to_cv, 0, _x_);
+                edge_integral_b(pv.Ey_ep_zx, pv.E0y, b0.sp_to_cv, 0, _y_);
+            }
+            edge_integral_b(pv.Ez_ep_xy, pv.E0z, b0.sp_to_cv, 0, _z_);
         }
-        edge_integral_b(pv.Ez_ep_xy, pv.E0z, b0.sp_to_cv, 0, _z_);
+        //NOT skippable, and skipping it is what "non-finite dt at step 1" looks
+        //like: the level-0 candidate this computes is indeed dead at a pinned
+        //level, but the same kernel ALSO seeds U_old_fv from U_cv
+        //(`U_old.Vector(...) = U_cv.Vector(...)`, transforms.cpp), and U_old_fv
+        //is the base state the halo exchange publishes and the commit updates
+        //from. A "dead" call with a second job in it -- the same shape of trap as
+        //a batched path that drops its reference's early return.
         fv_update_solution_b(pv.U_new_fv, pv.U_old_fv, pv.U_cv,
                              pv.F0_x, fvx_p, pv.F0_y, fvy_p, pv.F0_z, fvz_p,
                              b0.wt, 0, dt, 0);
@@ -2085,20 +2135,25 @@ struct Mesh : public PhysicsModule {
                 FV_Solution& Bn = (dim==_x_?pv.Bx_old:(dim==_y_?pv.By_old:pv.Bz_old));
                 FV_Solution& U1 = (dim==_x_?pv.UCT1_x:(dim==_y_?pv.UCT1_y:pv.UCT1_z));
                 FV_Solution& U2 = (dim==_x_?pv.UCT2_x:(dim==_y_?pv.UCT2_y:pv.UCT2_z));
-                mhd_fv_fluxes_b(pv.W_fv,F1,Bn,U1, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                fvzc_p,fvz_p, dim, true);
-                mhd_fv_fluxes_b(pv.W_fv,F2,Bn,U2, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                fvzc_p,fvz_p, dim, false);
+                //Only the levels the assembly can read. See pinned_level().
+                if(cascade_level_live(1))
+                    mhd_fv_fluxes_b(pv.W_fv,F1,Bn,U1, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                    fvzc_p,fvz_p, dim, true);
+                if(cascade_level_live(2))
+                    mhd_fv_fluxes_b(pv.W_fv,F2,Bn,U2, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                    fvzc_p,fvz_p, dim, false);
             }
             const int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
             const int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
             if(cfg.active[d1] && cfg.active[d2]){
                 FV_Solution& E1 = (dim==_x_?pv.E1x:(dim==_y_?pv.E1y:pv.E1z));
                 FV_Solution& E2 = (dim==_x_?pv.E2x:(dim==_y_?pv.E2y:pv.E2z));
-                mhd_four_state_E_b(E1,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                   fvzc_p,fvz_p, dim, true);
-                mhd_four_state_E_b(E2,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                   fvzc_p,fvz_p, dim, false);
+                if(cascade_level_live(1))
+                    mhd_four_state_E_b(E1,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                       fvzc_p,fvz_p, dim, true);
+                if(cascade_level_live(2))
+                    mhd_four_state_E_b(E2,pv.W_fv, fvxc_p,fvx_p,fvyc_p,fvy_p,
+                                       fvzc_p,fvz_p, dim, false);
             }
         }
         //One fill over the whole pack instead of one per block; deep_copy covers
@@ -2244,10 +2299,16 @@ struct Mesh : public PhysicsModule {
 
     void Advance_mhd(){
         if constexpr (!is_mhd) return;
+        //The whole level-0 SD flux/EMF path is dead at a pinned cascade level >= 1
+        //(see pinned_level()); face-B exchange and B_to_U below are NOT, because
+        //the FV path reads the staggered field through them.
+        const bool sd_dead = sd_path_dead();
+        if(!sd_dead){
         { PHASE("sd/Fluxes_pre");
           if(mhd_batched(16)) MHD_Fluxes_pre_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].Fluxes_pre(); }
         { PHASE("xchg/Exchange_fp"); Exchange_fp(); }
+        }
         //Refresh face-B ghosts and re-project into U so CF fluid Riemann
         //sees B consistent with the staggered field (not the prolonged U-B).
         if(forest.max_level()>0){
@@ -2262,6 +2323,7 @@ struct Mesh : public PhysicsModule {
                                blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
                                blocks[b].Tz_, blocks[b].fp_to_sp);
         }
+        if(!sd_dead){
         { PHASE("sd/Riemann_Solver");
           if(mhd_batched(32)) MHD_Riemann_Solver_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].Riemann_Solver(); }
@@ -2288,6 +2350,7 @@ struct Mesh : public PhysicsModule {
                 if(!no_emf_corner())
                     spread_sd_emf_corners_b(pv.Ez_ep_xy, ect_.t, ect_.n);
         }
+        }  //!sd_dead
         if(cfg.fallback) MHD_MOOD_update();
         else {
             PHASE("sd/Update_CT");
