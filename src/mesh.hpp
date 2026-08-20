@@ -2122,12 +2122,20 @@ struct Mesh : public PhysicsModule {
         if constexpr (!is_mhd) return;
         else {
         const bool az = cfg.active[_z_];
+        //Split so the next round can see where this phase's time actually goes:
+        //it is the largest one left (38.4% of a 3.559 s fenced total at paper
+        //scale) and it is two different things -- a fixed prologue over the pack,
+        //then the cascade level fluxes and EMFs, of which a pinned level uses one.
+        { STAGE("mood/aUh_prologue");
         mhd_compute_primitives_b(pv.U_old_fv, pv.W_fv);
         mhd_face_B_to_fv_b(pv.Bxf, pv.Bx_old, _x_);
         mhd_face_B_to_fv_b(pv.Byf, pv.By_old, _y_);
         if(az) mhd_face_B_to_fv_b(pv.Bzf, pv.Bz_old, _z_);
         const int nd = mhd_detection_vars_b(pv.U_old_fv, pv.det_old);
+        //Host-side scalar bookkeeping, no launches (CLAUDE.md rule 1).
         for(int b=0;b<nblocks;b++) blocks[b].n_det = nd;
+        }
+        STAGE("mood/aUh_levels");
         for(int dim=0; dim<3; dim++){
             if(cfg.active[dim]){
                 FV_Solution& F1 = (dim==_x_?pv.F1m_x:(dim==_y_?pv.F1m_y:pv.F1m_z));
@@ -2247,7 +2255,11 @@ struct Mesh : public PhysicsModule {
         { PHASE("mood/after_U_halo");
           if(mhd_batched(2)) MOOD_after_U_halo_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo(); }
-        mhd_reduce_nad_gscales();
+        //Fenced because rule 3 says so, not because it is expensive today: it
+        //early-returns unless the NAD scale is gcfl/grange, and flipping that
+        //default (still planned) makes this per-block loop plus its MPI reduce
+        //live. Better to have the number already in the table when it does.
+        { STAGE("mood/nad_gscales"); mhd_reduce_nad_gscales(); }
         for(int rev=0; rev<cfg.max_revs; rev++){
             //Assemble, RECONCILE, then judge. The cascade tests a candidate built
             //from the assembled flux, so the flux has to be single-valued at every
