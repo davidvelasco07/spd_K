@@ -33,10 +33,12 @@ write one.
 Keep the per-block path and gate the batched one behind a switch:
 `SPD_MHD_BATCH_MASK` bits for MHD (1 begin, 2 after_U_halo, 4 assemble, 8 commit,
 16 Fluxes_pre, 32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 RK
-bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf;
-default 8191), `SPD_NO_MHD_BATCH`, `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the
-AMR refinement scores), `SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both
-paths -- and the block maps too, for anything that feeds a refinement decision. Verify on a **mixed-level** mesh, and with the feature that exercises the
+bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
+8192 the pinned-level dead-work skip; default 16383), `SPD_NO_MHD_BATCH`,
+`SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
+`SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both paths -- and the block
+maps too, for anything that feeds a refinement decision. Every switch must agree
+with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
 
 - ON: the batched detection segfaulted on its first run at `mood_force_level=-1`
@@ -47,7 +49,13 @@ code turned **both ON and OFF** — both directions have already bitten:
   reference did nothing. Every lane checked at the time had detection live.
 
 A batched path must reproduce its reference's EARLY RETURNS, not just its
-arithmetic.
+arithmetic. And a SKIPPED path must account for every job the code did, not just
+the one its name describes: `fv_update_solution_b` in `mood_begin` looks like the
+level-0 candidate and nothing else, and it also seeds `U_old_fv` from `U_cv` --
+the base state the halo publishes and the commit updates from. Skipping it gave
+"non-finite dt at step 1" on every pinned lane while levels -1 and 0 stayed
+bit-identical, i.e. the A/B localised it only because the force level was part of
+the sweep.
 
 **The A/B catches what the suite structurally cannot.** Batching the refinement
 scores, a device-code fix captured the ghost counts as `gx/gy/gz` -- which are the
