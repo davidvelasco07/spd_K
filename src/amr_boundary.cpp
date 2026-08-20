@@ -430,39 +430,49 @@ void correct_coarse_fine_flux(BlockForest& forest, std::vector<Block>& blocks, i
 //At a coarse-fine face the coarse block's edge EMF must equal the line-integral
 //average of the overlapping fine EMFs, or the CT update of face B fails to
 //telescope across the interface (AthenaK flux_correct_fc).
+//One edge family. Split out of correct_coarse_fine_emf so the batched path's
+//A/B check (Mesh::correct_cf_emf_check) can drive the reference one component at
+//a time, which is what localises a mismatch to a component and a lattice
+//position instead of a whole dump.
+template<typename Block>
+void correct_coarse_fine_emf_one(BlockForest& forest, std::vector<Block>& blocks,
+                                 SD_Solution Block::*member, int dim){
+    if(forest.max_level()==0 || !cfg.active[dim]) return;
+    for(int side=0; side<2; side++){
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.fi_ib.size(); k++){
+            SD_Solution& coarse = blocks[g.fi_ib[k]].*member;
+            int ns = (int)g.fi_jb[k].size();
+            //Build a coarse-shaped buffer holding only the interface
+            //face: transverse restrict of each fine neighbour's facing
+            //trace, then set_interface_flux.
+            SD_Solution ghost = make_scratch_like(coarse, "emf");
+            Kokkos::deep_copy(ghost.Vector, coarse.Vector);
+            const SD_Solution* traces[8];
+            for(int s=0; s<ns; s++)
+                traces[s] = &(blocks[g.fi_jb[k][s]].*member);
+            //Use SP restrict when transverse count matches amr_RF,
+            //else the constant-preserving fp restrict.
+            restrict_face_overlap_sp(traces, ns, ghost,
+                                     restrict_mat_for(coarse, dim), dim);
+            set_interface_flux(coarse, ghost, dim, side);
+        }
+    }
+}
+
 template<typename Block>
 void correct_coarse_fine_emf(BlockForest& forest, std::vector<Block>& blocks, int dim){
     if(forest.max_level()==0 || !cfg.active[dim]) return;
     if constexpr (std::is_same_v<Block, MHD_ader>){
-        auto correct_one = [&](SD_Solution MHD_ader::*member){
-            for(int side=0; side<2; side++){
-                const FaceGroups& g = forest.face_groups[dim][side];
-                for(size_t k=0; k<g.fi_ib.size(); k++){
-                    SD_Solution& coarse = blocks[g.fi_ib[k]].*member;
-                    int ns = (int)g.fi_jb[k].size();
-                    //Build a coarse-shaped buffer holding only the interface
-                    //face: transverse restrict of each fine neighbour's facing
-                    //trace, then set_interface_flux.
-                    SD_Solution ghost = make_scratch_like(coarse, "emf");
-                    Kokkos::deep_copy(ghost.Vector, coarse.Vector);
-                    const SD_Solution* traces[8];
-                    for(int s=0; s<ns; s++)
-                        traces[s] = &(blocks[g.fi_jb[k][s]].*member);
-                    //Use SP restrict when transverse count matches amr_RF,
-                    //else the constant-preserving fp restrict.
-                    restrict_face_overlap_sp(traces, ns, ghost,
-                                             restrict_mat_for(coarse, dim), dim);
-                    set_interface_flux(coarse, ghost, dim, side);
-                }
-            }
-        };
         //Only the EMF itself (used by CT) must match; correcting all NEMHD
         //channels is fine and matches the fluid flux-correction pattern.
         if(dim==_x_ || dim==_y_)
-            correct_one(&MHD_ader::Ez_ep_xy);
+            correct_coarse_fine_emf_one(forest, blocks, &MHD_ader::Ez_ep_xy, dim);
         if(cfg.active[_z_]){
-            if(dim==_x_ || dim==_z_) correct_one(&MHD_ader::Ey_ep_zx);
-            if(dim==_y_ || dim==_z_) correct_one(&MHD_ader::Ex_ep_yz);
+            if(dim==_x_ || dim==_z_)
+                correct_coarse_fine_emf_one(forest, blocks, &MHD_ader::Ey_ep_zx, dim);
+            if(dim==_y_ || dim==_z_)
+                correct_coarse_fine_emf_one(forest, blocks, &MHD_ader::Ex_ep_yz, dim);
         }
     }
 }
@@ -1025,6 +1035,52 @@ void correct_coarse_fine_fv_emf(BlockForest& forest, std::vector<Block>& blocks,
     }
 }
 
+//The same coarse-fine edge-EMF injection as correct_coarse_fine_fv_emf, run off
+//the fine->coarse transaction table instead of a host loop over
+//(side, coarse block, sub) with one launch of m+1 scalar copies each: it was
+//0.370 s of a 2.619 s fenced advance (14.1%) on a 352-leaf mesh over 200 steps,
+//396 fenced calls covering 2 dims x 2 sides x ~100 CF faces x 2 subs of launches.
+//
+//ONE SLOT IS SHARED BETWEEN THE TWO SUBS, and that is the whole reason this
+//takes a `last` column. A fine neighbour covering half a coarse face spans m
+//coarse cells but m+1 coarse edge POINTS, so the lower half's top point and the
+//upper half's first point are the SAME storage slot -- written from two
+//different fine blocks, each from its own boundary edge. The host loop runs sub
+//in ascending order, so the higher sub wins by construction; run concurrently
+//the two writes race. `last` is 1 for the highest sub in its face group, and
+//only that transaction writes the shared point, which reproduces the host
+//outcome exactly and leaves every slot written once regardless of order.
+//(The SD edge lattice has no such collision: there an element boundary is two
+//distinct slots, so the two halves are disjoint -- see correct_cf_flux_b.)
+void correct_cf_fv_emf_b(FV_Solution E, IntVector recv, IntVector send,
+                         IntVector subv, IntVector last, int ntr,
+                         int dim, int cface, int fface, int lo_t, int Nt){
+    if(ntr <= 0) return;
+    const int nvar = E.n_var;
+    const int m = Nt/2;
+    const int xn = (dim==_x_);
+    //Negative control for the ownership rule itself: SPD_EMF_NO_OWNER=1 lets
+    //every transaction write the shared point, which is the naive kernel. If
+    //that changes the answer, the rule is load-bearing; if it does not, the two
+    //fine blocks agree bitwise there and the column is inert -- either way it is
+    //measured rather than assumed.
+    static const bool no_owner = getenv("SPD_EMF_NO_OWNER") != nullptr;
+    const int owner = no_owner ? 0 : 1;
+    fv_for_cells_b(ntr,1,1,m+1, KOKKOS_LAMBDA(int b,int kq,int jq,int r){
+        (void)kq; (void)jq;
+        //The shared top point belongs to the highest sub in the group.
+        if(owner && r==m && !last(b)) return;
+        const int half = subv(b) & 1;
+        const int cj = lo_t + half*m + r;   //coarse edge point
+        const int fj = lo_t + 2*r;          //the fine edge that coincides with it
+        const int ci = xn ? cface : cj;
+        const int cJ = xn ? cj    : cface;
+        const int fi = xn ? fface : fj;
+        const int fJ = xn ? fj    : fface;
+        E.Vector(recv(b)*nvar,0,cJ,ci) = E.Vector(send(b)*nvar,0,fJ,fi);
+    }, "correct_cf_fv_emf_b");
+}
+
 //Patch-corner spread for the cascade's FV-lattice edge EMF (2D: Ez only).
 //
 //correct_coarse_fine_fv_emf above injects the coincident fine value over the
@@ -1157,6 +1213,8 @@ template void correct_coarse_fine_flux<Hydro_ader>(BlockForest&, std::vector<Hyd
 template void correct_coarse_fine_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_emf<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_emf<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
+template void correct_coarse_fine_emf_one<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                                    SD_Solution MHD_ader::*, int);
 template void symmetrize_same_level_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void symmetrize_same_level_fv_flux<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void correct_coarse_fine_fv_flux<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);

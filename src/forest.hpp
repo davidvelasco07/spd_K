@@ -156,6 +156,10 @@ void mirror_faces_b(SD_Solution U, IntVector ids, int nids, int dim, int side);
 
 template<typename Block>
 void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);
+//One edge family of the above, for the batched path's per-component A/B check.
+template<typename Block>
+void correct_coarse_fine_emf_one(BlockForest&, std::vector<Block>&,
+                                 SD_Solution Block::*, int dim);
 template<typename Block>
 void correct_coarse_fine_fv_flux(BlockForest&, std::vector<Block>&, int dim);
 

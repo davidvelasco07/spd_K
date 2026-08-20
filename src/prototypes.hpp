@@ -138,6 +138,11 @@ extern void correct_cf_fv_flux_b(FV_Solution, IntVector, IntVector, IntVector,
 extern void symmetrize_same_level_fv_flux_b(FV_Solution, IntVector, IntVector,
                                             int, int, int, int,
                                             int, int, int);
+//Coarse-fine edge-EMF injection for the cascade's FV lattice, off the same
+//fine->coarse table. The extra `last` column resolves the one coarse edge point
+//the two sub-faces share; see the kernel.
+extern void correct_cf_fv_emf_b(FV_Solution, IntVector, IntVector, IntVector,
+                                IntVector, int, int, int, int, int, int);
 //Patch-corner spread for the cascade's FV-lattice edge EMF: one table entry
 //per corner point that the face correction leaves multi-valued.
 extern void spread_fv_emf_corners_b(FV_Solution, IntVector, int);

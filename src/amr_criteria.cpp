@@ -209,6 +209,145 @@ double bfield_lohner_score(SD_Solution W, double bref){
     return g2;
 }
 
+//All blocks' refinement scores in ONE launch, one thread per block.
+//
+//What this removes is not arithmetic, it is a host round trip. Every score
+//function above opens with W.copy() -- a synchronous device->host copy of that
+//block's whole primitive array -- and then loops on the CPU, and a regrid pays
+//it once per block for the refine test plus once per sibling for the derefine
+//test: ~1000 copies at 352 leaves. Fenced, `amr/tag` measured 0.207 s of
+//`amr/adapt`'s 0.207 s -- the ENTIRE regrid cost -- which was 21% of the fenced
+//mixed-level MHD advance and 92.8% of hydro's whole fenced total.
+//
+//ONE THREAD PER BLOCK, not one per cell, and that is deliberate. Each thread
+//walks the host loop's exact nested order, so the order-dependent sum in
+//lohner's denominator comes out BIT-IDENTICAL rather than merely close. A
+//cell-parallel reduction would change the last bits of `den`, which is precisely
+//how this could go wrong invisibly: a block whose score sits on the threshold
+//flips its tag, the mesh diverges from the reference, and every dump after it
+//differs for a reason that looks like a bug in the transfer. The parallelism
+//that matters here is the block count anyway -- this runs once per regrid.
+//
+//`which` mirrors cfg.amr_criterion: 1 pressure gradient, 3 shear, anything else
+//the density Lohner indicator. Criterion 2 (trouble fraction, an FV array) and 4
+//(the |B| Lohner, which needs a forest-wide field scale first) keep their
+//per-block paths; see tag_blocks_impl.
+//
+//NGHx/NGHy/NGHz expand to NGH_rt, a HOST global: nvcc rejects them in device
+//code, and the host build compiles them happily, so this only fails under CUDA.
+//They are captured as ngx/ngy/ngz -- not gx/gy/gz, which are the shear
+//indicator's own flattened cell indices below (naming them alike shadowed the
+//loop variables, and the A/B caught it as three lanes going non-identical).
+void block_scores_b(SD_Solution W, int which, int var, Vector out){
+    const int nb = W.nb;
+    if(nb <= 0) return;
+    const int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
+    const int nader=W.n_ader;
+    const int ngx=NGHx, ngy=NGHy, ngz=NGHz;
+    const int actx=cfg.active[_x_], acty=cfg.active[_y_], actz=cfg.active[_z_];
+    const int vp=_p_, vvx=_vx_, vvy=_vy_;
+    auto A = W.Vector;
+    Kokkos::parallel_for("block_scores_b", flat_range(0,flat_total(nb)),
+        KOKKOS_LAMBDA(const unsigned bb){
+        const int boff = (int)bb*nader;
+        double res = 0.0;
+        if(which==1){
+            //pressure_gradient_score
+            double pmax=-1e300, pmin=1e300;
+            for(int k=ngz;k<Nz-ngz;k++)
+            for(int j=ngy;j<Ny-ngy;j++)
+            for(int i=ngx;i<Nx-ngx;i++)
+            for(int kk=0;kk<pz;kk++)
+            for(int jj=0;jj<py;jj++)
+            for(int ii=0;ii<px;ii++){
+                const double q = A(boff,vp,k,j,i,kk,jj,ii);
+                pmax = q>pmax ? q : pmax;
+                pmin = q<pmin ? q : pmin;
+            }
+            res = (pmax-pmin)/(pmax>1e-12 ? pmax : 1e-12);
+        } else if(which==3){
+            //shear_score, on the flattened (element,point) index per direction
+            const int Gx=(Nx-2*ngx)*px, Gy=(Ny-2*ngy)*py, Gz=(Nz-2*ngz)*pz;
+            double g = 0.0;
+            if(actx && Gx>=3){
+                for(int gz=0;gz<Gz;gz++)
+                for(int gy=0;gy<Gy;gy++)
+                for(int gx=1;gx<Gx-1;gx++){
+                    const double vp1 = A(boff,vvy,ngz+gz/pz,ngy+gy/py,ngx+(gx+1)/px,
+                                              gz%pz,gy%py,(gx+1)%px);
+                    const double vm1 = A(boff,vvy,ngz+gz/pz,ngy+gy/py,ngx+(gx-1)/px,
+                                              gz%pz,gy%py,(gx-1)%px);
+                    const double d = 0.5*fabs(vp1-vm1);
+                    g = d>g ? d : g;
+                }
+            }
+            if(acty && Gy>=3){
+                for(int gz=0;gz<Gz;gz++)
+                for(int gy=1;gy<Gy-1;gy++)
+                for(int gx=0;gx<Gx;gx++){
+                    const double vp1 = A(boff,vvx,ngz+gz/pz,ngy+(gy+1)/py,ngx+gx/px,
+                                              gz%pz,(gy+1)%py,gx%px);
+                    const double vm1 = A(boff,vvx,ngz+gz/pz,ngy+(gy-1)/py,ngx+gx/px,
+                                              gz%pz,(gy-1)%py,gx%px);
+                    const double d = 0.5*fabs(vp1-vm1);
+                    g = d>g ? d : g;
+                }
+            }
+            res = g;
+        } else {
+            //lohner_score(var)
+            double g2 = 0.0;
+            for(int dim=0; dim<3; dim++){
+                if(!(dim==_x_ ? actx : (dim==_y_ ? acty : actz))) continue;
+                if((dim==_x_ ? Nx : (dim==_y_ ? Ny : Nz)) < 3) continue;
+                for(int k=ngz;k<Nz-ngz;k++)
+                for(int j=ngy;j<Ny-ngy;j++)
+                for(int i=ngx;i<Nx-ngx;i++)
+                for(int kk=0;kk<pz;kk++)
+                for(int jj=0;jj<py;jj++)
+                for(int ii=0;ii<px;ii++){
+                    double v0,v1,v2;
+                    if(dim==_x_){
+                        if(i-1<ngx || i+1>=Nx-ngx) continue;
+                        v0=A(boff,var,k,j,i-1,kk,jj,ii);
+                        v1=A(boff,var,k,j,i,kk,jj,ii);
+                        v2=A(boff,var,k,j,i+1,kk,jj,ii);
+                    } else if(dim==_y_){
+                        if(j-1<ngy || j+1>=Ny-ngy) continue;
+                        v0=A(boff,var,k,j-1,i,kk,jj,ii);
+                        v1=A(boff,var,k,j,i,kk,jj,ii);
+                        v2=A(boff,var,k,j+1,i,kk,jj,ii);
+                    } else {
+                        if(k-1<ngz || k+1>=Nz-ngz) continue;
+                        v0=A(boff,var,k-1,j,i,kk,jj,ii);
+                        v1=A(boff,var,k,j,i,kk,jj,ii);
+                        v2=A(boff,var,k+1,j,i,kk,jj,ii);
+                    }
+                    const double d = fabs(v0 - 2.0*v1 + v2);
+                    g2 = d>g2 ? d : g2;
+                }
+            }
+            //The denominator is a SUM, so it is accumulated in the host loop's
+            //order inside this one thread. That is the whole reason this kernel
+            //is not cell-parallel.
+            double den = 0.0;
+            int cnt = 0;
+            for(int k=ngz;k<Nz-ngz;k++)
+            for(int j=ngy;j<Ny-ngy;j++)
+            for(int i=ngx;i<Nx-ngx;i++)
+            for(int kk=0;kk<pz;kk++)
+            for(int jj=0;jj<py;jj++)
+            for(int ii=0;ii<px;ii++){
+                den += fabs(A(boff,var,k,j,i,kk,jj,ii));
+                cnt++;
+            }
+            den = den/(cnt>1 ? cnt : 1) + 1e-12;
+            res = g2/den;
+        }
+        out(bb) = res;
+    });
+}
+
 template<typename Block>
 static double trouble_fraction_impl(Block& blk){
     if(!cfg.fallback) return 0.0;
@@ -232,55 +371,88 @@ static double trouble_fraction_impl(Block& blk){
 double trouble_fraction(Hydro_ader& blk){ return trouble_fraction_impl(blk); }
 double trouble_fraction(MHD_ader& blk){ return trouble_fraction_impl(blk); }
 
+//The score -> tag decision, in one place. The batched and per-block paths
+//differ only in HOW the score is computed, never in where the cut sits, so the
+//thresholds live here and both callers use them: a threshold duplicated between
+//the two would make an A/B mismatch look like an arithmetic difference.
+static bool refine_from_score(int criterion, double s){
+    switch(criterion){
+        case 1:  return s > 0.03;
+        case 3:  return s > cfg.amr_refine_threshold;
+        default: return s > 0.5;
+    }
+}
+static bool derefine_from_score(int criterion, double s){
+    switch(criterion){
+        case 1:  return s < 0.015*0.5;
+        case 3:  return s < cfg.amr_derefine_threshold;
+        default: return s < 0.05*0.25;
+    }
+}
+//One block's score, on the host, with the per-block device->host copy each of
+//these functions opens with. This is the reference path (SPD_NO_SCORE_BATCH=1).
+static double block_score_host(int criterion, SD_Solution W){
+    switch(criterion){
+        case 1:  return pressure_gradient_score(W);
+        case 3:  return shear_score(W);
+        default: return lohner_score(W, _d_);
+    }
+}
+
 template<typename Block>
 static bool refine_flag(int criterion, Block& blk){
     if constexpr (std::is_same_v<Block, Hydro_ader>)
         compute_primitives(blk.U_sp, blk.W_sp);
     else
         mhd_compute_primitives(blk.U_sp, blk.W_sp);
-    switch(criterion){
-        case 1: return pressure_gradient_score(blk.W_sp) > 0.03;
-        case 2: return trouble_fraction(blk) > 0.01;
-        case 3: return shear_score(blk.W_sp) > cfg.amr_refine_threshold;
-        //criterion 4 on MHD is handled in tag_blocks_impl, which needs every
-        //block's score at once to set the field scale and to derefine
-        default: return lohner_score(blk.W_sp, _d_) > 0.5;
-    }
+    //criterion 4 on MHD is handled in tag_blocks_impl, which needs every
+    //block's score at once to set the field scale and to derefine
+    if(criterion==2) return trouble_fraction(blk) > 0.01;
+    return refine_from_score(criterion, block_score_host(criterion, blk.W_sp));
 }
 
 template<typename Block>
 static bool derefine_flag(int criterion, const std::vector<Block*>& sibs){
-    switch(criterion){
-        case 1:{
-            double dP = 0.0;
-            for(auto* b : sibs) dP = std::max(dP, pressure_gradient_score(b->W_sp));
-            return dP < 0.015*0.5;
-        }
-        case 2:{
-            double f = 0.0;
-            for(auto* b : sibs) f = std::max(f, trouble_fraction(*b));
-            return f < 0.001;
-        }
-        case 3:{
-            double g = 0.0;
-            for(auto* b : sibs) g = std::max(g, shear_score(b->W_sp));
-            return g < cfg.amr_derefine_threshold;
-        }
-        default:{
-            double s = 0.0;
-            for(auto* b : sibs) s = std::max(s, lohner_score(b->W_sp, _d_));
-            return s < 0.05*0.25;
-        }
+    if(criterion==2){
+        double f = 0.0;
+        for(auto* b : sibs) f = std::max(f, trouble_fraction(*b));
+        return f < 0.001;
     }
+    double s = 0.0;
+    for(auto* b : sibs) s = std::max(s, block_score_host(criterion, b->W_sp));
+    return derefine_from_score(criterion, s);
+}
+
+//SPD_NO_SCORE_BATCH=1 restores the per-block score path, which is the A/B
+//reference the batched one has to reproduce bitwise.
+static bool no_score_batch(){
+    static const bool v = getenv("SPD_NO_SCORE_BATCH") != nullptr;
+    return v;
 }
 
 template<typename Block>
 static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
+                            SD_Solution U_pack, SD_Solution W_pack,
                             std::vector<int>& to_refine,
                             std::vector<std::vector<int>>& to_derefine,
                             int max_level, int criterion){
     to_refine.clear();
     to_derefine.clear();
+    //Every block's score in two launches (primitives, then scores) instead of a
+    //per-block kernel plus a per-block device->host copy inside
+    //refine_flag/derefine_flag. Criterion 2 reads an FV array and criterion 4
+    //needs a forest-wide field scale first, so both keep the per-block path.
+    std::vector<double> score;
+    if(!no_score_batch() && criterion!=2 && !(std::is_same_v<Block,MHD_ader> && criterion==4)
+       && W_pack.Vector.size()>0 && W_pack.nb == forest.Nblocks()){
+        const int nb = forest.Nblocks();
+        Block::primitives_b(U_pack, W_pack);
+        Vector sc("block_scores", nb);
+        block_scores_b(W_pack, criterion, _d_, sc);
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc);
+        score.assign(nb, 0.0);
+        for(int ib=0; ib<nb; ib++) score[ib] = h(ib);
+    }
     //Scores of the |B| criterion, which needs every block's score in one place
     //so the derefine pass can reuse it. Empty for every other criterion, which
     //keeps its per-block refine_flag/derefine_flag test.
@@ -324,8 +496,10 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
     if(bscore.empty()){
         for(int ib=0; ib<forest.Nblocks(); ib++){
             if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
-            if(refine_flag(criterion, blocks[ib]))
-                to_refine.push_back(ib);
+            const bool tag = score.empty()
+                           ? refine_flag(criterion, blocks[ib])
+                           : refine_from_score(criterion, score[ib]);
+            if(tag) to_refine.push_back(ib);
         }
     }
     int n_sib = 1;
@@ -360,6 +534,12 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
                 to_derefine.push_back(kv.second);
             continue;
         }
+        if(!score.empty()){
+            double s = 0.0;
+            for(int ib : kv.second) s = std::max(s, score[ib]);
+            if(derefine_from_score(criterion, s)) to_derefine.push_back(kv.second);
+            continue;
+        }
         std::vector<Block*> sibs;
         for(int ib : kv.second) sibs.push_back(&blocks[ib]);
         if(derefine_flag(criterion, sibs))
@@ -368,15 +548,19 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
 }
 
 void tag_blocks(BlockForest& forest, std::vector<Hydro_ader>& blocks,
+                SD_Solution U_pack, SD_Solution W_pack,
                 std::vector<int>& to_refine,
                 std::vector<std::vector<int>>& to_derefine,
                 int max_level, int criterion){
-    tag_blocks_impl(forest, blocks, to_refine, to_derefine, max_level, criterion);
+    tag_blocks_impl(forest, blocks, U_pack, W_pack, to_refine, to_derefine,
+                    max_level, criterion);
 }
 
 void tag_blocks(BlockForest& forest, std::vector<MHD_ader>& blocks,
+                SD_Solution U_pack, SD_Solution W_pack,
                 std::vector<int>& to_refine,
                 std::vector<std::vector<int>>& to_derefine,
                 int max_level, int criterion){
-    tag_blocks_impl(forest, blocks, to_refine, to_derefine, max_level, criterion);
+    tag_blocks_impl(forest, blocks, U_pack, W_pack, to_refine, to_derefine,
+                    max_level, criterion);
 }

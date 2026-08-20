@@ -77,6 +77,15 @@ struct PhaseScope {
     }
 };
 #define PHASE(name) PhaseScope _phase_scope_(&phase_times_, name)
+//A Kokkos region AND a fenced phase in one scope. The two systems instrumented
+//the same thing with different tools -- Advance_mhd wrapped every step in PHASE,
+//the hydro advance in Region alone -- so SPD_PHASE_TIMES accounted for 0.246 s
+//of hydro's 1.96 s wall while covering 2.888 s of MHD's 8.12 s, and every
+//hydro/MHD comparison in this project was made against a table hydro never
+//filled in. One macro and one set of names (sd/, xchg/, cf/, mood/, rk/, amr/)
+//so the two reports line up phase by phase, which is CLAUDE.md rule 4 applied to
+//the instrument rather than to the code.
+#define STAGE(name) Region _region_scope_(name); PHASE(name)
 
 template<typename Block>
 struct Mesh : public PhysicsModule {
@@ -537,7 +546,12 @@ struct Mesh : public PhysicsModule {
     //forest on every adapt; the block index becomes a kernel axis rather than
     //a host loop. Same-level only for now -- a relation/sub column joins these
     //when mixed levels move onto the same path.
-    struct XchgTable { IntVector recv, send, sub; int n = 0; };
+    //`last` marks the highest sub in a face group and is filled for the
+    //fine->coarse table only. It exists for correct_cf_fv_emf_b: on the FV edge
+    //lattice the two sub-faces of one coarse face share their middle edge point,
+    //so the host loop's "later sub wins" has to become "one owner" before the
+    //transactions can run concurrently.
+    struct XchgTable { IntVector recv, send, sub, last; int n = 0; };
     //One set per relation: same-level copies, coarse->fine prolongation, and
     //fine->coarse restriction. FINER expands to one transaction per fine
     //neighbour, each covering a disjoint quadrant of the coarse face, so the
@@ -545,18 +559,25 @@ struct Mesh : public PhysicsModule {
     XchgTable xt_[3][2], xtco_[3][2], xtfi_[3][2];
 
     static void push_table(XchgTable& t, const std::vector<int>& r,
-                           const std::vector<int>& s, const std::vector<int>& sb){
+                           const std::vector<int>& s, const std::vector<int>& sb,
+                           const std::vector<int>& lt = {}){
         t = XchgTable{};
         if(r.empty()) return;
         t.n = (int)r.size();
         t.recv = IntVector("xchg_recv", r.size());
         t.send = IntVector("xchg_send", r.size());
         t.sub  = IntVector("xchg_sub",  r.size());
+        t.last = IntVector("xchg_last", r.size());
         auto hr = setup_mirror(t.recv);
         auto hs = setup_mirror(t.send);
         auto hb = setup_mirror(t.sub);
-        for(size_t k=0; k<r.size(); k++){ hr(k)=r[k]; hs(k)=s[k]; hb(k)=sb[k]; }
+        auto hl = setup_mirror(t.last);
+        for(size_t k=0; k<r.size(); k++){
+            hr(k)=r[k]; hs(k)=s[k]; hb(k)=sb[k];
+            hl(k) = lt.empty() ? 1 : lt[k];
+        }
         setup_push(t.recv, hr); setup_push(t.send, hs); setup_push(t.sub, hb);
+        setup_push(t.last, hl);
     }
 
     void build_xchg_tables(){
@@ -566,7 +587,7 @@ struct Mesh : public PhysicsModule {
             xtco_[dim][side] = XchgTable{};
             xtfi_[dim][side] = XchgTable{};
             if(!cfg.active[dim]) continue;
-            std::vector<int> r, s, b, cr, cs, cb, fr, fs, fb;
+            std::vector<int> r, s, b, cr, cs, cb, fr, fs, fb, fl;
             const auto& sj = forest.same_jb[dim][side];
             if(!sj.empty()){
                 for(int ib=0; ib<nblocks; ib++){ r.push_back(ib); s.push_back(sj[ib]); b.push_back(0); }
@@ -581,11 +602,12 @@ struct Mesh : public PhysicsModule {
                 for(size_t k=0; k<g.fi_ib.size(); k++)
                 for(size_t t=0; t<g.fi_jb[k].size(); t++){
                     fr.push_back(g.fi_ib[k]); fs.push_back(g.fi_jb[k][t]); fb.push_back((int)t);
+                    fl.push_back(t+1 == g.fi_jb[k].size() ? 1 : 0);
                 }
             }
             push_table(xt_[dim][side],   r,  s,  b);
             push_table(xtco_[dim][side], cr, cs, cb);
-            push_table(xtfi_[dim][side], fr, fs, fb);
+            push_table(xtfi_[dim][side], fr, fs, fb, fl);
         }
     }
 
@@ -1073,6 +1095,158 @@ struct Mesh : public PhysicsModule {
         else correct_coarse_fine_fv_flux(forest, blocks, dim);
     }
 
+    //Coarse-fine EDGE-EMF correction on the SD edge-point lattice, over the
+    //fine->coarse table -- the batched twin of correct_coarse_fine_emf, and the
+    //largest phase left in the mixed-level MHD advance (1.584 s of a 2.619 s
+    //fenced total, 60.5%, on a 352-leaf mesh over 200 steps: 198 fenced calls
+    //each running a host loop over (component, side, coarse face) with a fresh
+    //coarse-shaped scratch allocation, a restrict and a set_interface per face).
+    //
+    //It IS correct_cf_flux_b. That kernel takes its point counts and element
+    //extents from the array it is handed and the restriction matrix as a
+    //parameter, so it is generic in the lattice; the earlier note in this file
+    //blamed the kernel's sub-face arithmetic for a 640-entry mismatch, and the
+    //cause was the CALLER passing amr_RF where the reference restricts the edge
+    //families with restrict_mat_for -- amr_RF_fp on a (p+2)-point transverse
+    //axis. Pass what the reference passes and the two paths agree bitwise.
+    //
+    //No sub-face collision to worry about here: on the edge-point lattice an
+    //element boundary is two distinct slots, so the halves of a coarse face are
+    //disjoint element ranges. The FV lattice shares one slot and needs the
+    //table's `last` column -- see correct_cf_fv_emf_b.
+    void correct_cf_emf_batched(int dim){
+        if constexpr (!is_mhd) return;
+        else {
+        if(forest.max_level()==0 || !cfg.active[dim]) return;
+        //The same component selection as correct_coarse_fine_emf: an edge family
+        //is corrected by the two face directions its edge does NOT run along.
+        if(dim==_x_ || dim==_y_) correct_cf_emf_batched_one(pv.Ez_ep_xy, dim);
+        if(cfg.active[_z_]){
+            if(dim==_x_ || dim==_z_) correct_cf_emf_batched_one(pv.Ey_ep_zx, dim);
+            if(dim==_y_ || dim==_z_) correct_cf_emf_batched_one(pv.Ex_ep_yz, dim);
+        }
+        }
+    }
+
+    //One edge family, both paths, so the A/B check can drive them per component.
+    void correct_cf_emf_batched_one(SD_Solution& E, int dim){
+        const Matrix R = restrict_mat_for(E, dim);
+        for(int side=0; side<2; side++)
+            correct_cf_flux_b(E, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                              xtfi_[dim][side].sub, xtfi_[dim][side].n,
+                              dim, side, R);
+    }
+
+
+    //Run both implementations of the SD edge-EMF correction from the same
+    //pre-state and report where they disagree, the per-block path being the
+    //reference. SPD_CF_EMF_CHECK=1. Same harness as Exchange_sd_check, and it
+    //exists because the dumps alone could not tell me: the batched path was
+    //bit-identical in every default lane and differed by 3% in the one with
+    //SPD_NO_FV_EMF=1, i.e. the FV-lattice correction downstream was overwriting
+    //whatever the disagreement was.
+    //
+    //It splits the report into ACTIVE and GHOST elements, because that is the
+    //first question to ask of any difference on an SD array (CLAUDE.md rule 6):
+    //the per-block path's set_interface_flux sweeps the FULL transverse range
+    //including ghost elements, where the value it writes is the coarse block's
+    //own opposite-face value, while a table-driven kernel only touches the
+    //active range its transactions cover.
+    void correct_cf_emf_check(int dim){
+        if constexpr (!is_mhd) return;
+        else {
+        if(forest.max_level()==0 || !cfg.active[dim]) return;
+        auto check_one = [&](SD_Solution& E, SD_Solution Block::*member,
+                             const char* nm){
+            SD_Vector pre("cfemf_pre", E.Vector.layout());
+            SD_Vector bat("cfemf_bat", E.Vector.layout());
+            Kokkos::deep_copy(pre, E.Vector);
+            correct_cf_emf_batched_one(E, dim);
+            Kokkos::deep_copy(bat, E.Vector);
+            Kokkos::deep_copy(E.Vector, pre);
+            correct_coarse_fine_emf_one(forest, blocks, member, dim);
+            auto r = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), E.Vector);
+            auto b = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bat);
+            const int nader=E.n_ader, nvar=E.n_var;
+            const int Nex=E.Nx-2*NGHx, Ney=E.Ny-2*NGHy, Nez=E.Nz-2*NGHz;
+            double wa=0, wg=0; long na=0, ng=0;
+            int wi[8] = {0,0,0,0,0,0,0,0};
+            for(size_t i0=0;i0<r.extent(0);i0++)
+            for(size_t i1=0;i1<r.extent(1);i1++)
+            for(size_t i2=0;i2<r.extent(2);i2++)
+            for(size_t i3=0;i3<r.extent(3);i3++)
+            for(size_t i4=0;i4<r.extent(4);i4++)
+            for(size_t i5=0;i5<r.extent(5);i5++)
+            for(size_t i6=0;i6<r.extent(6);i6++)
+            for(size_t i7=0;i7<r.extent(7);i7++){
+                const double d = fabs(r(i0,i1,i2,i3,i4,i5,i6,i7)
+                                    - b(i0,i1,i2,i3,i4,i5,i6,i7));
+                if(d==0.0) continue;
+                //Element indices are (i2,i3,i4) = (z,y,x) within the block.
+                const bool act = (int)i4>=NGHx && (int)i4<NGHx+Nex
+                              && (int)i3>=NGHy && (int)i3<NGHy+Ney
+                              && (int)i2>=NGHz && (int)i2<NGHz+Nez;
+                if(act){ na++; if(d>wa){ wa=d;
+                    wi[0]=(int)i0;wi[1]=(int)i1;wi[2]=(int)i2;wi[3]=(int)i3;
+                    wi[4]=(int)i4;wi[5]=(int)i5;wi[6]=(int)i6;wi[7]=(int)i7; } }
+                else   { ng++; if(d>wg) wg=d; }
+            }
+            (void)nader;(void)nvar;
+            printf("  cf_emf check %s dim=%d: active %ld entries max %.6e "
+                   "(worst at ader=%d var=%d elem=(%d,%d,%d) pt=(%d,%d,%d)) | "
+                   "ghost %ld entries max %.6e\n",
+                   nm, dim, na, wa, wi[0], wi[1], wi[2], wi[3], wi[4],
+                   wi[5], wi[6], wi[7], ng, wg);
+        };
+        if(dim==_x_ || dim==_y_) check_one(pv.Ez_ep_xy, &Block::Ez_ep_xy, "Ez");
+        if(cfg.active[_z_]){
+            if(dim==_x_ || dim==_z_) check_one(pv.Ey_ep_zx, &Block::Ey_ep_zx, "Ey");
+            if(dim==_y_ || dim==_z_) check_one(pv.Ex_ep_yz, &Block::Ex_ep_yz, "Ex");
+        }
+        }
+    }
+
+    //Whichever implementation is selected, for one direction.
+    void correct_cf_emf_dim(int dim){
+        static const bool chk = getenv("SPD_CF_EMF_CHECK") != nullptr;
+        if(chk){ correct_cf_emf_check(dim); return; }
+        if(new_xchg() && mhd_batched(2048)) correct_cf_emf_batched(dim);
+        else correct_coarse_fine_emf(forest, blocks, dim);
+    }
+
+    //The cascade's FV-lattice edge EMF, over the same table: one kernel per
+    //(dim, side) in place of a launch per (side, coarse face, sub), each of
+    //which copied m+1 scalars. 0.370 s of the same 2.619 s total (14.1%).
+    void correct_cf_fv_emf_batched(int dim){
+        if constexpr (!is_mhd) return;
+        else {
+        if(forest.max_level()==0 || !cfg.active[dim]) return;
+        if(cfg.active[_z_]) return;              //3D: guarded by the caller
+        if(dim!=_x_ && dim!=_y_) return;
+        const SD_Solution& S = pv.W_cv;
+        const int Ncx=(S.Nx-2*NGHx)*S.nx, Ncy=(S.Ny-2*NGHy)*S.ny;
+        GHOST_LOCALS;
+        const int t    = (dim==_x_) ? _y_ : _x_;   //the direction the edge shares
+        const int lo_n = (dim==_x_?sghx:sghy);
+        const int Nn   = (dim==_x_?Ncx:Ncy);
+        const int lo_t = (t==_x_?sghx:sghy);
+        const int Nt   = (t==_x_?Ncx:Ncy);
+        for(int side=0; side<2; side++){
+            const int cface = (side==0 ? lo_n : lo_n+Nn);
+            const int fface = (side==0 ? lo_n+Nn : lo_n);
+            correct_cf_fv_emf_b(pv.E0z, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                                xtfi_[dim][side].sub, xtfi_[dim][side].last,
+                                xtfi_[dim][side].n, dim, cface, fface, lo_t, Nt);
+        }
+        }
+    }
+
+    //Whichever implementation is selected, for one direction.
+    void correct_cf_fv_emf_dim(int dim){
+        if(new_xchg() && mhd_batched(4096)) correct_cf_fv_emf_batched(dim);
+        else correct_coarse_fine_fv_emf(forest, blocks, dim);
+    }
+
     //Same-level FV flux symmetrization over the side-0 same-level table.
     void symmetrize_fv_flux_batched(int dim){
         if(!cfg.active[dim]) return;
@@ -1248,27 +1422,26 @@ struct Mesh : public PhysicsModule {
         }
     }
 
-    //NOT BATCHED, and here is why, because it looks like it should be.
+    //BATCHED as of this commit -- correct_cf_emf_batched above, mask bit 2048.
+    //What follows is the record of why it looked impossible, since the reasoning
+    //was wrong in an instructive way.
     //
-    //correct_coarse_fine_emf restricts the covering fine EMFs onto a coarse-shaped
-    //buffer and set_interface_flux'es it onto both copies of the shared interface --
-    //structurally identical to correct_coarse_fine_flux, whose batched twin
-    //correct_cf_flux_b is generic in n_ader/n_var and takes the matrix as a
-    //parameter. Reusing it for the EMF families is therefore the obvious move, and
-    //it is WRONG: measured 640 differing entries with max|diff| = 1.0 against the
-    //per-block path on a 2-level OT.
+    //The claim was that correct_cf_flux_b could not serve the EMF families
+    //because its sub-face index arithmetic assumes the FLUX lattice (p+1
+    //transverse points per element) while the edge families live on the
+    //edge-point lattice (p+2), backed by a measurement: 640 differing entries at
+    //max|diff| = 1.0 against the per-block path on a 2-level OT. The kernel is
+    //in fact generic -- it reads nx/ny/nz and NB* off the array it is handed and
+    //takes the restriction matrix as a parameter -- and the mismatch came from
+    //the CALLER, the same caller-side defect that was later found and fixed in
+    //correct_cf_flux_batched: passing amr_RF where the reference restricts the
+    //edge families with restrict_mat_for, which selects amr_RF_fp on a
+    //(p+2)-point axis. Two different weight sets, hence entries differing by
+    //O(1). "Reuse is wrong" was a conclusion about a call, not about a kernel.
     //
-    //The reason is the lattice. The flux arrays carry p+1 points per element in the
-    //transverse direction; the edge-EMF arrays carry p+2 (edge points), and
-    //restrict_mat_for picks amr_RF_fp for that count. correct_cf_flux_b's sub-face
-    //index arithmetic (NB/2 halves in element units, nx points each) assumes the
-    //flux lattice, so it addresses the wrong points on the edge lattice. A batched
-    //EMF correction needs its own index mapping, not this one.
-    //
-    //It is also worth fixing the CORRECTNESS defect first: amr_RF_fp averages the
-    //two fine halves' node j, which are different physical points, so this
-    //correction does not telescope (see the cf_flux gate and [[spd-k-known-issues]]).
-    //Batching an operation that is about to change shape is premature.
+    //The other stated blocker was real and is now gone: amr_RF_fp averaged the
+    //two fine halves' node j (different physical points), so batching would have
+    //frozen in an operation that was about to change. It changed first (5717dc6).
     //
     //SPD_EXCHANGE_CHECK=1: run both implementations from the same pre-state and
     //report the first element where they disagree, the forest path being the
@@ -1406,12 +1579,13 @@ struct Mesh : public PhysicsModule {
     }
 
     void Solve_fluxes_hydro(){
-        { Region r("Fluxes_pre");
+        { STAGE("sd/Fluxes_pre");
           Interpolate_to_fp_batched();
           Compute_Fluxes_batched(); }
-        { Region r("Exchange_fp"); Exchange_fp(); }
-        { Region r("Riemann_Solver"); Riemann_Solver_batched(); }
+        { STAGE("xchg/Exchange_fp"); Exchange_fp(); }
+        { STAGE("sd/Riemann_Solver"); Riemann_Solver_batched(); }
         if(forest.max_level()>0){
+            STAGE("cf/correct_cf_flux");
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) correct_cf_flux_dim(dim);
         }
@@ -1420,7 +1594,7 @@ struct Mesh : public PhysicsModule {
         //is needed because the viscous flux depends on gradients that the
         //first exchange has only just made available.
         if(blocks[0].viscosity){
-            Region r("Viscosity");
+            STAGE("sd/Viscosity");
             for(int b=0;b<nblocks;b++) blocks[b].Viscosity(Xd[b].h,Yd[b].h,Zd[b].h);
             Exchange_fp();
             for(int b=0;b<nblocks;b++) blocks[b].Rusanov_Solver();
@@ -1540,27 +1714,27 @@ struct Mesh : public PhysicsModule {
     }
 
     void FV_Update_solution_hydro(){
-        { Region r("FV_begin"); FV_begin_batched(); }
+        { STAGE("mood/begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
-            { Region r("FV_flux_update"); FV_flux_update_batched(ader); }
-            { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
-            { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
-            { Region r("FV_detect"); FV_detect_batched(); }
-            if(!cfg.fv_only){ Region r("Exchange_flagged");
+            { STAGE("mood/flux_update"); FV_flux_update_batched(ader); }
+            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
+            { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+            { STAGE("mood/detect"); FV_detect_batched(); }
+            if(!cfg.fv_only){ STAGE("xchg/Exchange_flagged");
                                  Exchange_fv_field(&Block::flagged,&pv.flagged); }
-            { Region r("FV_theta"); FV_theta_batched(); }
-            if(!cfg.fv_only){ Region r("Exchange_theta");
+            { STAGE("mood/theta"); FV_theta_batched(); }
+            if(!cfg.fv_only){ STAGE("xchg/Exchange_theta");
                                  Exchange_fv_field(&Block::theta,&pv.theta); }
-            { Region r("FV_blend"); FV_blend_batched(ader); }
+            { STAGE("mood/blend"); FV_blend_batched(ader); }
             if(forest.max_level()>0){
-                Region r("correct_cf_fv_flux");
+                STAGE("cf/correct_cf_fv_flux");
                 for(int dim=0; dim<3; dim++)
                     if(cfg.active[dim])
                         correct_cf_fv_flux_dim(dim);
             }
-            { Region r("FV_commit"); FV_commit_batched(ader); }
+            { STAGE("mood/commit"); FV_commit_batched(ader); }
         }
-        { Region r("FV_end"); FV_end_batched(); }
+        { STAGE("mood/end"); FV_end_batched(); }
     }
 
     //Mesh-level MOOD cascade, the hydro counterpart of MHD_MOOD_update. The
@@ -1570,15 +1744,15 @@ struct Mesh : public PhysicsModule {
     //(Exchange_fv_field_max), which is what keeps a coarse-fine face
     //single-valued.
     void FV_Update_solution_hydro_cascade(){
-        { Region r("FV_begin"); FV_begin_batched(); }
+        { STAGE("mood/begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
-            { Region r("FV_flux_update"); FV_flux_update_batched(ader); }
-            { Region r("Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
-            { Region r("FV_cascade_levels");
+            { STAGE("mood/flux_update"); FV_flux_update_batched(ader); }
+            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
+            { STAGE("mood/cascade_levels");
               compute_primitives(pv.U_old, pv.W_old);
               cascade_levels_pack(ader); }
             for(int rev=0; rev<cfg.max_revs; rev++){
-                { Region r("FV_cascade_candidate");
+                { STAGE("mood/cascade_candidate");
                   cascade_assemble_pack();
                   //The candidate the DMP test judges must come from a
                   //single-valued flux, or the test reads the interface
@@ -1589,9 +1763,9 @@ struct Mesh : public PhysicsModule {
                   FV_candidate_batched(ader); }
                 //SED limits against a two-cell stencil of the candidate, so
                 //each revision needs its own U_new halo.
-                { Region r("Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+                { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
                 int demoted = 0;
-                { Region r("FV_cascade_detect");
+                { STAGE("mood/detect");
                   compute_primitives(pv.U_new, pv.W_new);
                   detect_pack();
                   demoted = update_cascade_b(pv.flagged, pv.cascade, 2); }
@@ -1599,13 +1773,13 @@ struct Mesh : public PhysicsModule {
                 int g; MPI_Allreduce(&demoted,&g,1,MPI_INT,MPI_SUM,Comm); demoted=g;
                 #endif
                 if(demoted==0) break;
-                { Region r("Exchange_cascade"); Exchange_fv_field_max(&Block::cascade,&pv.cascade); }
+                { STAGE("xchg/Exchange_cascade"); Exchange_fv_field_max(&Block::cascade,&pv.cascade); }
             }
-            { Region r("FV_cascade_assemble"); cascade_assemble_pack(); }
-            { Region r("enforce_fv_flux_consistency"); enforce_fv_flux_consistency(); }
-            { Region r("FV_commit"); FV_commit_batched(ader); }
+            { STAGE("mood/assemble"); cascade_assemble_pack(); }
+            { STAGE("cf/enforce_fv_flux"); enforce_fv_flux_consistency(); }
+            { STAGE("mood/commit"); FV_commit_batched(ader); }
         }
-        { Region r("FV_end"); FV_end_batched(); }
+        { STAGE("mood/end"); FV_end_batched(); }
     }
 
     void Update_solution_hydro(){
@@ -1613,8 +1787,11 @@ struct Mesh : public PhysicsModule {
             if(cfg.mood_cascade) FV_Update_solution_hydro_cascade();
             else                 FV_Update_solution_hydro();
         }
-        else for(int b=0;b<nblocks;b++)
-            blocks[b].Update_solution(Xd[b].h,Yd[b].h,Zd[b].h);
+        else {
+            STAGE("sd/Update_solution");
+            for(int b=0;b<nblocks;b++)
+                blocks[b].Update_solution(Xd[b].h,Yd[b].h,Zd[b].h);
+        }
     }
 
     void Exchange_E_mhd(){
@@ -1716,7 +1893,7 @@ struct Mesh : public PhysicsModule {
         static const bool off = getenv("SPD_NO_FV_EMF")!=nullptr;
         if(off) return;
         for(int dim=0; dim<3; dim++)
-            if(cfg.active[dim]) correct_coarse_fine_fv_emf(forest, blocks, dim);
+            if(cfg.active[dim]) correct_cf_fv_emf_dim(dim);
         //After BOTH directions, because what this spreads into the diagonal
         //block is the value the face pass wrote. SPD_NO_EMF_CORNER=1 is the A/B
         //that decides whether a change in the gate came from here.
@@ -1731,14 +1908,16 @@ struct Mesh : public PhysicsModule {
     //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
     //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 the RK
     //bookkeeping tasks (save_state, copy_cons, cons_to_prim, combine, B_to_U,
-    //compute_dt), 1024 mood/detect. SPD_MHD_BATCH_MASK selects which are batched,
-    //which is how a mismatch against the per-block path gets bisected to one
-    //phase instead of guessed at.
+    //compute_dt), 1024 mood/detect, 2048 cf/correct_cf_emf (the SD edge lattice),
+    //4096 cf/enforce_fv_emf (the cascade's FV edge lattice).
+    //SPD_MHD_BATCH_MASK selects which are batched, which is how a mismatch
+    //against the per-block path gets bisected to one phase instead of guessed at.
+    //Mind the arithmetic when picking one: 4095 leaves bit 2048 SET.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 2047;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 8191;
         return (mask & phase) != 0;
     }
 
@@ -2054,9 +2233,11 @@ struct Mesh : public PhysicsModule {
     void Advance_hydro(){
         for(int ader=0;ader<n_ader;ader++){
             Solve_fluxes_hydro();
-            if(ader<n_ader-1)
+            if(ader<n_ader-1){
+                STAGE("sd/Update_prediction");
                 for(int b=0;b<nblocks;b++)
                     blocks[b].Update_prediction(Xd[b].h,Yd[b].h,Zd[b].h);
+            }
         }
         Update_solution_hydro();
     }
@@ -2099,7 +2280,7 @@ struct Mesh : public PhysicsModule {
         if(forest.max_level()>0){
             PHASE("cf/correct_cf_emf");
             for(int dim=0; dim<3; dim++)
-                if(cfg.active[dim]) correct_coarse_fine_emf(forest, blocks, dim);
+                if(cfg.active[dim]) correct_cf_emf_dim(dim);
             //After BOTH directions, for the same reason as the cascade's version:
             //correct_coarse_fine_emf writes the shared FACE and leaves the patch
             //corner multi-valued in the block diagonal to it.
@@ -3003,7 +3184,7 @@ struct Mesh : public PhysicsModule {
         for(int pass=0; pass < cfg.amr_max_level + 1; pass++){
             std::vector<int> to_refine;
             std::vector<std::vector<int>> to_derefine;
-            tag_blocks(forest, blocks, to_refine, to_derefine,
+            tag_blocks(forest, blocks, pv.U_sp, pv.W_sp, to_refine, to_derefine,
                        cfg.amr_max_level, cfg.amr_criterion);
             if(pass==0 && !to_derefine.empty() && Master)
                 std::cout<<"WARNING: the refinement criterion wants to DEREFINE "
@@ -3026,7 +3207,8 @@ struct Mesh : public PhysicsModule {
             if constexpr (is_mhd){
                 if(forest.max_level()==0) Sync_face_B_mhd();
                 else                      Exchange_face_B_mhd();
-                for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
+                { STAGE("amr/finish_ic");
+          for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib); }
             }
             if(Master)
                 std::cout<<"initial refine pass "<<pass+1<<": "<<nb_before<<" -> "
@@ -3051,8 +3233,9 @@ struct Mesh : public PhysicsModule {
         //a no-op should not have paid for a snapshot of every block.
         std::vector<int> to_refine;
         std::vector<std::vector<int>> to_derefine;
-        tag_blocks(forest, blocks, to_refine, to_derefine,
-                   cfg.amr_max_level, cfg.amr_criterion);
+        { STAGE("amr/tag");
+          tag_blocks(forest, blocks, pv.U_sp, pv.W_sp, to_refine, to_derefine,
+                     cfg.amr_max_level, cfg.amr_criterion); }
         //SPD_NO_DEREFINE=1 keeps every refinement once it is made, which
         //separates a bad derefine (restriction) from a bad refine
         //(prolongation) when a regrid-driven run goes unstable.
@@ -3083,24 +3266,29 @@ struct Mesh : public PhysicsModule {
         //block's neighbours, so the ghosts the snapshots carry have to describe
         //this state and not the last stage's. Free for p >= 1, whose matrix
         //prolongation reads the element only.
-        if(Xd[0].p == 0)
+        if(Xd[0].p == 0){
+            STAGE("amr/pre_exchange");
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim]) Exchange_sd_field(&Block::U_sp, dim);
-        std::vector<BlockSnap> snap(nblocks);
-        for(int ib=0; ib<nblocks; ib++){
-            snap[ib] = make_empty_snap(ib, "snap");
-            capture_block_snap(ib, snap[ib]);
         }
+        std::vector<BlockSnap> snap(nblocks);
+        { STAGE("amr/snapshot");
+          for(int ib=0; ib<nblocks; ib++){
+              snap[ib] = make_empty_snap(ib, "snap");
+              capture_block_snap(ib, snap[ib]);
+          } }
         auto key_to_ib = snapshot_keys();
 
         int old_M = forest.max_level();
-        auto deref_keys = forest.keys_of(to_derefine);
-        if(!to_refine.empty()) forest.refine_blocks(to_refine);
-        const int nb_ref = forest.Nblocks();
-        if(!deref_keys.empty()) forest.derefine_blocks_keys(deref_keys);
-        const int nb_deref = forest.Nblocks();
-        forest.enforce_2to1_balance();
-        const int nb_bal = forest.Nblocks();
+        int nb_ref, nb_deref, nb_bal;
+        { STAGE("amr/forest");
+          auto deref_keys = forest.keys_of(to_derefine);
+          if(!to_refine.empty()) forest.refine_blocks(to_refine);
+          nb_ref = forest.Nblocks();
+          if(!deref_keys.empty()) forest.derefine_blocks_keys(deref_keys);
+          nb_deref = forest.Nblocks();
+          forest.enforce_2to1_balance();
+          nb_bal = forest.Nblocks(); }
 
         //The forest the next step runs on must have every level jump in a
         //group; a dropped face silently skips both its ghost fill and its
@@ -3110,8 +3298,8 @@ struct Mesh : public PhysicsModule {
                      <<forest.dropped_faces<<" coarse-fine face(s) left ungrouped"
                      <<" after enforce_2to1_balance"<<std::endl;
 
-        build_block_solvers(false);
-        transfer_from_snapshot(key_to_ib, snap);
+        { STAGE("amr/build_solvers"); build_block_solvers(false); }
+        { STAGE("amr/transfer");       transfer_from_snapshot(key_to_ib, snap); }
         if constexpr (is_mhd) report_divb("after transfer");
         if constexpr (is_mhd){
             if(forest.max_level()==0) Sync_face_B_mhd();
@@ -3139,7 +3327,7 @@ struct Mesh : public PhysicsModule {
                          <<(prolong_unfixable ? std::to_string(prolong_unfixable) : "");
             std::cout<<std::endl;
         }
-        recompute_dt();
+        { STAGE("amr/recompute_dt"); recompute_dt(); }
         if(forest.max_level() != old_M)
             init_W_glob(Xg, Yg, Zg, x_fp_);
     }

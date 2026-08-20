@@ -33,9 +33,10 @@ write one.
 Keep the per-block path and gate the batched one behind a switch:
 `SPD_MHD_BATCH_MASK` bits for MHD (1 begin, 2 after_U_halo, 4 assemble, 8 commit,
 16 Fluxes_pre, 32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 RK
-bookkeeping, 1024 mood/detect; default 2047), `SPD_NO_MHD_BATCH`,
-`SPD_NO_RK_BATCH`, `SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both
-paths. Verify on a **mixed-level** mesh, and with the feature that exercises the
+bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf;
+default 8191), `SPD_NO_MHD_BATCH`, `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the
+AMR refinement scores), `SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both
+paths -- and the block maps too, for anything that feeds a refinement decision. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
 
 - ON: the batched detection segfaulted on its first run at `mood_force_level=-1`
@@ -47,6 +48,14 @@ code turned **both ON and OFF** — both directions have already bitten:
 
 A batched path must reproduce its reference's EARLY RETURNS, not just its
 arithmetic.
+
+**The A/B catches what the suite structurally cannot.** Batching the refinement
+scores, a device-code fix captured the ghost counts as `gx/gy/gz` -- which are the
+shear indicator's own flattened cell indices, so `NGHz+gz/pz` became `gz+gz/pz`.
+Three lanes went non-identical in the A/B (dumps AND block maps) while the whole
+41-config suite stayed green, because the AMR configs that use the shear criterion
+check mass, divB and finiteness -- all of which a differently-refined mesh
+satisfies. Compare the tags, not just the health of the run.
 
 A single mask bit per phase is what lets a mismatch be bisected to one phase in
 one run instead of guessed at. Mind the arithmetic when you pick a mask: 1023
@@ -64,6 +73,14 @@ Seven top-level tasks had no fence, and they were 74% of the mixed-level MHD ste
 The profile that guided a whole optimisation round reported `cf/correct_cf_emf` at
 "66-72%" — of the 2.5 s that happened to be fenced, not of the 20 s run. Fence any
 new phase.
+
+Use `STAGE(name)` — a Kokkos region AND a fenced phase in one scope — and the
+`sd/ xchg/ cf/ mood/ rk/ amr/` prefixes both systems now share. The hydro advance
+was instrumented with `Region` alone, which is a no-op without a Kokkos tool, so
+`SPD_PHASE_TIMES` accounted for 0.246 s of hydro's 1.96 s wall and every
+hydro-vs-MHD comparison here was made against a table hydro never filled in.
+Nesting is fine and useful: `amr/adapt` contains `amr/tag`, which is how the
+regrid cost turned out to be 100% tagging (0.207 s of 0.207 s).
 
 Reading the report:
 - `SPD_PHASE_TIMES=1`, printed at each output, **cumulative up to that output** —
@@ -91,7 +108,17 @@ there, and pushed it back, shadowing a correct device kernel in the `#else`. All
 six were numerically CORRECT, so no test could catch them, and the suite runs on
 CPU where the branch is not even compiled. One of them cost 39x
 (`mhd_compute_primitives`/`_conservatives`/`_dt`: MHD/hydro went 53x → 2.9x when
-they were deleted). Mirrors are for setup and for output only — see
+they were deleted).
+
+`amr_criteria.cpp` is the exception the grep will flag: its branches are a
+deliberate host REFERENCE, kept behind `SPD_NO_SCORE_BATCH=1`. But note what was
+actually wrong there — there was no device kernel to shadow, the `#else` looped on
+the host too, and the cost was the `W.copy()` each score opens with: ~1000
+synchronous block copies per regrid, i.e. **100% of `amr/adapt`**. Now one launch,
+one thread per block (`block_scores_b`), 0.42 → 0.011 s (38x). One thread per
+block rather than per cell ON PURPOSE: each thread walks the host loop's order, so
+Löhner's order-dependent denominator sum stays bit-identical. Criteria 2 (trouble
+fraction) and 4 (|B| Löhner) still take the per-block path. Mirrors are for setup and for output only — see
 `.cursor/rules/kokkos-no-uvm.mdc` for the dual-view pattern.
 
 ## 6. Ghosts
@@ -110,6 +137,18 @@ they were deleted). Mirrors are for setup and for output only — see
   that stood for five days (raw 2.2e-02 and 7.9e-02, interior 9.1e-15).
 - Any cross-backend golden failure: **split interior vs ghost before anything
   else.** Two of the three long-standing "divergences" evaporated under that split.
+- **One ghost point layer is NOT dead, and it bit the EMF batching.** The
+  per-block `set_interface_flux` sweeps the FULL transverse range, so it also
+  writes the coarse block's own opposite-face EMF into its TRANSVERSE-ghost slots;
+  the table-driven kernel only touches the range its transactions cover. Measured
+  with `SPD_CF_EMF_CHECK=1`: active region identical on every call (112 calls,
+  static and dynamic lanes), all 640 differing entries in ghost elements. It still
+  reaches the solution, because `edge_integral` ranges over `N+1` elements — a
+  block has one more edge than cells, so the last edge point lives in the ghost
+  element's storage. With the FV-lattice correction ON the affected slots are
+  overwritten and every lane is bit-identical; with `SPD_NO_FV_EMF=1` they are not,
+  and that lane's dumps move by 3%. Split ACTIVE from GHOST before concluding
+  anything about an SD-array difference.
 
 ## 7. Gates: never weaken one to make it green, and give it a negative control
 
@@ -145,10 +184,24 @@ AthenaK does exactly this (`src/bvals/flux_correct_fc.cpp`: 2D injects
 `flx.x3e(m,0,fj,fi)`, 3D averages `0.5*(x3e(fk) + x3e(fk+1))`), applied on the
 coarse side only, in one batched kernel over (component, block, neighbour).
 
-`amr_RF_fp` (`amr.cpp`) violates this: `rf_fp(j,j)=0.5; rf_fp(j,m+j)=0.5` averages
-node j of the two fine halves, which are two DIFFERENT physical points. It
-preserves constants and destroys the coincident-point identity telescoping needs.
-That is why the SD path drifts 2.54e-03 where the cascade path drifts 1e-17.
+`amr_RF_fp` (`amr.cpp`) used to violate this -- `rf_fp(j,j)=0.5; rf_fp(j,m+j)=0.5`
+averaged node j of the two fine halves, two DIFFERENT physical points. It
+preserved constants and destroyed the coincident-point identity telescoping
+needs, which is why the SD path drifted 2.54e-03 where the cascade path drifts
+1e-17. **FIXED in `5717dc6`:** each coarse fp node is now restricted from the fine
+half that CONTAINS it (a Lagrange interpolation, exact to degree m-1), which
+collapses to injection at every coincident node with no special case. SD drift
+1.39e-17, same-level control exactly 0.
+
+Both corrections are BATCHED off the fine->coarse transaction table (`xtfi_`),
+which is AthenaK's shape -- one kernel over (component, block, neighbour):
+`cf/correct_cf_emf` 1.578 -> 0.015 s (105x) and `cf/enforce_fv_emf` 0.353 ->
+0.011 s (32x) on 352 leaves over 200 steps, mask bits 2048 and 4096. The SD one
+IS `correct_cf_flux_b`: that kernel takes its point counts off the array and the
+matrix as a parameter, so it is generic in the lattice. The note that said
+reusing it was wrong ("640 differing entries at max|diff| = 1.0") was measuring
+two things at once -- the wrong matrix (`amr_RF` where the reference uses
+`restrict_mat_for` -> `amr_RF_fp`), and the ghost ring (see rule 6).
 
 ## 9. Remote runs (apollo)
 
