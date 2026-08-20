@@ -218,8 +218,17 @@ two things at once -- the wrong matrix (`amr_RF` where the reference uses
 - Verify the remote binary's provenance BEFORE launching, and record it: md5 the
   source, check the binary mtime against the run's first dump. A paper-scale
   reference once ran on a binary that was rebuilt mid-run.
-- **Never rebuild a binary a production run is using.** Linux refuses to write a
-  running executable, so the link fails; use a second tree.
+- **Never rebuild a binary a production run is using** -- but not for the reason
+  this rule used to give. "Linux refuses to write a running executable, so the
+  link fails" is WRONG for `cmake --build`: `ld` creates a fresh inode
+  (unlink + create), so the link succeeds, the running process keeps the old
+  image and finishes correctly. Measured: a paper-scale run was rebuilt under it
+  mid-flight and its remaining dumps still matched the reference bit for bit.
+  ETXTBSY only appears when something writes the path IN PLACE (`cp`, `install`).
+  The real hazard is PROVENANCE: after the link, the binary at that path is no
+  longer the one the run started with, and this project has already published a
+  reference that "ran on a binary rebuilt mid-run". Use a second tree, and record
+  the src md5 at launch.
 - `nvcc` is not on `PATH` over non-interactive ssh: `export PATH=/usr/local/cuda/bin:$PATH`,
   or cmake fails with a bogus `string sub-command REPLACE` error from Kokkos.
 - Incremental builds go stale on `structs.hpp`/`define.hpp`: delete the objects
