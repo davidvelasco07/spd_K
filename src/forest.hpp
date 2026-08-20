@@ -152,6 +152,7 @@ void correct_coarse_fine_flux(BlockForest&, std::vector<Block>&, int dim);
 //the per-block forest_exchange_sd picks (they must agree bitwise).
 Matrix prolong_mat_for(const SD_Solution& U, int dim);
 Matrix restrict_mat_for(const SD_Solution& U, int dim);
+void mirror_faces_b(SD_Solution U, IntVector ids, int nids, int dim, int side);
 
 template<typename Block>
 void correct_coarse_fine_emf(BlockForest&, std::vector<Block>&, int dim);

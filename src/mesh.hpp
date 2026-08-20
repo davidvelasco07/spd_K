@@ -924,8 +924,11 @@ struct Mesh : public PhysicsModule {
     //count from 974k to 486k, with restrict_face_overlap_sp (197k) gone and the
     //allocation traffic down 95-98%.
     void correct_cf_flux_dim(int dim){
-        if(new_xchg() && !is_mhd) correct_cf_flux_batched(dim);
-        else                      correct_coarse_fine_flux(forest, blocks, dim);
+        //MHD reaches this through the same block_Ffp arrays (F_ader_fp_*) and the
+        //same amr_RF matrix as hydro, so the batched kernel applies unchanged --
+        //it was only ever gated off because nothing had checked it.
+        if(new_xchg() && (!is_mhd || mhd_batched())) correct_cf_flux_batched(dim);
+        else correct_coarse_fine_flux(forest, blocks, dim);
     }
 
     //Whichever implementation is selected, for one direction.
@@ -1066,10 +1069,6 @@ struct Mesh : public PhysicsModule {
     //Matrices come from prolong_mat_for / restrict_mat_for on the pack view, not
     //the bare amr_P / amr_RF that gather_all_fp passes: the per-block path selects
     //them per array, and face B is one of the arrays where the choice differs.
-    //cf_prolong must be true here: the cf_prolong=false variant mirrors the
-    //coarse-fine ghosts instead of transferring them, and mirror_face_to_ghost has
-    //no batched form. Exchange_sd_field keeps that case on the per-block path, so
-    //the edge-EMF exchange (Exchange_E_mhd, 15.1%) is not covered yet.
     void gather_all_sd(SD_Solution& P, SD_Solution Block::*member, int dim,
                        bool cf_prolong){
         (void)member;
@@ -1083,6 +1082,12 @@ struct Mesh : public PhysicsModule {
                 gather_fp_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
                                 xtfi_[dim][side].sub, xtfi_[dim][side].n,
                                 dim, side, restrict_mat_for(P, dim));
+            } else {
+                //cf_prolong=false: the ghost takes the block's OWN face value.
+                //Both relation lists get mirrored, exactly as forest_exchange_sd
+                //does, and the receiver ids are the tables' recv arrays.
+                mirror_faces_b(P, xtco_[dim][side].recv, xtco_[dim][side].n, dim, side);
+                mirror_faces_b(P, xtfi_[dim][side].recv, xtfi_[dim][side].n, dim, side);
             }
             for(int ib : forest.face_groups[dim][side].bc_ib)
                 apply_domain_bc_fp(blocks[ib].*member, dim, side);
@@ -1107,6 +1112,28 @@ struct Mesh : public PhysicsModule {
         }
     }
 
+    //NOT BATCHED, and here is why, because it looks like it should be.
+    //
+    //correct_coarse_fine_emf restricts the covering fine EMFs onto a coarse-shaped
+    //buffer and set_interface_flux'es it onto both copies of the shared interface --
+    //structurally identical to correct_coarse_fine_flux, whose batched twin
+    //correct_cf_flux_b is generic in n_ader/n_var and takes the matrix as a
+    //parameter. Reusing it for the EMF families is therefore the obvious move, and
+    //it is WRONG: measured 640 differing entries with max|diff| = 1.0 against the
+    //per-block path on a 2-level OT.
+    //
+    //The reason is the lattice. The flux arrays carry p+1 points per element in the
+    //transverse direction; the edge-EMF arrays carry p+2 (edge points), and
+    //restrict_mat_for picks amr_RF_fp for that count. correct_cf_flux_b's sub-face
+    //index arithmetic (NB/2 halves in element units, nx points each) assumes the
+    //flux lattice, so it addresses the wrong points on the edge lattice. A batched
+    //EMF correction needs its own index mapping, not this one.
+    //
+    //It is also worth fixing the CORRECTNESS defect first: amr_RF_fp averages the
+    //two fine halves' node j, which are different physical points, so this
+    //correction does not telescope (see the cf_flux gate and [[spd-k-known-issues]]).
+    //Batching an operation that is about to change shape is premature.
+    //
     //SPD_EXCHANGE_CHECK=1: run both implementations from the same pre-state and
     //report the first element where they disagree, the forest path being the
     //reference. Same harness the FV and fp exchanges are checked with.
@@ -1154,7 +1181,7 @@ struct Mesh : public PhysicsModule {
             //alone, so the batched gather can be A/B'd without also switching the
             //fp and FV exchanges the way SPD_OLD_XCHG does.
             static const bool no_sd_gather = getenv("SPD_NO_SD_GATHER")!=nullptr;
-            if(new_xchg() && packed && cf_prolong && !no_sd_gather){
+            if(new_xchg() && packed && !no_sd_gather){
                 if(exchange_check()) Exchange_sd_check(*packed, member, dim, cf_prolong);
                 else                 gather_all_sd(*packed, member, dim, cf_prolong);
                 return;
@@ -1458,13 +1485,13 @@ struct Mesh : public PhysicsModule {
         if constexpr (!is_mhd) return;
         bool az = cfg.active[_z_];
         //Edge EMF: CF ghosts mirrored (fp P/R unstable); same-level copied.
-        Exchange_sd_field(&Block::Ez_ep_xy, _x_, false);
-        Exchange_sd_field(&Block::Ez_ep_xy, _y_, false);
+        Exchange_sd_field(&Block::Ez_ep_xy, _x_, false, &pv.Ez_ep_xy);
+        Exchange_sd_field(&Block::Ez_ep_xy, _y_, false, &pv.Ez_ep_xy);
         if(az){
-            Exchange_sd_field(&Block::Ey_ep_zx, _x_, false);
-            Exchange_sd_field(&Block::Ey_ep_zx, _z_, false);
-            Exchange_sd_field(&Block::Ex_ep_yz, _y_, false);
-            Exchange_sd_field(&Block::Ex_ep_yz, _z_, false);
+            Exchange_sd_field(&Block::Ey_ep_zx, _x_, false, &pv.Ey_ep_zx);
+            Exchange_sd_field(&Block::Ey_ep_zx, _z_, false, &pv.Ey_ep_zx);
+            Exchange_sd_field(&Block::Ex_ep_yz, _y_, false, &pv.Ex_ep_yz);
+            Exchange_sd_field(&Block::Ex_ep_yz, _z_, false, &pv.Ex_ep_yz);
         }
     }
 

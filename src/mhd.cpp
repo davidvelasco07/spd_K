@@ -120,20 +120,14 @@ void mhd_compute_conservatives(SD_Solution W, SD_Solution U){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
     int nader=W.n_ader;
     double gm=cfg.gamma;
-#ifdef KOKKOS_ENABLE_CUDA
-    SD_Vector_h Wh = Kokkos::create_mirror_view(W.Vector);
-    SD_Vector_h Uh = Kokkos::create_mirror_view(U.Vector);
-    Kokkos::deep_copy(Wh, W.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        for(int t_id=0;t_id<nader;t_id++){
-            double w[NMHD], u[NMHD];
-            for(int var=0;var<NMHD;var++) w[var]=Wh(t_id,var,k,j,i,kk,jj,ii);
-            mhd_conservatives(w,u,gm);
-            for(int var=0;var<NMHD;var++) Uh(t_id,var,k,j,i,kk,jj,ii)=u[var];
-        }
-    });
-    Kokkos::deep_copy(U.Vector, Uh);
-#else
+    //The CUDA branch here was a full HOST ROUND TRIP: pull the whole 8-variable
+    //SD array to a mirror, compute on the host, push it back -- every stage, on
+    //every block. The #else branch below did the identical work as a device
+    //kernel, so CUDA was paying hundreds of MB of transfer per stage to run the
+    //same arithmetic more slowly. Measured on a 1024^2 single block, 200 steps:
+    //MHD cost 64.5 s against the hydro PLM lane's 1.28 s -- 50x, for a scheme
+    //that should cost about 3x. Same defect class as project_face_to_row
+    //(01a2913, f089a35) and mhd_face_B_to_fp (ef3d49a); this makes six.
     SD_Vector Vw = W.Vector;
     SD_Vector Vu = U.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
@@ -144,7 +138,6 @@ void mhd_compute_conservatives(SD_Solution W, SD_Solution U){
             for(int var=0;var<NMHD;var++) Vu(t_id,var,k,j,i,kk,jj,ii)=u[var];
         }
     });
-#endif
 }
 
 void mhd_compute_primitives(SD_Solution U, SD_Solution W){
@@ -152,20 +145,6 @@ void mhd_compute_primitives(SD_Solution U, SD_Solution W){
     int nader=W.n_ader;
     double gm=cfg.gamma;
     double dfl=cfg.dfloor, pfl=cfg.pfloor;
-#ifdef KOKKOS_ENABLE_CUDA
-    SD_Vector_h Uh = Kokkos::create_mirror_view(U.Vector);
-    SD_Vector_h Wh = Kokkos::create_mirror_view(W.Vector);
-    Kokkos::deep_copy(Uh, U.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        for(int t_id=0;t_id<nader;t_id++){
-            double u[NMHD], w[NMHD];
-            for(int var=0;var<NMHD;var++) u[var]=Uh(t_id,var,k,j,i,kk,jj,ii);
-            mhd_primitives(u,w,gm,dfl,pfl);
-            for(int var=0;var<NMHD;var++) Wh(t_id,var,k,j,i,kk,jj,ii)=w[var];
-        }
-    });
-    Kokkos::deep_copy(W.Vector, Wh);
-#else
     SD_Vector Vu = U.Vector;
     SD_Vector Vw = W.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
@@ -176,7 +155,6 @@ void mhd_compute_primitives(SD_Solution U, SD_Solution W){
             for(int var=0;var<NMHD;var++) Vw(t_id,var,k,j,i,kk,jj,ii)=w[var];
         }
     });
-#endif
 }
 
 void mhd_compute_primitives(FV_Solution U, FV_Solution W){
@@ -751,26 +729,9 @@ double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
     double gm=cfg.gamma, cfl=cfg.cfl;
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
-#ifdef KOKKOS_ENABLE_CUDA
-    SD_Vector_h Wh = Kokkos::create_mirror_view(W.Vector);
-    Kokkos::deep_copy(Wh, W.Vector);
-    double min_value = 1;
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        double rho=Wh(0,_mrho_,k,j,i,kk,jj,ii);
-        double p  =Wh(0,_mprs_,k,j,i,kk,jj,ii);
-        double Bx =Wh(0,_mbx_,k,j,i,kk,jj,ii);
-        double By =Wh(0,_mby_,k,j,i,kk,jj,ii);
-        double Bz =Wh(0,_mbz_,k,j,i,kk,jj,ii);
-        double c_max=0, dx_min=1;
-        if(ax){ c_max += fabs(Wh(0,_mvx_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bx,By,Bz,gm); dx_min=min(dx_min,dx); }
-        if(ay){ c_max += fabs(Wh(0,_mvy_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,By,Bz,Bx,gm); dx_min=min(dx_min,dy); }
-        if(az){ c_max += fabs(Wh(0,_mvz_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bz,Bx,By,gm); dx_min=min(dx_min,dz); }
-        if(c_max > 0){
-            double dt_min = cfl*dx_min/c_max/px;
-            if(dt_min < min_value) min_value = dt_min;
-        }
-    });
-#else
+    //Same host round trip as the conversions above, and worse: the reduction ran
+    //as a SERIAL host loop over every cell, every step. The #else branch is a
+    //Kokkos min-reduction.
     SD_Vector Vw = W.Vector;
     double min_value = sd_min_cells(Nz,Ny,Nx,pz,py,px,
         KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& reduce){
@@ -788,7 +749,6 @@ double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz){
                 reduce = reduce < dt_min ? reduce : dt_min;
             }
         });
-#endif
     #ifdef MPI
     double g;
     MPI_Allreduce(&min_value,&g,1,MPI_DOUBLE,MPI_MIN,Comm);

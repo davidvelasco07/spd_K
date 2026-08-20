@@ -1109,6 +1109,41 @@ template void forest_exchange_fv_max<MHD_ader>(BlockForest&, std::vector<MHD_ade
 // the kernel applies (copy / prolongate / overlap-restrict), not the loop
 // structure; same-level is the degenerate case where the operator is a copy.
 //======================================================================
+//Mirror the coarse-fine ghost faces of every block in a list, one kernel instead
+//of one per block. This is the cf_prolong=false half of forest_exchange_sd, used
+//by the edge-EMF exchange: the ghost takes the block's OWN face value rather than
+//a neighbour's, so there is no send index and no transfer matrix.
+void mirror_faces_b(SD_Solution U, IntVector ids, int nids, int dim, int side){
+    if(nids <= 0) return;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader = U.n_ader, nvar = U.n_var;
+    //Collapse the normal axis: one thread per destination point on the face.
+    int Nx = (dim==_x_ ? 1 : U.Nx);
+    int Ny = (dim==_y_ ? 1 : U.Ny);
+    int Nz = (dim==_z_ ? 1 : U.Nz);
+    int px = (dim==_x_ ? 1 : U.nx);
+    int py = (dim==_y_ ? 1 : U.ny);
+    int pz = (dim==_z_ ? 1 : U.nz);
+    //Ghost element/point, and the block's own first (side 0) or last (side 1)
+    //active face -- the same index pair mirror_face_to_ghost uses.
+    const int de = (side==0 ? 0   : N-1);
+    const int dp = (side==0 ? n-1 : 0  );
+    const int se = (side==0 ? 1   : N-2);
+    const int sp = (side==0 ? 0   : n-1);
+    sd_for_cells_b(nids,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        const int off = ids(b)*nader;
+        int Nid[3], nid[3], Nis[3], nis[3];
+        amr_indices(Nid,nid,k,j,i,kk,jj,ii,de,dp,dim);
+        amr_indices(Nis,nis,k,j,i,kk,jj,ii,se,sp,dim);
+        for(int t_id=0; t_id<nader; t_id++)
+        for(int var=0; var<nvar; var++)
+            U.Vector(off+t_id,var,Nid[_z_],Nid[_y_],Nid[_x_],nid[_z_],nid[_y_],nid[_x_])
+              = U.Vector(off+t_id,var,Nis[_z_],Nis[_y_],Nis[_x_],nis[_z_],nis[_y_],nis[_x_]);
+    }, "mirror_faces_b");
+}
+
 void gather_fp_same(SD_Solution U, IntVector recv, IntVector send,
                     int ntr, int dim, int side){
     if(ntr <= 0) return;
