@@ -2271,11 +2271,20 @@ struct Mesh : public PhysicsModule {
             Exchange_fv_field_max(&Block::cascade,
                                   mhd_batched() ? &pv.mhd_cascade : nullptr);
         }
+        //The revision loop above ends with assemble + both consistency passes
+        //already applied, and at a PINNED level `detect` demoted nothing, so
+        //this second trio recomputes an identical result from unchanged inputs:
+        //assign_face_flux is idempotent by construction (see its comment), the
+        //coarse-fine restriction reads the same fine values, and symmetrizing an
+        //already-single-valued face returns it unchanged. Only valid when the
+        //loop actually ran -- `max_revs = 0` makes this trio the only one.
+        if(!(pinned_level() >= 0 && cfg.max_revs > 0)){
         { PHASE("mood/assemble");
           if(mhd_batched(4)) MOOD_assemble_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_assemble(); }
         { PHASE("cf/enforce_fv_flux"); enforce_fv_flux_consistency(); }
         { PHASE("cf/enforce_fv_emf");  enforce_fv_emf_consistency(); }
+        }
         { PHASE("mood/commit_assembled");
           if(mhd_batched(8)) MOOD_commit_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_commit_assembled(); }
