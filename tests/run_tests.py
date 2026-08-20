@@ -462,7 +462,23 @@ CONFIGS = {
         "overrides": ["mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=4",
                       "time/tlim=0.1", "output/dt=0.1"],
         "ndim": 3,
-        "checks": ["mass_strict", "divb", "golden"],
+        "checks": ["mass_strict", "divb", "golden_active"],
+        # GHOSTS EXCLUDED, and this is the whole story of the "GPU/CPU
+        # divergence" this lane carried since 2026-08-14. Measured 2026-08-19,
+        # CPU vs GPU at t=0.1: the raw-file comparison reproduces the reported
+        # failure exactly, and ALL of it is in the ghost ring --
+        #     true2d  raw 2.205e-02 | interior 9.10e-15 | ghosts 4.46e-02
+        #     3D      raw 7.901e-02 | interior 9.55e-15 | ghosts 1.60e-01
+        # -- with B agreeing to 1.5e-17 on both. update_solution runs over
+        # sd_for_cells, i.e. it time-advances ghost ELEMENTS too, using whatever
+        # sits in their flux slots; the pure-SD path (fallback=false) never
+        # refills that ring, so it keeps deterministic-but-meaningless values
+        # that differ between backends. Deterministic: two GPU runs are
+        # md5-identical. The same config with job/fallback=true agrees to
+        # 1.8e-14 INCLUDING ghosts, because the FV halo does refill them.
+        # Comparing the active region is strictly stronger here: it resolves a
+        # 1e-14 change where the raw check was masked by 1e-2 of ghost noise.
+        "nvar": 8,
         "field": "W_cv_N16p3_1_0.dat",
         "t_end": 0.1,
         "golden_name": "mhd_loop",
@@ -504,7 +520,23 @@ CONFIGS = {
         "overrides": ["mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=1",
                       "time/tlim=0.1", "output/dt=0.1"],
         "ndim": 2,
-        "checks": ["mass_strict", "divb", "golden"],
+        "checks": ["mass_strict", "divb", "golden_active"],
+        # GHOSTS EXCLUDED, and this is the whole story of the "GPU/CPU
+        # divergence" this lane carried since 2026-08-14. Measured 2026-08-19,
+        # CPU vs GPU at t=0.1: the raw-file comparison reproduces the reported
+        # failure exactly, and ALL of it is in the ghost ring --
+        #     true2d  raw 2.205e-02 | interior 9.10e-15 | ghosts 4.46e-02
+        #     3D      raw 7.901e-02 | interior 9.55e-15 | ghosts 1.60e-01
+        # -- with B agreeing to 1.5e-17 on both. update_solution runs over
+        # sd_for_cells, i.e. it time-advances ghost ELEMENTS too, using whatever
+        # sits in their flux slots; the pure-SD path (fallback=false) never
+        # refills that ring, so it keeps deterministic-but-meaningless values
+        # that differ between backends. Deterministic: two GPU runs are
+        # md5-identical. The same config with job/fallback=true agrees to
+        # 1.8e-14 INCLUDING ghosts, because the FV halo does refill them.
+        # Comparing the active region is strictly stronger here: it resolves a
+        # 1e-14 change where the raw check was masked by 1e-2 of ghost noise.
+        "nvar": 8,
         "field": "W_cv_N16p3_1_0.dat",
         "t_end": 0.1,
         "golden_name": "mhd_loop_2d",
@@ -1047,10 +1079,23 @@ def check_golden(outdir, cfg, regen, active_only=False):
     if active_only:
         nc = n_from_field(cfg["field"])
         nvar = cfg.get("nvar", NVAR)
-        shp = shape_for(nc, cfg["ndim"], nvar)
-        sl = tuple(slice(NGH, -NGH) if s > 1 else slice(None) for s in shp[2:5])
-        s = (slice(None),) * 2 + sl
-        a, b = a.reshape(shp)[s], b.reshape(shp)[s]
+        ndim = cfg["ndim"]
+        # Element grid: nc elements per active transverse dim, but the z extent
+        # is taken from the FILE SIZE rather than assumed equal to nc -- the
+        # field-loop 3D lane is nx1=nx2=16 with nx3=4, and shape_for's cubic
+        # assumption reshapes it to 18 in z and fails.
+        npx, npy, npz = n, (n if ndim >= 2 else 1), (n if ndim >= 3 else 1)
+        Nx = nc + 2 * NGH
+        Ny = nc + 2 * NGH if ndim >= 2 else 1
+        per_z = nvar * Ny * Nx * npz * npy * npx
+        Nz = a.size // per_z if per_z else 1
+        shp = (1, nvar, Nz, Ny, Nx, npz, npy, npx)
+        if a.size != int(np.prod(shp)):
+            return False, (f"golden active-region reshape failed: {a.size} "
+                           f"elements do not fit {shp}")
+        sl = tuple(slice(NGH, -NGH) if e > 1 else slice(None) for e in (Nz, Ny, Nx))
+        idx = (slice(None),) * 2 + sl
+        a, b = a.reshape(shp)[idx], b.reshape(shp)[idx]
     diff = np.abs(a - b).max() / max(np.abs(a).max(), 1e-300)
     rtol = cfg["golden_rtol"]
     return diff < rtol, f"golden max rel diff = {diff:.3e} (rtol {rtol:.1e})"
