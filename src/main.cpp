@@ -164,6 +164,21 @@ int main(int argc, char** argv){
         //0.4 and below (see the dt-collapse guard in driver.hpp). Higher p
         //has a tighter limit still and has not been measured.
         cfg.cfl      = pin.GetOrAddReal("time","cfl",0.4);
+        //time/cfl_type = sum | min. SUM is the default because it is what every
+        //golden in the tree was generated with; MIN is the standard unsplit
+        //multi-dimensional form that Athena++/AthenaK use, under which the same
+        //nominal cfl gives a ~1.79x larger dt in 2D (measured on the figure-22
+        //KH lane at 128^2 and 2048^2 alike). See the enum in define.hpp.
+        {
+            std::string ct = pin.GetOrAddString("time","cfl_type","sum");
+            if(ct == "sum")      cfg.cfl_type = _cfl_sum_;
+            else if(ct == "min") cfg.cfl_type = _cfl_min_;
+            else {
+                if(Master) cout<<"ERROR: unknown time/cfl_type '"<<ct
+                                <<"' (sum, min)"<<endl;
+                exit(1);
+            }
+        }
         cfg.nlim     = pin.GetOrAddInteger("time","nlim",-1);
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
         //Constant gravitational acceleration (source term); default 0 leaves

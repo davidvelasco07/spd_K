@@ -45,6 +45,11 @@ nx3 = 1
 <time>
 tlim       = 1.5
 cfl        = 0.4
+cfl_type   = min         # sum | min; min is the standard unsplit multi-D form,
+                         # and the one Athena++/AthenaK use, so cfl=0.4 here means
+                         # what it means in the paper. The tree default is sum,
+                         # which is ~1.79x smaller in 2D at the same cfl (measured
+                         # on this lane at 128^2 and 2048^2).
 integrator = rk2
 
 <hydro>

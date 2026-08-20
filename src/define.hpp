@@ -74,6 +74,16 @@ enum {_lim_minmod_, _lim_vanleer_, _lim_moncen_};
 enum {_nad_b_mag_, _nad_b_comps_};          // MHD NAD on |B| or (Bx,By,Bz)
 enum {_nad_v_off_, _nad_v_mag_, _nad_v_comps_}; // MHD NAD velocity: off / |v| / comps
 enum {_nad_scale_relative_, _nad_scale_delta_, _nad_scale_grange_, _nad_scale_gcfl_};
+//How the multi-dimensional CFL bound is formed. SUM is
+//  dt = cfl * min_d(dx_d) / sum_d(|v_d| + c_fast)
+//and MIN is the standard unsplit form
+//  dt = cfl * min_d( dx_d / (|v_d| + c_fast) ).
+//In 2D with comparable wave speeds the sum form is ~2x smaller for the same
+//nominal cfl -- measured 1.794x on the figure-22 KH lane at both 128^2 and
+//2048^2 -- so `cfl` means different things under the two. SUM is the default
+//because every golden in the tree was generated with it; Athena++/AthenaK use
+//MIN, which is what makes their `cfl_number` directly comparable.
+enum {_cfl_sum_, _cfl_min_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
       _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,

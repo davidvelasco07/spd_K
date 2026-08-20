@@ -45,6 +45,7 @@ struct RunConfig {
     bool fallback = true;                //FV update + fallback scheme
     double gamma = 1.4;
     double cfl = 0.8;
+    int  cfl_type = _cfl_sum_;           //time/cfl_type: sum (default) | min
     double g[3] = {0.0, 0.0, 0.0};       //constant gravitational acceleration (source term)
     double nad_tolerance = 1e-5;         //NAD band width (rtol)
     double nad_atol = 0.0;               //absolute floor on the NAD band (AthenaK mood_atol)

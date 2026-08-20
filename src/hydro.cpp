@@ -170,6 +170,7 @@ double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz, nb=W.nb;
     int nader=W.n_ader;
     double gm=cfg.gamma, cfl=cfg.cfl;
+    const bool cfl_min = (cfg.cfl_type == _cfl_min_);
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     double min_value = sd_min_cells_b(nb,Nz,Ny,Nx,pz,py,px,
         KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii,double& reduce){
@@ -177,13 +178,15 @@ double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
         //in the batched transforms -- not into the variable axis.
         const int boff = b*nader;
         const double dx=hx(b), dy=hy(b), dz=hz(b);
-        double c_max=0, dx_min=1;
+        //Both multi-dimensional CFL forms, selected by time/cfl_type: c_max/dx_min
+        //accumulate the SUM form, inv_dt the MIN form (max_d (|v_d|+c)/dx_d).
+        double c_max=0, dx_min=1, inv_dt=0;
         double c_s = sound_speed(W.Vector(boff,0,k,j,i,kk,jj,ii),
                                  W.Vector(boff,_p_,k,j,i,kk,jj,ii),gm);
-        if(ax){ c_max += (abs(W.Vector(boff,_vx_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dx); }
-        if(ay){ c_max += (abs(W.Vector(boff,_vy_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dy); }
-        if(az){ c_max += (abs(W.Vector(boff,_vz_,k,j,i,kk,jj,ii)) + c_s); dx_min=min(dx_min,dz); }
-        double dt_min = cfl*dx_min/c_max/px;
+        if(ax){ double a=abs(W.Vector(boff,_vx_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dx); inv_dt=max(inv_dt,a/dx); }
+        if(ay){ double a=abs(W.Vector(boff,_vy_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dy); inv_dt=max(inv_dt,a/dy); }
+        if(az){ double a=abs(W.Vector(boff,_vz_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dz); inv_dt=max(inv_dt,a/dz); }
+        double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
         if(nu>0.0){
             double dx_sub = dx_min/px;
             double dt_visc = 0.25*cfl*dx_sub*dx_sub/nu;
@@ -265,6 +268,7 @@ double compute_dt(
     int pz = W.nz;
     double gm = cfg.gamma;
     double cfl = cfg.cfl;
+    const bool cfl_min = (cfg.cfl_type == _cfl_min_);
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -272,21 +276,28 @@ double compute_dt(
         double c_s;
         double c_max=0;
         double dx_min=1;
+        double inv_dt=0;      //MIN form: max_d (|v_d| + c) / dx_d
         double dt_min=1;
         c_s = sound_speed(W.Vector(0,0,k,j,i,kk,jj,ii),W.Vector(0,_p_,k,j,i,kk,jj,ii),gm);
         if(ax){
-            c_max += (abs(W.Vector(0,_vx_,k,j,i,kk,jj,ii)) + c_s);
+            double a = abs(W.Vector(0,_vx_,k,j,i,kk,jj,ii)) + c_s;
+            c_max += a;
             dx_min = min(dx_min,dx);
+            inv_dt = max(inv_dt,a/dx);
         }
         if(ay){
-            c_max += (abs(W.Vector(0,_vy_,k,j,i,kk,jj,ii)) + c_s);
+            double a = abs(W.Vector(0,_vy_,k,j,i,kk,jj,ii)) + c_s;
+            c_max += a;
             dx_min = min(dx_min,dy);
+            inv_dt = max(inv_dt,a/dy);
         }
         if(az){
-            c_max += (abs(W.Vector(0,_vz_,k,j,i,kk,jj,ii)) + c_s);
+            double a = abs(W.Vector(0,_vz_,k,j,i,kk,jj,ii)) + c_s;
+            c_max += a;
             dx_min = min(dx_min,dz);
+            inv_dt = max(inv_dt,a/dz);
         }
-        dt_min = cfl*dx_min/c_max/px;
+        dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
         //Explicit viscous (diffusion-number) limit on the sub-cell grid,
         //matching the spd reference (sd_scheme.compute_dt): with sub-cell
         //spacing h = dx/(p+1) the diffusion limit is 0.25*h^2/nu. Only active
