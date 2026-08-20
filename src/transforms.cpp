@@ -416,7 +416,15 @@ void update_solution(
     bool az = cfg.active[_z_];
     double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
     bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+    //ACTIVE elements only. A ghost element's update is discarded: the only
+    //ghost value anything reads is the single point layer facing the interior
+    //(copy_face_to_ghost / gather_fp_same write exactly (0,n-1) and (N-1,0)),
+    //and the exchange rewrites that layer from the neighbour every stage. What
+    //advancing the ring did instead was integrate values nothing ever wrote --
+    //which is what filled the field-loop dumps' ghost ring with plausible
+    //garbage that differed between CPU and GPU (73a7e80). At one ghost element
+    //per side this loop was 21% ghost in 2D, 30% in 3D, 47% at 16x16x4.
+    sd_for_active_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int var=0; var<nvar; var++){
         double dudt;
         double du;

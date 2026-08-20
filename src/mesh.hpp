@@ -2093,6 +2093,11 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskSaveState(Driver* d, int stage){
+        //FENCED. These RK bookkeeping tasks were outside every PHASE scope, and
+        //on a mixed-level MHD mesh they are most of the step: the fenced total
+        //came to 2.5 s of a 20 s evolution, so the profile that said
+        //cf/correct_cf_emf is 66-72% was describing an eighth of the run.
+        PHASE("rk/save_state");
         for(int b=0;b<nblocks;b++){
             Kokkos::deep_copy(blocks[b].U0_sp.Vector, blocks[b].U_sp.Vector);
             if constexpr (is_mhd){
@@ -2106,6 +2111,7 @@ struct Mesh : public PhysicsModule {
 
     TaskStatus TaskCopyCons(Driver* d, int stage){
         Region r("TaskCopyCons");
+        PHASE("rk/copy_cons");
         sync_block_dt();
         if constexpr (is_hydro){
             blocks[0].copy_ader(pv.U_sp, pv.U_ader_sp);
@@ -2127,6 +2133,7 @@ struct Mesh : public PhysicsModule {
 
     TaskStatus TaskCombine(Driver* d, int stage){
         Region r("TaskCombine");
+        PHASE("rk/combine");
         if(cfg.integrator==_integrator_rk_ && d->rk_a[stage-1]>0){
             double a = d->rk_a[stage-1];
             if constexpr (is_hydro){
@@ -2145,6 +2152,7 @@ struct Mesh : public PhysicsModule {
 
     TaskStatus TaskBtoU(Driver* d, int stage){
         if constexpr (is_mhd){
+            PHASE("rk/B_to_U");
             for(int b=0;b<nblocks;b++)
                 mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
                            blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
@@ -2155,6 +2163,7 @@ struct Mesh : public PhysicsModule {
 
     TaskStatus TaskConsToPrim(Driver* d, int stage){
         Region r("TaskConsToPrim");
+        PHASE("rk/cons_to_prim");
         if constexpr (is_hydro){
             compute_primitives(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
             transform_sp_to_cv_batched(pv.U_sp, pv.U_cv);
@@ -2171,12 +2180,14 @@ struct Mesh : public PhysicsModule {
     TaskStatus TaskAdapt(Driver* d, int stage){
         if(cfg.adapt_interval<=0 || this->n_step%cfg.adapt_interval!=0)
             return TaskStatus::complete;
+        PHASE("amr/adapt");
         adapt();
         return TaskStatus::complete;
     }
 
     double ComputeDt() override {
         Region r("ComputeDt");
+        PHASE("rk/compute_dt");
         this->Dt = 1e300;
         bool diverged = false;
         if constexpr (is_hydro){
@@ -2513,6 +2524,10 @@ struct Mesh : public PhysicsModule {
     }
 
     void Write_outputs(){
+        //The phase report used to live inside the is_mhd branch below, so a
+        //hydro run could never print one -- which is why comparing the two
+        //systems' phase tables silently compared one table against nothing.
+        phase_times_.report("cumulative");
         if constexpr (is_mhd){
             double divB = 0.0;
             for(int b=0;b<nblocks;b++)
@@ -2522,7 +2537,6 @@ struct Mesh : public PhysicsModule {
             if(Master)
                 std::cout<<std::endl<<"OUTPUT "<<this->n_output
                          <<"  max|divB| = "<<divB<<std::endl;
-            phase_times_.report("cumulative");
             //Coarse-fine flux telescoping, which divB above cannot see.
             int n_iface = 0, n_same = 0;
             const double cfd = mhd_cf_flux_drift(n_iface, false);

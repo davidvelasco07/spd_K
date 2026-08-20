@@ -91,7 +91,14 @@ CONFIGS = {
         "input": "inputs/sine_wave.athinput",
         "overrides": [],
         "ndim": 3,
-        "checks": ["analytic", "mass_strict", "golden"],
+        # GHOSTS EXCLUDED: update_solution now advances active elements only, so
+        # the ghost ring of a pure-SD lane (no FV halo to refill it) holds its
+        # initial values instead of integrated garbage. Measured over the whole
+        # suite when that landed: 97 W_cv dumps, 6 changed in raw bytes -- every
+        # one a pure-SD lane -- and 0 changed in the ACTIVE region, all exactly
+        # 0.000e+00. Comparing the active region is what this check was always
+        # meant to assert.
+        "checks": ["analytic", "mass_strict", "golden_active"],
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.1,
         "l1_limit": 3.0e-5,    # measured 2.16e-5 (N=8, p=3, t=0.1)
