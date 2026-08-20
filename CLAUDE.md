@@ -23,6 +23,19 @@ Why: this is the single largest source of avoidable cost in the code, repeatedly
   work, only because hydro's version was already one launch over the pack.
 - Batching MOOD detection: 21.3 s of a 24.5 s fenced total, 87%.
 
+- Batching `sync/face_B`: uniform 2048^2 in 16^2 blocks went 395.31 -> 61.88
+  ms/step (6.4x). It was 77.8% of that lane's fenced time, from ~32k launches per
+  stage at 16384 blocks, and **it hid from every AMR profile in this project
+  because Mesh only calls it when `max_level == 0`.** Profile the uniform
+  multiblock lane too, not just the AMR one.
+
+**As of `a8f3da0` there is no live per-block host loop left in the per-step path.**
+Every remaining `for(int b=0; b<nblocks; b++)` in `mesh.hpp` is either regrid/setup
+(`build_block_solvers`, the table builders, snapshot/transfer/finish_ic), host-side
+scalar bookkeeping with no launches (`sync_block_dt`), an output-time diagnostic,
+or the `else` branch of a batching switch -- which is the A/B reference and must
+stay. Check which of those a new loop is, and say so in a comment.
+
 Legitimate per-block loops, and nothing else: setup and regrid
 (`build_block_solvers`), host-side scalar bookkeeping with no launches
 (`sync_block_dt`), and output-time diagnostics. Say so in a comment when you
@@ -34,7 +47,7 @@ Keep the per-block path and gate the batched one behind a switch:
 `SPD_MHD_BATCH_MASK` bits for MHD (1 begin, 2 after_U_halo, 4 assemble, 8 commit,
 16 Fluxes_pre, 32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 RK
 bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
-8192 the pinned-level dead-work skip; default 16383), `SPD_NO_MHD_BATCH`,
+8192 the pinned-level dead-work skip, 16384 sync/face_B; default 32767), `SPD_NO_MHD_BATCH`,
 `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
 `SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
