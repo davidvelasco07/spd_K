@@ -260,6 +260,7 @@ struct Mesh : public PhysicsModule {
         //handles were missing, which is why the MHD advance was still a per-block
         //loop while every hydro phase had been batched.
         SD_Solution Bx_fp_x, By_fp_y, Bz_fp_z;
+        SD_Solution B0x_fp_x, B0y_fp_y, B0z_fp_z;   //RK save of the face field
         SD_Solution Bxf, Byf, Bzf, TB_x, TB_y, TB_z;
         SD_Solution Ex_ep_yz, Ey_ep_zx, Ez_ep_xy;
         FV_Solution B_old_cv, B_new_cv;
@@ -296,6 +297,11 @@ struct Mesh : public PhysicsModule {
             pv.Bx_fp_x  = sd_pack_view(pack,"Bx_fp_x");
             pv.By_fp_y  = sd_pack_view(pack,"By_fp_y");
             pv.Bz_fp_z  = sd_pack_view(pack,"Bz_fp_z");
+            //The RK save of the staggered field. Allocated unconditionally by
+            //MHD_ader (alloc -> init_packed), like everything above.
+            pv.B0x_fp_x = sd_pack_view(pack,"B0x_fp_x");
+            pv.B0y_fp_y = sd_pack_view(pack,"B0y_fp_y");
+            pv.B0z_fp_z = sd_pack_view(pack,"B0z_fp_z");
             pv.Ex_ep_yz = sd_pack_view(pack,"Ex_ep_yz");
             pv.Ey_ep_zx = sd_pack_view(pack,"Ey_ep_zx");
             pv.Ez_ep_xy = sd_pack_view(pack,"Ez_ep_xy");
@@ -1690,14 +1696,16 @@ struct Mesh : public PhysicsModule {
     //(11.1x) while the same sweep on CPU was flat, so it is pure launch dispatch.
     //SPD_NO_MHD_BATCH=1 restores the per-block path; the two must agree bitwise.
     //Phase bits: 1 begin, 2 after_U_halo, 4 assemble, 8 commit, 16 Fluxes_pre,
-    //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann. SPD_MHD_BATCH_MASK
-    //selects which are batched, which is how a mismatch against the per-block path
-    //gets bisected to one phase instead of guessed at.
+    //32 Riemann_Solver, 64 B_to_U, 128 Compute_E, 256 E_Riemann, 512 the RK
+    //bookkeeping tasks (save_state, copy_cons, cons_to_prim, combine, B_to_U,
+    //compute_dt). SPD_MHD_BATCH_MASK selects which are batched, which is how a
+    //mismatch against the per-block path gets bisected to one phase instead of
+    //guessed at.
     static bool mhd_batched(int phase = 15){
         static const bool off = getenv("SPD_NO_MHD_BATCH") != nullptr;
         if(off) return false;
         static const int mask = getenv("SPD_MHD_BATCH_MASK")
-                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 511;
+                                ? atoi(getenv("SPD_MHD_BATCH_MASK")) : 1023;
         return (mask & phase) != 0;
     }
 
@@ -2092,12 +2100,36 @@ struct Mesh : public PhysicsModule {
         for(int b=0;b<nblocks;b++) blocks[b].dt = this->dt;
     }
 
+    //One switch for the RK bookkeeping batching, so the per-block path stays
+    //available for a bit-identity A/B: MHD through SPD_MHD_BATCH_MASK bit 512
+    //(or SPD_NO_MHD_BATCH), hydro through SPD_NO_RK_BATCH.
+    static bool rk_batched(){
+        if constexpr (is_mhd) return mhd_batched(512);
+        else {
+            static const bool v = getenv("SPD_NO_RK_BATCH") == nullptr;
+            return v;
+        }
+    }
+
     TaskStatus TaskSaveState(Driver* d, int stage){
         //FENCED. These RK bookkeeping tasks were outside every PHASE scope, and
         //on a mixed-level MHD mesh they are most of the step: the fenced total
         //came to 2.5 s of a 20 s evolution, so the profile that said
         //cf/correct_cf_emf is 66-72% was describing an eighth of the run.
         PHASE("rk/save_state");
+        //One copy per ARRAY over the whole pack, not one per block: the blocks'
+        //views are slices of it, so this is the same bytes in one launch. The
+        //per-block loop was 0.517 s of hydro's 0.771 s fenced total and 1.915 s
+        //of MHD's 9.704 s (352 leaves, 109 steps).
+        if(rk_batched()){
+            Kokkos::deep_copy(pv.U0_sp.Vector, pv.U_sp.Vector);
+            if constexpr (is_mhd){
+                Kokkos::deep_copy(pv.B0x_fp_x.Vector, pv.Bx_fp_x.Vector);
+                Kokkos::deep_copy(pv.B0y_fp_y.Vector, pv.By_fp_y.Vector);
+                Kokkos::deep_copy(pv.B0z_fp_z.Vector, pv.Bz_fp_z.Vector);
+            }
+            return TaskStatus::complete;
+        }
         for(int b=0;b<nblocks;b++){
             Kokkos::deep_copy(blocks[b].U0_sp.Vector, blocks[b].U_sp.Vector);
             if constexpr (is_mhd){
@@ -2115,6 +2147,9 @@ struct Mesh : public PhysicsModule {
         sync_block_dt();
         if constexpr (is_hydro){
             blocks[0].copy_ader(pv.U_sp, pv.U_ader_sp);
+        } else if(rk_batched()){
+            Kokkos::deep_copy(pv.mhd_U_ader_sp.Vector, pv.U_sp.Vector);
+            mhd_compute_primitives_b(pv.U_sp, pv.W_sp);
         } else {
             for(int b=0;b<nblocks;b++){
                 Kokkos::deep_copy(blocks[b].U_ader_sp.Vector, blocks[b].U_sp.Vector);
@@ -2138,6 +2173,14 @@ struct Mesh : public PhysicsModule {
             double a = d->rk_a[stage-1];
             if constexpr (is_hydro){
                 combine_solution(pv.U_sp, pv.U0_sp, a);
+            } else if(rk_batched()){
+                //combine_solution already takes a pack (nb = U.nb, sd_for_cells_b),
+                //which is how the hydro call above spans every block in one
+                //launch; MHD was calling the same function per block, four times.
+                combine_solution(pv.U_sp,    pv.U0_sp,    a);
+                combine_solution(pv.Bx_fp_x, pv.B0x_fp_x, a);
+                combine_solution(pv.By_fp_y, pv.B0y_fp_y, a);
+                combine_solution(pv.Bz_fp_z, pv.B0z_fp_z, a);
             } else {
                 for(int b=0;b<nblocks;b++){
                     combine_solution(blocks[b].U_sp, blocks[b].U0_sp, a);
@@ -2153,10 +2196,16 @@ struct Mesh : public PhysicsModule {
     TaskStatus TaskBtoU(Driver* d, int stage){
         if constexpr (is_mhd){
             PHASE("rk/B_to_U");
-            for(int b=0;b<nblocks;b++)
-                mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
-                           blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
-                           blocks[b].Tz_, blocks[b].fp_to_sp);
+            //mhd_B_to_U_b already existed for the mixed-level path inside
+            //Advance_mhd; this call site was still the per-block loop.
+            if(rk_batched())
+                mhd_B_to_U_b(pv.U_sp, pv.Bx_fp_x, pv.By_fp_y, pv.Bz_fp_z,
+                             blocks[0].fp_to_sp);
+            else
+                for(int b=0;b<nblocks;b++)
+                    mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
+                               blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
+                               blocks[b].Tz_, blocks[b].fp_to_sp);
         }
         return TaskStatus::complete;
     }
@@ -2168,6 +2217,13 @@ struct Mesh : public PhysicsModule {
             compute_primitives(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
             transform_sp_to_cv_batched(pv.U_sp, pv.U_cv);
             compute_primitives(pv.U_cv, pv.W_cv);
+        } else if(rk_batched()){
+            //cons_to_prim_cv() is transform_sp_to_cv + primitives on the CV
+            //array; both have whole-pack forms (transform_a_to_b takes a pack,
+            //as MOOD_begin_batched already uses it).
+            mhd_compute_primitives_b(pv.U_sp, pv.W_sp);   //W_sp feeds the AMR criteria
+            transform_a_to_b(pv.U_sp, pv.U_cv, pv.T_sweep, blocks[0].sp_to_cv);
+            mhd_compute_primitives_b(pv.U_cv, pv.W_cv);
         } else {
             for(int b=0;b<nblocks;b++){
                 mhd_compute_primitives(blocks[b].U_sp, blocks[b].W_sp);
@@ -2207,6 +2263,11 @@ struct Mesh : public PhysicsModule {
                              <<std::setprecision(17)<<this->Dt<<" loop "<<ref
                              <<" nb "<<nblocks<<std::endl;
             }
+        } else if(rk_batched()){
+            //One reduction over the pack. The loop it replaces also did one
+            //MPI_Allreduce PER BLOCK.
+            this->Dt = mhd_compute_dt_b(pv.W_cv, hx_p, hy_p, hz_p);
+            if(!std::isfinite(this->Dt)) diverged = true;
         } else {
             for(int b=0;b<nblocks;b++){
                 double db = mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h);

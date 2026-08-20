@@ -157,6 +157,31 @@ void mhd_compute_primitives(SD_Solution U, SD_Solution W){
     });
 }
 
+//Batched over the block axis: one launch for the whole pack instead of one per
+//block. The per-block loop this replaces was 1.903 s of rk/copy_cons and 0.898 s
+//of rk/cons_to_prim on a 352-leaf mesh over 109 steps, against 0.005 s and
+//0.006 s for the already-batched hydro equivalents -- 380x and 150x on identical
+//work. SD packs fold the block into the leading (n_ader) axis, not the variable
+//axis, hence boff = b*nader.
+void mhd_compute_primitives_b(SD_Solution U, SD_Solution W){
+    int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz, nb=W.nb;
+    int nader=W.n_ader;
+    double gm=cfg.gamma;
+    double dfl=cfg.dfloor, pfl=cfg.pfloor;
+    SD_Vector Vu = U.Vector;
+    SD_Vector Vw = W.Vector;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        const int boff = b*nader;
+        for(int t_id=0;t_id<nader;t_id++){
+            double u[NMHD], w[NMHD];
+            for(int var=0;var<NMHD;var++) u[var]=Vu(boff+t_id,var,k,j,i,kk,jj,ii);
+            mhd_primitives(u,w,gm,dfl,pfl);
+            for(int var=0;var<NMHD;var++) Vw(boff+t_id,var,k,j,i,kk,jj,ii)=w[var];
+        }
+    }, "mhd_compute_primitives_b");
+}
+
 void mhd_compute_primitives(FV_Solution U, FV_Solution W){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
     double gm=cfg.gamma;
@@ -744,6 +769,44 @@ double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz){
             if(ax){ c_max += fabs(Vw(0,_mvx_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bx,By,Bz,gm); dx_min=min(dx_min,dx); }
             if(ay){ c_max += fabs(Vw(0,_mvy_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,By,Bz,Bx,gm); dx_min=min(dx_min,dy); }
             if(az){ c_max += fabs(Vw(0,_mvz_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bz,Bx,By,gm); dx_min=min(dx_min,dz); }
+            if(c_max > 0){
+                double dt_min = cfl*dx_min/c_max/px;
+                reduce = reduce < dt_min ? reduce : dt_min;
+            }
+        });
+    #ifdef MPI
+    double g;
+    MPI_Allreduce(&min_value,&g,1,MPI_DOUBLE,MPI_MIN,Comm);
+    return g;
+    #else
+    return min_value;
+    #endif
+}
+
+//Batched dt: the block is an index in the reduction, not a host loop around one
+//launch plus one MPI_Allreduce PER BLOCK. Same statement hydro's compute_dt_b
+//carries; MHD kept the loop, at 0.864 s against hydro's 0.004 s (216x) on a
+//352-leaf mesh over 109 steps. Per-block h comes in by block index, exactly as
+//compute_dt_b takes hx/hy/hz.
+double mhd_compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz){
+    int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz, nb=W.nb;
+    int nader=W.n_ader;
+    double gm=cfg.gamma, cfl=cfg.cfl;
+    bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
+    SD_Vector Vw = W.Vector;
+    double min_value = sd_min_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii,double& reduce){
+            const int boff = b*nader;
+            const double dx=hx(b), dy=hy(b), dz=hz(b);
+            double rho=Vw(boff,_mrho_,k,j,i,kk,jj,ii);
+            double p  =Vw(boff,_mprs_,k,j,i,kk,jj,ii);
+            double Bx =Vw(boff,_mbx_,k,j,i,kk,jj,ii);
+            double By =Vw(boff,_mby_,k,j,i,kk,jj,ii);
+            double Bz =Vw(boff,_mbz_,k,j,i,kk,jj,ii);
+            double c_max=0, dx_min=1;
+            if(ax){ c_max += fabs(Vw(boff,_mvx_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bx,By,Bz,gm); dx_min=min(dx_min,dx); }
+            if(ay){ c_max += fabs(Vw(boff,_mvy_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,By,Bz,Bx,gm); dx_min=min(dx_min,dy); }
+            if(az){ c_max += fabs(Vw(boff,_mvz_,k,j,i,kk,jj,ii)) + mhd_fast_vel(p,rho,Bz,Bx,By,gm); dx_min=min(dx_min,dz); }
             if(c_max > 0){
                 double dt_min = cfl*dx_min/c_max/px;
                 reduce = reduce < dt_min ? reduce : dt_min;
