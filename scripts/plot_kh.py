@@ -22,15 +22,30 @@ NVAR = 6
 
 
 def dump_order(outdir):
-    """numpy reshape order for binaries in outdir, from its parameters.txt."""
+    """numpy reshape order for binaries in outdir, from its parameters.txt.
+
+    Missing metadata is an ERROR, not a default. This used to fall back to "F",
+    which silently reinterprets every byte of the dump: staging matching output
+    indices into two clean directories (which is what a partial AMR run forces
+    you to do, since the plotters take the LAST W_cv in a directory) leaves the
+    parameters.txt behind, and the figure then came out as NaN -- or, with a
+    square grid and a symmetric field, could have come out merely WRONG. Copy
+    parameters.txt alongside the dumps.
+    """
+    path = os.path.join(outdir, "parameters.txt")
     try:
-        with open(os.path.join(outdir, "parameters.txt")) as fh:
+        with open(path) as fh:
             for line in fh:
                 if line.strip().startswith("layout"):
                     return "C" if "LayoutRight" in line else "F"
     except OSError:
-        pass
-    return "F"
+        raise SystemExit(
+            f"{path}: not found. The dump layout is read from it, and guessing "
+            f"reinterprets every byte -- copy parameters.txt in beside the "
+            f"W_cv dumps (and the X_/Y_ coordinate files) when staging a "
+            f"directory by hand.")
+    raise SystemExit(f"{path}: no 'layout' line; cannot tell LayoutRight from "
+                     f"LayoutLeft, and the two transpose the dump.")
 
 
 def load_rho(path, var=0):
