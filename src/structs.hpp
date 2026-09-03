@@ -542,8 +542,18 @@ struct Boundaries {
         dim   = Dim.dim;
         Kokkos::resize(BoundaryL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
         Kokkos::resize(BoundaryR,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
-        if(type == _inflow_)
+        if(type == _inflow_){
             Kokkos::resize(InflowL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
+            //Initialise to the "NOT an inflow point" sentinel. A Kokkos View
+            //zero-initialises, and 0 >= 0 reads as "prescribe zero" -- so an
+            //_inflow_ boundary nobody filled would pin its whole low face to
+            //zero instead of falling back to outflow. That is not hypothetical:
+            //x2_bc = inflow types EVERY y boundary, including the EMF, the
+            //cascade halo and the face-B halos, and only two of them are filled
+            //with a physical state. It pinned E = 0 along the jet base and put
+            //v_y ~ 2000 outside the nozzle where the flow should be quiescent.
+            Kokkos::deep_copy(InflowL, -1.0);
+        }
         #ifdef MPI
         Kokkos::resize(BufferL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
         Kokkos::resize(BufferR,nader,nvar,Nz,Ny,Nx,nz,ny,nx);

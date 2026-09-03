@@ -80,6 +80,20 @@ void boundaries(
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
             BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
         }
+        else if(type == _outflow_){
+            //Plain zeroth-order copy, same as _gradfree_. A no-reentry clamp
+            //(zeroing the ghost's normal momentum when it points inward) was
+            //tried here and MEASURED to be far worse: it puts a velocity
+            //discontinuity at the boundary, which sets up a strong Riemann
+            //problem every step. On the Mach-800 jet at 400x600 DoF it collapsed
+            //dt from 1.32e-06 to ~3.2e-09 -- 400x, for MUSCL as well as SDFB --
+            //and no lane finished. Preventing re-entry needs a characteristic
+            //treatment, not a clamp on one row.
+            indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
+            BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
+            indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
+        }
         else if(type == _inflow_){
             //LOW side: the prescribed state where the problem injects, OUTFLOW
             //everywhere else on that face. The sentinel is the density row of
@@ -90,8 +104,17 @@ void boundaries(
                 BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) =
                     BC.InflowL(t_id,var,k,j,i,kk,jj,ii);
             } else {
+                //Outside the nozzle the low face is a WALL, not an exit. A jet
+                //emerges from a nozzle in a solid surface, and an open base lets
+                //the bow shock's pressure drive material back IN: measured with
+                //a plain outflow there, the mean v_y on the bottom row outside
+                //the nozzle reached 727 INTO the domain against an injected 800,
+                //and the solution became a broad fan rather than a collimated
+                //beam. Reflecting is both the physical boundary and the stable
+                //one -- the no-reentry clamp on an outflow collapsed dt 400x.
+                double sgn = (var == 1+dim || (mhd && var == 5+dim)) ? -1.0 : 1.0;
                 indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
-                BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
+                BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = sgn*U.Vector(INDICES);
             }
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
             BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
@@ -417,14 +440,23 @@ void boundaries(
             fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }
+        else if(type == _outflow_){
+            //See the SD branch: plain copy; the no-reentry clamp collapsed dt.
+            fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
+            BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
+            fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
+            BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
+        }
         else if(type == _inflow_){
             //See the SD branch above: prescribed where the problem injects,
             //outflow elsewhere on the low side, outflow on the high side.
             if(BC.InflowL(0,k,j,i) >= 0.0){
                 BC.BoundaryL(var,k,j,i) = BC.InflowL(var,k,j,i);
             } else {
-                fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
-                BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
+                //Wall outside the nozzle; see the SD branch.
+                double sgn = (var == 1+dim) ? -1.0 : 1.0;
+                fv_indices(Nid,k,j,i,2*ngh-1-l,dim);
+                BC.BoundaryL(var,k,j,i) = sgn*U.Vector(FV_INDICES);
             }
             fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);

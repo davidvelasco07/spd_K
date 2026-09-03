@@ -8,7 +8,7 @@ int bc_id(const string &name){
     if(name == "periodic")   return _periodic_;
     if(name == "gradfree")   return _gradfree_;
     if(name == "reflective") return _reflective_;
-    if(name == "outflow")    return _gradfree_;   //alias: gradfree IS outflow
+    if(name == "outflow")    return _outflow_;    //gradfree + no re-entry
     if(name == "inflow")     return _inflow_;
     cout<<"ERROR: unknown boundary type '"<<name<<"'"<<endl;
     exit(1);

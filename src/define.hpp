@@ -75,7 +75,21 @@ enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 //prescribed state is precomputed once into Boundaries::InflowL, with a NEGATIVE
 //density marking "not an inflow point here, fall back to outflow" -- physical
 //densities are positive, so the sentinel is unambiguous and needs no mask array.
-enum {_periodic_, _gradfree_, _reflective_, _inflow_};
+//_gradfree_ is the plain zeroth-order copy: the ghost takes the adjacent
+//interior value verbatim. It permits spurious RE-ENTRY -- nothing stops the
+//copied state having a normal velocity pointing back into the domain, so an
+//inward pressure gradient sucks material in through what is nominally an exit.
+//Measured on the Mach-800 jet: with an open base, the mean v_y outside the
+//nozzle on the bottom row reached 727 towards the domain, against an injected
+//800, which is not backflow draining but the boundary feeding the cocoon.
+//_outflow_ is that copy plus a no-reentry clamp: if the ghost's normal momentum
+//points inward it is zeroed, so waves leave and nothing enters.
+//_inflow_ prescribes a state on the LOW side where the problem injects and is
+//_outflow_ everywhere else -- high side, and the parts of the low side outside
+//the nozzle. Prescribed values live in Boundaries::InflowL; a NEGATIVE density
+//marks "not an inflow point here", and the array is initialised to that
+//sentinel so an inflow boundary nobody fills degrades to outflow.
+enum {_periodic_, _gradfree_, _reflective_, _inflow_, _outflow_};
 enum {_integrator_ader_, _integrator_rk_};
 //MHD face Riemann solver. Appended, never reordered: llf=0 and hlld=1 are the
 //values every existing input and golden was generated under.

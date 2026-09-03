@@ -203,7 +203,12 @@ struct FV_Boundaries {
         dim   = Dim.dim;
         Kokkos::resize(BoundaryL,nvar,Nz,Ny,Nx);
         Kokkos::resize(BoundaryR,nvar,Nz,Ny,Nx);
-        if(type == _inflow_) Kokkos::resize(InflowL,nvar,Nz,Ny,Nx);
+        if(type == _inflow_){
+            Kokkos::resize(InflowL,nvar,Nz,Ny,Nx);
+            //See Boundaries::init: the zero-initialised default would read as
+            //"prescribe zero" rather than "no inflow here".
+            Kokkos::deep_copy(InflowL, -1.0);
+        }
         #ifdef MPI
         Kokkos::resize(BufferL,nvar,Nz,Ny,Nx);
         Kokkos::resize(BufferR,nvar,Nz,Ny,Nx);
