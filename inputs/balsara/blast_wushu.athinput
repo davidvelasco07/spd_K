@@ -1,0 +1,70 @@
+# Stringent strongly-magnetized MHD blast, Wu & Shu (2018), as run in
+# Balsara, Bhoriya, Singh, Kumar, Kappeli & Gatti 2025 (ApJ 988, 134;
+# arXiv:2506.11181) section 8.1 / figure 10.
+#
+# Domain [-0.6,0.6]^2, rho = 1, v = 0, p = 0.1 except p = 1e4 inside r < 0.1,
+# with a uniform field along x. Outflow everywhere. t = 0.001, 400x400 zones.
+#
+# THE FIELD NORMALISATION MATTERS AND IS EASY TO GET WRONG. The paper quotes
+# "a magnetic field with a magnitude of 1000" AND beta = 2.51e-6. Those are only
+# consistent in Gaussian units, where the magnetic pressure is B^2/(8 pi): in
+# spd_K's units (p_mag = B^2/2) the field is B = 1000/sqrt(4 pi) = 282.0947918,
+# which gives beta = 2 p / B^2 = 2.513e-06. Taking the literal 1000 gives
+# beta = 2.0e-07, a problem 12.6x more extreme than the one the paper ran.
+# (inputs/balsara/blast_p3_fb.athinput uses the literal 1000 and is therefore a
+# DIFFERENT, harder problem -- it is left alone, not fixed, because the existing
+# goldens and A/B references are tied to it.)
+#
+# beta = 2.5e-6 is a hundred times lower than the MDZ21 3D blast, so
+# mhd/energy_fix is not optional here either -- see inputs/mdz21/blast3d.athinput.
+#
+# RESOLUTION IS IN DEGREES OF FREEDOM: 400^2 is p=3 nx1=100, p=7 nx1=50.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 100
+nx2   = 100
+nx3   = 1
+x1len = 1.2
+x2len = 1.2
+x1_bc = gradfree
+x2_bc = gradfree
+
+<time>
+tlim       = 0.001
+cfl        = 0.4          # the paper's CFL; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver = hlld
+emf     = uct
+energy_fix = 1            # stage-boundary correction; see the note above
+
+<fallback>
+max_revs  = 3
+tolerance = 1e-5
+NAD       = relative
+NAD_neighbors = 2nd
+SED       = true
+
+<problem>
+problem = mhd_blast
+d0      = 1.0
+p0      = 0.1                    # ambient pressure
+p1      = 10000.0                # pressure inside the sphere
+radius  = 0.1
+amp     = 282.0947917738782      # B0 = 1000/sqrt(4 pi)  -> beta = 2.51e-6
+v1      = 1.0                    # field DIRECTION: along x, as the paper has it
+v2      = 0.0
+v3      = 0.0
+
+<output>
+dt = 0.0002                      # 5 frames to t = 0.001

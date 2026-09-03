@@ -1,0 +1,66 @@
+# Magnetized Kelvin-Helmholtz, Mignone & Del Zanna 2021 (arXiv:2004.10542) 6.5.
+#
+# vx = (M/2) tanh(y/a) with a = 0.01 and M = 1, rho = 1, p = 1/Gamma so c_s = 1,
+# and a FLOW-ALIGNED field B = B0 x^ with B0 = vA sqrt(rho), vA = 1/2. Magnetic
+# tension then stabilises the layer and the configuration is only weakly
+# unstable, which is exactly what makes it discriminate between emf schemes:
+# the paper finds UCT-HLL fails to develop the instability at all at low
+# resolution while CT-Contact, CT-Flux and UCT-HLLD track the linear theory.
+#
+# The paper's domain is x in [0,1], y in [-1,1]; spd_K's mesh is origin-anchored
+# so this is [0,1] x [0,2] with the shear layer at y = 1. Periodic in x,
+# REFLECTING at y = 0 and y = 2 -- the walls that mhd_zero_wall_emf and the
+# normal-B flip in boundary.cpp exist for.
+#
+# Linear theory (the paper's repeat of Miura & Pritchett 1982) gives
+# Im(omega a / c_s) ~ 0.395e-2, i.e. Im(omega) ~ 0.395; the paper measures
+# 0.31-0.40 depending on scheme and resolution, converging to 0.393 at 512x1024.
+# scripts/mdz21_diagnostics.py: kh_growth_amplitude + fit_growth_rate.
+#
+# The paper's Nx = 128 (Ny = 2 Nx) is 128x256 DoF here: p=3 with nx1=32, nx2=64.
+#
+# NOTE the seed differs from the paper's: it uses per-zone uniform random eps,
+# which cannot survive this code's cell-integrated initialisation. See
+# mhd_ic_kh_mdz for what is used instead and why.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 64
+nx3   = 1
+x1len = 1.0
+x2len = 2.0
+x1_bc = periodic
+x2_bc = reflective
+
+<time>
+tlim       = 50.0
+cfl        = 0.4          # p=3 under cfl_type=sum; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+emf     = uct
+
+<problem>
+problem = kh_mdz
+amp     = 0.5      # B0 = vA sqrt(rho), vA = 1/2
+v1      = 1.0      # M, the sonic Mach number
+sigma   = 0.01     # a, the shear width
+d0      = 1.0      # rho
+p0      = 0.6      # 1/Gamma for Gamma = 5/3
+p1      = 1e-5     # eps, the seed amplitude
+
+<output>
+dt = 1.0
+
+<fallback>
+max_revs = 3

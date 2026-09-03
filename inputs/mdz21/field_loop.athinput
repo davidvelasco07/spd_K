@@ -1,0 +1,54 @@
+# Field loop advection, Mignone & Del Zanna 2021 (arXiv:2004.10542) 6.1, 2D.
+#
+# The paper's domain is x in [-1,1], y in [-1/2,1/2] with the loop at the
+# origin; spd_K's mesh is origin-anchored, so this is [0,2] x [0,1] with the
+# loop at (1, 0.5) -- the box midpoint, which is what problem/cx,cy default to.
+# rho = p = 1, Az = A0 (R - r) for r < R with A0 = 1e-3 and R = 0.3, advected by
+# v = 2 x^ + y^ so the loop crosses the box diagonally and returns at t = 1.
+# Periodic on all sides.
+#
+# In the pressure-dominated limit B is essentially a passive scalar, so this
+# isolates the emf scheme's dissipation: the paper reads the volume-integrated
+# magnetic energy decay (its figure 4) and looks for oscillations in the loop
+# shape. scripts/mdz21_diagnostics.py:magnetic_energy computes that decay.
+#
+# 128x64 zones in the paper = 128x64 DoF here: p=3 with nx1=32, nx2=16.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 16
+nx3   = 1
+x1len = 2.0
+x2len = 1.0
+x1_bc = periodic
+x2_bc = periodic
+
+<time>
+tlim       = 2.0          # the paper's figure time
+cfl        = 0.4          # p=3 under cfl_type=sum; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+emf     = uct
+
+<problem>
+problem = field_loop
+amp     = 1e-3    # A0
+radius  = 0.3     # R
+v1      = 2.0
+v2      = 1.0
+d0      = 1.0     # rho
+p0      = 1.0     # P
+
+<output>
+dt = 0.1

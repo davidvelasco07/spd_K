@@ -1,0 +1,83 @@
+# Three-dimensional blast wave, Mignone & Del Zanna 2021 section 6.4
+# (arXiv:2004.10542), after Balsara & Spicer (1999).
+#
+# A unit cube of rho = 1, p = 0.1 threaded by a uniform field
+#     B = B0 (sin th cos ph, sin th sin ph, cos th),  B0 = 100/sqrt(4 pi),
+#     th = pi/2, ph = pi/4   ->   the direction (1,1,0)
+# with a sphere of radius 0.1 at p = 1e3, evolved to t = 0.01 with gamma = 1.4
+# and outflow boundaries everywhere. B0 = 28.209479177387815.
+#
+# WHY IT IS HARD: beta ~ 2.5e-4 in the ambient medium. The paper states that on
+# this test "no scheme preserves energy positivity without energy correction,
+# not even with a minmod limiter", and applies E <- E - (B_c^2 - B_f^2)/2 after
+# every step. That is mhd/energy_fix below, and it is NOT optional here:
+# MEASURED at 192^3 DoF, without it 14.96% of the domain ends on the RAMSES
+# smallp -- cells carrying ambient density and ambient field, i.e. undisturbed
+# gas whose pressure collapsed. With it, 0.02%.
+#
+# spd_K's box starts at the origin, so [-1/2,1/2]^3 is [0,1]^3 with the sphere
+# at the centre (cx=cy=cz=0.5, which is the default for x1len=x2len=x3len=1).
+#
+# RESOLUTION IS IN DEGREES OF FREEDOM. The FV sub-grid carries p+1 sub-cells per
+# element, so the paper's 192^3 is
+#   p=3  nx1=48   (SDFB4)
+#   p=7  nx1=24   (SDFB8)
+#   p=3  nx1=48 + job/scheme=plm   (MUSCL on the same 192^3 lattice)
+# This deck is the 192^3 SDFB4 lane; override mesh/p, mesh/nx*, job/scheme.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 48
+nx2   = 48
+nx3   = 48
+x1len = 1.0
+x2len = 1.0
+x3len = 1.0
+x1_bc = gradfree
+x2_bc = gradfree
+x3_bc = gradfree
+
+<time>
+tlim       = 0.01
+cfl        = 0.4          # p=3 under cfl_type=sum; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver = hlld
+emf     = uct
+# Apply the energy correction at the STAGE BOUNDARY only (bit 1): that is where
+# the Godunov cell-centred B is discarded wholesale for the CT field, so the
+# swap is the intended operation and the energy must follow it. The mid-update
+# sites (bits 2 and 4) do not help and the FV one is worse than nothing --
+# measured at 96^3: 19.94% floored with no correction, 0.02% with bit 1,
+# 23.20% with bit 2 alone.
+energy_fix = 1
+
+<fallback>
+max_revs  = 3
+tolerance = 1e-5
+NAD       = relative
+NAD_neighbors = 2nd
+SED       = true
+
+<problem>
+problem = mhd_blast
+d0      = 1.0                     # rho
+p0      = 0.1                     # ambient pressure
+p1      = 1000.0                  # pressure inside the sphere
+radius  = 0.1
+amp     = 28.209479177387815      # B0 = 100/sqrt(4 pi)
+v1      = 1.0                     # field DIRECTION (1,1,0), normalised in the IC
+v2      = 1.0                     #   = MDZ21's theta = pi/2, phi = pi/4
+v3      = 0.0
+
+<output>
+dt = 0.001                        # 10 frames to t = 0.01

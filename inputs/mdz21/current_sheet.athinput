@@ -1,0 +1,58 @@
+# Magnetized current sheet, Mignone & Del Zanna 2021 (arXiv:2004.10542) 6.2.
+#
+# Harris sheet B = B0 tanh(y/a) x^ held by a thermal pressure gradient, with
+# beta = 2 p_inf / B0^2 = 10, a = 0.04, rho = 1, B0 = 1. Perturbed through the
+# vector potential (eq. 59) with eps = 1e-3 so the state stays divergence-free.
+#
+# The paper's domain is x in [-1,1], y in [-1/2,1/2]; spd_K's mesh starts at the
+# origin, so this is [0,2] x [0,1] and the sheet sits at y = 0.5. Periodic in x,
+# REFLECTING at y = 0 and y = 1.
+#
+# The paper runs 128x64 zones to t = 30 and reads the volume-integrated magnetic
+# energy: with no physical resistivity the unperturbed sheet is a STATIONARY
+# solution, so the decay measures the scheme's own numerical resistivity.
+# 128x64 DoF is p=3 with nx1=32, nx2=16 (or p=7 with 16x8).
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 16
+nx3   = 1
+x1len = 2.0
+x2len = 1.0
+x1_bc = periodic
+x2_bc = reflective
+
+<time>
+tlim       = 30.0
+cfl        = 0.4          # p=3 under cfl_type=sum; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum          # spd_K's default and the convention the CFL limits
+                          # were measured under. min gives a ~1.79x larger dt
+                          # at the same nominal cfl, which puts 0.4 PAST the
+                          # p=3 limit: measured, this exact equilibrium then
+                          # grows 1.2e-02 of spurious velocity out of nothing
+                          # (tests/run_tests.py mhd_current_sheet_cfl_sensitive_2d
+                          # pins that number down as a negative control).
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld
+emf     = uct
+
+<problem>
+problem = current_sheet
+amp     = 1.0      # B0
+p0      = 10.0     # beta
+sigma   = 0.04     # a, the sheet half-width
+d0      = 1.0      # rho
+p1      = 1e-3     # eps, the perturbation amplitude
+
+<output>
+dt = 1.0

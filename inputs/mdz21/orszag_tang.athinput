@@ -1,0 +1,56 @@
+# Orszag-Tang vortex, Mignone & Del Zanna 2021 (arXiv:2004.10542) section 6.3.
+#
+# UNITS. The paper uses the 2*pi box with rho = 25/9, p = 5/3 and
+# B = (-sin y, sin 2x); spd_K's mhd_ic_orszag_tang uses the unit box with
+# rho = 25/(36 pi), p = 5/(12 pi), B0 = 1/sqrt(4 pi). Same problem rescaled by
+# x_paper = 2 pi x_spdk, so the paper's reference time t = 2 pi is t = 1 here,
+# and its measurement window 4 pi/10 < x,y < 6 pi/10 is 0.2 < x,y < 0.3.
+# scripts/mdz21_diagnostics.py:pressure_peak_ratio uses those defaults.
+#
+# RESOLUTION IS IN DEGREES OF FREEDOM, not elements. The FV sub-grid carries
+# p+1 sub-cells per element (src/structs.hpp), so 128^2 DoF is
+#   p=3  nx1=32   (SDFB4)
+#   p=7  nx1=16   (SDFB8)
+#   p=3  nx1=32 + job/scheme=plm   (MUSCL on the same 128^2 lattice)
+# Measured: dt comes out the same to 5 digits for p=3/32 and p=7/16, so the
+# lanes also match in step count, not just in unknowns.
+#
+# This deck is the 128^2 SDFB4 lane; override mesh/p, mesh/nx1, mesh/nx2 and
+# job/scheme for the others. See scripts/mdz21_campaign.sh.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 32
+nx2   = 32
+nx3   = 1
+x1len = 1.0
+x2len = 1.0
+x3len = 1.0
+
+<time>
+tlim       = 1.0          # = t 2*pi in the paper's units
+cfl        = 0.4          # p=3 under cfl_type=sum; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum          # spd_K's default and the convention the CFL
+                          # limits were measured under. min gives a ~1.79x
+                          # larger dt at the same nominal cfl, which puts
+                          # 0.4 PAST the p=3 stability limit -- measured:
+                          # the exact current-sheet equilibrium grew
+                          # 1.3e-02 of spurious velocity under min/0.4.
+
+<hydro>
+gamma = 1.6666666666667
+
+<mhd>
+rsolver = hlld            # hll for UCT-HLL
+emf     = uct             # 2sweep for the legacy two-sweep edge
+
+<problem>
+problem = orszag_tang
+
+<output>
+dt = 0.05                 # 20 frames to t=1, enough to resolve E_B(t)

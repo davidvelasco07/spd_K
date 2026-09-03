@@ -1,0 +1,66 @@
+# Stringent Mach-800 magnetized astrophysical jet, Balsara (2012) with the field
+# of Wu & Shu (2018), as run in Balsara, Bhoriya, Singh, Kumar, Kappeli & Gatti
+# 2025 (ApJ 988, 134; arXiv:2506.11181) section 8.2 / figure 11.
+#
+# Domain [-0.5,0.5] x [0,1.5]; spd_K is origin-anchored so that is [0,1] x [0,1.5]
+# with the nozzle at cx = 0.5. Ambient rho = 0.14, p = 1, v = 0; the nozzle
+# (|x - cx| < 0.05) injects rho = 1.4 at vy = 800. Outflow boundaries; the nozzle
+# state is re-imposed at the lower boundary each step (mhd_ic_jet_inflow).
+# t = 0.002, 400 x 600 zones, and the paper uses a sixth-order scheme.
+#
+# FIELD NORMALISATION, as for the blast: the paper's "Ba = 20000" is the
+# magnetic-pressure normalisation, not the field itself. beta_a = 2 p / B^2 = 1e-4
+# with p = 1 gives B^2 = 20000, i.e. B = 141.4213562373095 in spd_K's units --
+# which is what the existing inputs/balsara/jet_*.athinput already use, and it
+# checks out: 2*1.0/141.4213562^2 = 1.000e-04 exactly.
+#
+# RESOLUTION IS IN DEGREES OF FREEDOM: 400x600 is p=3 with nx1=100, nx2=150.
+
+<job>
+system   = mhd
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 100
+nx2   = 150
+nx3   = 1
+x1len = 1.0
+x2len = 1.5
+x1_bc = outflow
+x2_bc = inflow      # prescribed nozzle on y-min, OUTFLOW elsewhere on that face
+                    # (including outside the nozzle) and on y-max
+
+<time>
+tlim       = 0.002
+cfl        = 0.4          # the paper's CFL; SDFB8 (p=7) uses 0.30
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.4
+
+<mhd>
+rsolver = hlld
+emf     = uct
+energy_fix = 1            # beta_a = 1e-4; the stage-boundary correction
+
+<fallback>
+max_revs  = 3
+tolerance = 1e-5
+NAD       = relative
+NAD_neighbors = 2nd
+SED       = true
+
+<problem>
+problem = mhd_jet
+amp     = 141.4213562373095      # B_y, giving beta_a = 1e-4
+d0      = 0.14                   # ambient rho
+d1      = 1.4                    # jet rho
+p0      = 1.0                    # ambient pressure
+v2      = 800.0                  # jet velocity (Mach 800)
+radius  = 0.05                   # nozzle half-width
+cx      = 0.5                    # nozzle centred at x=0 on [-0.5,0.5]
+
+<output>
+dt = 0.0004                      # 5 frames to t = 0.002
