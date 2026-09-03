@@ -362,7 +362,10 @@ static double trouble_fraction_impl(Block& blk){
     for(int k=nGHz; k<blk.troubles.Nz-nGHz; k++)
     for(int j=nGHy; j<blk.troubles.Ny-nGHy; j++)
     for(int i=nGHx; i<blk.troubles.Nx-nGHx; i++){
-        s += T(0,k,j,i);
+        //Count troubled CELLS, not the sum of flag values: the flag carries a
+        //severity (1 = NAD, 2 = PAD) when mhd/mood_pad_first_order is on, and a
+        //sum would then weight PAD cells double in a quantity called a fraction.
+        s += (T(0,k,j,i) > 0) ? 1.0 : 0.0;
         cnt++;
     }
     return s/std::max(cnt,1);

@@ -505,6 +505,169 @@ CONFIGS = {
         "golden_name": "mhd_ot_2d",
         "golden_rtol": 1e-6,
     },
+    "mhd_blast3d_mdz_3d": {
+        # MDZ21 section 6.4 / Balsara & Spicer: the strongly magnetized 3D blast,
+        # at 32^3 DoF rather than the paper's 192^3 so it fits a smoke suite.
+        #
+        # WHAT IT GUARDS. This is the only 3D MHD config in the suite, and the
+        # only one exercising the oblique-field blast IC (direction (1,1,0) via
+        # problem/v1..v3) and gradfree boundaries on all three axes. beta ~
+        # 2.5e-4 in the ambient medium; MDZ21 states plainly that on this test
+        # "no scheme preserves energy positivity without energy correction, not
+        # even with a minmod limiter", and applies E <- E - (B_c^2 - B_f^2)/2
+        # after every step. spd_K has NO such correction -- the MOOD cascade is
+        # its robustness mechanism instead -- so the fact that this run finishes
+        # at all is the thing being checked. Pin it: if a change to the cascade
+        # makes this go non-finite, that is the regression.
+        #
+        # The deck sets mhd/energy_fix=1 (the stage-boundary correction). That
+        # is the point of this config as a guard: without it 15% of the domain
+        # at 192^3 ends on the pressure floor, and a change that breaks the
+        # correction should turn this red rather than quietly degrade.
+        #
+        # NOT a golden config. Cell values here are NOT reproducible across
+        # backends: with the cascade live, a round-off difference flips a
+        # troubled-cell threshold and that flips one cell's scheme by O(1).
+        # Measured CPU vs A100 at this resolution: 2.6e-14 at t=0 growing to
+        # 2.1e-01 pointwise within 12 steps, while the volume-integrated
+        # magnetic energy still agreed to 4.1e-06 and mass to 1.1e-10. Pinning
+        # the cascade (mhd/mood_force_level=1) removes the decisions and the two
+        # backends then agree to 2.8e-14 -- which is how that spread was shown
+        # to be flag chaos and not a GPU defect. So the checks here are
+        # conservation and finiteness, which survive it; a dump comparison
+        # would not.
+        "input": "inputs/mdz21/blast3d.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/nx2=8", "mesh/nx3=8",
+                      "time/tlim=0.002", "output/dt=0.001"],
+        "ndim": 3,
+        "nvar": 8,
+        # check_finite runs unconditionally for every config, so it is not
+        # listed. Do NOT extend this config's tlim without revisiting the mass
+        # gate: at tlim=0.002 the fast front has travelled ~0.09 of the 0.5
+        # half-width and is nowhere near the wall, but at the paper's t=0.01 it
+        # reaches the boundary and mass legitimately leaves the domain.
+        "checks": ["mass_strict", "divb"],
+        # mass_limit, not the 1e-12 default: the gradfree boundaries leak.
+        # MEASURED, by running this exact IC with periodic walls instead --
+        # the interior update conserves to 4.7e-15, i.e. round-off, while the
+        # outflow version drifts 1.3e-10. So this limit bounds BOUNDARY
+        # extrapolation, not the scheme, and 1e-9 still fails on any real
+        # conservation defect (those run 1e-3 and up).
+        "mass_limit": 1e-9,
+        # divb is an ABSOLUTE gate defaulting to 1e-11, which is calibrated for
+        # the suite's B ~ O(1) problems. Here B0 = 28.2 and the sub-cell dx is
+        # 0.031, so |divB| ~ 2.1e-11 measured is 2.3e-14 RELATIVE to B0/dx --
+        # round-off, and the same quality of CT the 2D configs show. 1e-10
+        # leaves ~5x headroom on that floor while staying four orders of
+        # magnitude below what a real CT defect produces (a broken coarse-fine
+        # or wall EMF gives 1e-2 and up), so the gate can still fail.
+        "divb_limit": 1e-10,
+        "field": "W_cv_N8p3_2_0.dat",
+        "t_end": 0.002,
+    },
+    "mhd_current_sheet_equilibrium_2d": {
+        # MDZ21 section 6.2 with the perturbation OFF (problem/p1=0), so the
+        # Harris sheet is an EXACT stationary solution and any motion is error.
+        # sigma=10 widens the sheet so it is fully resolved -- the balance holds
+        # for every width, so this isolates the scheme and the walls from the
+        # under-resolved-sheet dissipation the paper actually studies.
+        #
+        # This is the ONLY config exercising MHD reflecting walls (x2_bc), which
+        # need the normal B row flipped (boundary.cpp) and the wall-tangential
+        # EMF pinned to zero (mhd_zero_wall_emf) or the equilibrium walks off.
+        # It is also the sharpest CFL gate in the suite: at cfl_type=min and
+        # cfl=0.4 this same setup grows 1.3e-02 of velocity out of nothing.
+        "input": "inputs/mdz21/current_sheet.athinput",
+        # 64 DoF in y, not 32: at 32 the paired cfl_sensitive control below is
+        # still STABLE under min/0.4 and the control goes vacuous. The
+        # instability is resolution dependent, so the gate and its control have
+        # to sit where it actually bites.
+        "overrides": ["problem/p1=0.0", "problem/sigma=10.0",
+                      "mesh/nx1=32", "mesh/nx2=16",
+                      "time/tlim=0.5", "output/dt=0.25"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["mass_strict", "divb", "static_equilibrium"],
+        "equil_tol": 1e-10,
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.5,
+    },
+    "mhd_current_sheet_cfl_sensitive_2d": {
+        # Negative control for mhd_current_sheet_equilibrium_2d. Identical setup
+        # at cfl_type=min, cfl=0.4, which is past the p=3 stability limit: the
+        # exact equilibrium must then visibly fall apart. If this goes GREEN the
+        # paired gate is measuring nothing.
+        "input": "inputs/mdz21/current_sheet.athinput",
+        "overrides": ["problem/p1=0.0", "problem/sigma=10.0",
+                      "mesh/nx1=32", "mesh/nx2=16",
+                      "time/cfl_type=min", "time/cfl=0.4",
+                      "time/tlim=0.5", "output/dt=0.25"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["equilibrium_sensitive"],
+        "equil_floor": 1e-6,
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.5,
+    },
+    "mhd_orszag_tang_uct_hlld_2d": {
+        # UCT-HLLD (Mignone & Del Zanna 2021 eq. 33 + 44/45): the upwind CT emf
+        # composed from the face solver's five-wave fan, replacing BOTH 1-D edge
+        # sweeps. Same setup as mhd_orszag_tang_true2d so the only difference is
+        # mhd/emf, which is what makes the golden_differs control below mean
+        # something. Single block: the coefficients are not haloed yet, so
+        # main.cpp refuses a meshblock/AMR run rather than emit a
+        # decomposition-dependent number.
+        "input": "inputs/orszag_tang.athinput",
+        # The LIVE cascade, so both the SD edge UCT and the demoted-corner UCT
+        # are exercised. mass_strict is the gate that matters here: the corner
+        # UCT reads the face fields transversally, and until mood_halo_face_B
+        # was wired in it inherited unfilled ghosts and drifted 2.9e-06.
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "mhd/rsolver=hlld", "mhd/emf=uct",
+                      "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 2,
+        "checks": ["mass_strict", "divb", "golden_differs"],
+        # The reference is the TWO-SWEEP golden, and this config requires the
+        # result to differ from it: see check_golden_differs.
+        "golden_name": "mhd_ot_2d",
+        "differs_floor": 1e-8,
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+    },
+    "mhd_orszag_tang_uct_hll_2d": {
+        # UCT-HLL: the two-wave fan (MDZ21 eq. 28/32) feeding the same
+        # composition. The paper's most diffusive emf, and the one it reports
+        # failing to form the central O-point at low resolution -- so it must be
+        # a DIFFERENT answer from UCT-HLLD, not just different from 2sweep.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "mhd/rsolver=hll", "mhd/emf=uct",
+                      "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 2,
+        "checks": ["mass_strict", "divb", "golden_differs"],
+        "golden_name": "mhd_ot_2d",
+        "differs_floor": 1e-8,
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+    },
+    "mhd_orszag_tang_uct_muscl_2d": {
+        # The MUSCL+RK2 lane of the MDZ21 base-scheme comparison: job/scheme=plm
+        # pins every cell at cascade level 1, so the edge EMF is built ENTIRELY
+        # by mhd_uct_corner_E. This is the configuration the corner-UCT
+        # conservation defect was found on (2.869e-06 against a 1e-12 limit),
+        # and the one that proves the transverse face-B halo is in place.
+        "input": "inputs/orszag_tang.athinput",
+        "overrides": ["job/fallback=true", "job/scheme=plm",
+                      "time/integrator=rk2", "mesh/nx1=16", "mesh/nx2=16",
+                      "mesh/nx3=1", "mhd/rsolver=hlld", "mhd/emf=uct",
+                      "time/tlim=0.15", "output/dt=0.15"],
+        "ndim": 2,
+        "checks": ["mass_strict", "divb", "golden_differs"],
+        "golden_name": "mhd_ot_2d",
+        "differs_floor": 1e-8,
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.15,
+    },
     "mhd_orszag_tang_true2d_mb": {
         # 2x2 uniform multiblock OT: same-level exchange of face B, edge EMF,
         # and the MOOD cascade must reproduce the single-block golden in the
@@ -1078,6 +1241,79 @@ def check_mixed_levels(outdir, cfg):
     return False, f"mesh never mixed-level (levels per output: {seen})"
 
 
+def check_equilibrium_sensitive(outdir, cfg, floor):
+    """The negative control for check_static_equilibrium, kept on purpose.
+
+    A gate that cannot fail is worth nothing, and this one has a specific way of
+    going quiet: if the current-sheet IC ever degenerated to a trivially uniform
+    state, or the run stopped evolving at all, the paired gate would keep passing
+    while measuring nothing. This config runs the SAME equilibrium at
+    cfl_type=min, cfl=0.4 -- measured unstable -- and requires the spurious
+    velocity to be LARGE. It failing means the paired gate has become vacuous,
+    not that the code regressed.
+    """
+    grid = spdk_io.Grid(outdir)
+    worst = 0.0
+    for i in spdk_io.output_indices(outdir):
+        v2 = sum(spdk_io.load_sd(grid, i, c) ** 2 for c in (1, 2, 3))
+        worst = max(worst, float(np.sqrt(v2).max()))
+    return worst > floor, (f"cfl_type=min cfl=0.4 -> max |v| = {worst:.3e} "
+                           f"(must exceed {floor:.1e}, else the paired gate is vacuous)")
+
+
+def check_static_equilibrium(outdir, cfg, tol):
+    """max |v| on a problem whose exact solution is 'nothing moves'.
+
+    The unperturbed Harris current sheet is an exact stationary solution of ideal
+    MHD for ANY sheet width (the balance is d/dy(p + Bx^2/2) = 0), so every bit
+    of velocity is the scheme's own error -- with no physics to hide behind. That
+    makes it far sharper than asking whether a run survived: a configuration that
+    merely fails to blow up can still be growing 1e-01 of spurious velocity where
+    the answer is exactly zero, which is how a CFL limit came to be quoted 1.5x
+    too high from an Orszag-Tang 'did dt collapse?' probe.
+
+    It is also the test that exercises the MHD REFLECTING walls, which nothing
+    else in the suite does.
+    """
+    grid = spdk_io.Grid(outdir)
+    idx = spdk_io.output_indices(outdir)
+    if len(idx) < 2:
+        return False, f"only {len(idx)} outputs; nothing to compare"
+    worst = 0.0
+    for i in idx:
+        v2 = sum(spdk_io.load_sd(grid, i, c) ** 2 for c in (1, 2, 3))
+        worst = max(worst, float(np.sqrt(v2).max()))
+    return worst < tol, (f"max |v| on the exact equilibrium = {worst:.3e} "
+                         f"(limit {tol:.1e}; exact answer is 0)")
+
+
+def check_golden_differs(outdir, cfg, floor):
+    """The anti-dead-code gate for the UCT electromotive force.
+
+    UCT sat in this tree with ZERO call sites for a release while docs/mhd.md
+    described it as live: every face solve passed a default-empty coefficient
+    view, and the corner path was gated on a member hardwired to false. Nothing
+    went red, because a scheme that silently falls back to the old one still
+    conserves mass, still holds div(B) at round-off, and still matches the
+    golden -- it matches it EXACTLY, which is the tell.
+
+    So this config runs mhd/emf=uct against the golden generated by the
+    two-sweep path and requires them to DIFFER. It failing means UCT stopped
+    running, not that the physics regressed.
+    """
+    gfile = os.path.join(GOLDEN_DIR, cfg["golden_name"], cfg["field"])
+    new = os.path.join(outdir, cfg["field"])
+    if not os.path.isfile(gfile):
+        return False, f"reference golden missing: {gfile}"
+    a, b = np.fromfile(gfile), np.fromfile(new)
+    if a.shape != b.shape:
+        return False, f"size mismatch {a.size} vs {b.size}"
+    diff = np.abs(a - b).max() / max(np.abs(a).max(), 1e-300)
+    ok = diff > floor
+    return ok, (f"emf=uct vs 2sweep golden: rel diff = {diff:.3e} "
+                f"(must exceed {floor:.1e}, else UCT is not running)")
+
+
 def check_golden(outdir, cfg, regen, active_only=False):
     gdir = os.path.join(GOLDEN_DIR, cfg["golden_name"])
     gfile = os.path.join(gdir, cfg["field"])
@@ -1161,11 +1397,23 @@ def main():
             if chk == "analytic":
                 ok, msg = check_analytic(outdir, cfg)
             elif chk == "mass_strict":
-                ok, msg = check_mass(outdir, cfg, 1e-12)
+                # Per-config limit, same pattern as cf_limit/divb_limit. 1e-12
+                # is right for CLOSED (periodic or reflecting) domains, where
+                # mass is exactly conserved. OUTFLOW boundaries extrapolate and
+                # are not conservative by construction, so a config with
+                # gradfree walls has a real leakage floor -- raise it only with
+                # the closed-domain control measured (see mhd_blast3d_mdz_3d).
+                ok, msg = check_mass(outdir, cfg, cfg.get("mass_limit", 1e-12))
             elif chk == "mixed_levels":
                 ok, msg = check_mixed_levels(outdir, cfg)
             elif chk == "divb":
-                ok, msg = check_divb(stdout)
+                # Per-config limit, same pattern as cf_limit. The gate is an
+                # ABSOLUTE |divB|, so it scales with the field strength and the
+                # inverse cell size; a config with B0 = 28 and a finer sub-cell
+                # lattice than the 2D norm has a higher round-off floor for the
+                # same quality of CT. Raise it only with the relative number
+                # written down (see mhd_blast3d_mdz_3d).
+                ok, msg = check_divb(stdout, cfg.get("divb_limit", 1e-11))
             elif chk == "cf_flux":
                 ok, msg = check_cf_flux(stdout, cfg.get("cf_limit", 1e-14))
             elif chk == "cf_flux_sensitive":
@@ -1181,6 +1429,28 @@ def main():
                 ok, msg = check_golden(outdir, cfg, args.regen_goldens)
             elif chk == "golden_active":
                 ok, msg = check_golden(outdir, cfg, False, active_only=True)
+            elif chk == "equilibrium_sensitive":
+                ok, msg = check_equilibrium_sensitive(outdir, cfg,
+                                                      cfg.get("equil_floor", 1e-6))
+            elif chk == "static_equilibrium":
+                ok, msg = check_static_equilibrium(outdir, cfg,
+                                                   cfg.get("equil_tol", 1e-10))
+            elif chk == "golden_differs":
+                ok, msg = check_golden_differs(outdir, cfg,
+                                               cfg.get("differs_floor", 1e-8))
+            else:
+                # An unknown check name used to fall through this chain with
+                # `ok, msg` still holding the PREVIOUS check's values, so it
+                # printed a second PASS line attributed to a check that never
+                # ran. That is the worst kind of gate: one that cannot fail and
+                # looks green. Caught when "mass" and "finite" -- neither of
+                # them dispatched names -- were added to a new config and the
+                # suite duly printed each of its real checks twice.
+                ok, msg = False, (f"unknown check '{chk}' (known: "
+                                  f"analytic, mass_strict, mixed_levels, divb, "
+                                  f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
+                                  f"golden, golden_active, golden_differs, "
+                                  f"equilibrium_sensitive, static_equilibrium)")
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1
 
