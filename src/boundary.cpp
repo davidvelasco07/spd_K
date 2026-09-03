@@ -58,6 +58,7 @@ void boundaries(
     int pz = BC.nz;
     int nader = BC.nader;
     int nvar  = BC.nvar;
+    const bool mhd = BC.mhd;
     int type = BC.type;
     int N = BC.N;
     int n = BC.n;
@@ -79,12 +80,35 @@ void boundaries(
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
             BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
         }
+        else if(type == _inflow_){
+            //LOW side: the prescribed state where the problem injects, OUTFLOW
+            //everywhere else on that face. The sentinel is the density row of
+            //InflowL: negative means "not an inflow point". Clamping the whole
+            //face instead of just the nozzle walls in the cocoon backflow.
+            //HIGH side is always outflow.
+            if(BC.InflowL(t_id,0,k,j,i,kk,jj,ii) >= 0.0){
+                BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) =
+                    BC.InflowL(t_id,var,k,j,i,kk,jj,ii);
+            } else {
+                indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
+                BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
+            }
+            indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
+        }
         else if(type == _reflective_){
             //Mirror state at the wall: the ghost interface point carries the
             //interior interface value with the normal velocity (momentum)
             //component sign-flipped, so the Riemann problem at the wall sees
-            //(U, mirror(U)) and returns zero mass/energy flux
-            double sgn = (var == 1+dim) ? -1.0 : 1.0;
+            //(U, mirror(U)) and returns zero mass/energy flux.
+            //For MHD the NORMAL magnetic row flips too (rows 5..7 are Bx,By,Bz,
+            //so the normal one is 5+dim): that is what makes B.n = 0 at a
+            //perfectly conducting wall by antisymmetry, while the tangential
+            //components stay mirrored. Both of the MDZ21 wall tests need this
+            //parity -- the current sheet has B = B0 tanh(y/a) x^ with walls at
+            //y = +-1/2, so the tangential field must survive the wall and the
+            //normal field must vanish on it.
+            double sgn = (var == 1+dim || (mhd && var == 5+dim)) ? -1.0 : 1.0;
             indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
             BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = sgn*U.Vector(INDICES);
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
@@ -390,6 +414,18 @@ void boundaries(
         else if(type == _gradfree_){
             fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
             BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
+            fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
+            BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
+        }
+        else if(type == _inflow_){
+            //See the SD branch above: prescribed where the problem injects,
+            //outflow elsewhere on the low side, outflow on the high side.
+            if(BC.InflowL(0,k,j,i) >= 0.0){
+                BC.BoundaryL(var,k,j,i) = BC.InflowL(var,k,j,i);
+            } else {
+                fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
+                BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
+            }
             fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);
         }

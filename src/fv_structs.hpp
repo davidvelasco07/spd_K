@@ -176,6 +176,9 @@ struct FV_Boundaries {
     int dim;
     FV_Vector BoundaryL;
     FV_Vector BoundaryR;
+    //Prescribed inflow on the LOW side; density < 0 means "outflow here".
+    //See the _inflow_ note in define.hpp. Allocated only for _inflow_.
+    FV_Vector InflowL;
     #ifdef MPI
     FV_Vector BufferL;
     FV_Vector BufferR;
@@ -200,6 +203,7 @@ struct FV_Boundaries {
         dim   = Dim.dim;
         Kokkos::resize(BoundaryL,nvar,Nz,Ny,Nx);
         Kokkos::resize(BoundaryR,nvar,Nz,Ny,Nx);
+        if(type == _inflow_) Kokkos::resize(InflowL,nvar,Nz,Ny,Nx);
         #ifdef MPI
         Kokkos::resize(BufferL,nvar,Nz,Ny,Nx);
         Kokkos::resize(BufferR,nvar,Nz,Ny,Nx);

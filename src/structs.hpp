@@ -497,8 +497,21 @@ struct Boundaries {
     int N;
     int n;
     int dim;
+    //True when this halo carries an MHD state whose rows 5..7 are (Bx,By,Bz).
+    //Only the REFLECTIVE branch reads it: at a perfectly conducting wall the
+    //normal magnetic field is odd (so B.n = 0 there by antisymmetry) while the
+    //tangential components are mirrored -- B is a pseudo-vector, and this is the
+    //parity the MDZ21 current-sheet and Kelvin-Helmholtz walls both need. An
+    //explicit flag rather than a test on nvar: other 8-row arrays exist and
+    //guessing from the row count is how a boundary silently becomes the wrong
+    //physics.
+    bool mhd = false;
     SD_Vector BoundaryL;
     SD_Vector BoundaryR;
+    //Prescribed inflow state on the LOW side, filled once at setup (it is
+    //time-independent). Density < 0 at a point means "no inflow here, use
+    //outflow". Allocated only for _inflow_ boundaries.
+    SD_Vector InflowL;
     #ifdef MPI
     SD_Vector BufferL;
     SD_Vector BufferR;
@@ -513,7 +526,8 @@ struct Boundaries {
     Boundaries(dimension Dim, int _type, int _nader, int _nvar, int _Nz, int _Ny, int _Nx, int _nz, int _ny, int _nx) {
         init(Dim, _type, _nader, _nvar, _Nz, _Ny, _Nx, _nz, _ny, _nx);
     }
-    void init(dimension Dim, int _type, int _nader, int _nvar, int _Nz, int _Ny, int _Nx, int _nz, int _ny, int _nx) {
+    void init(dimension Dim, int _type, int _nader, int _nvar, int _Nz, int _Ny, int _Nx, int _nz, int _ny, int _nx, bool _mhd = false) {
+        mhd   = _mhd;
         type  = _type;
         nader = _nader;
         nvar  = _nvar;
@@ -528,6 +542,8 @@ struct Boundaries {
         dim   = Dim.dim;
         Kokkos::resize(BoundaryL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
         Kokkos::resize(BoundaryR,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
+        if(type == _inflow_)
+            Kokkos::resize(InflowL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
         #ifdef MPI
         Kokkos::resize(BufferL,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
         Kokkos::resize(BufferR,nader,nvar,Nz,Ny,Nx,nz,ny,nx);
