@@ -166,6 +166,17 @@ struct Hydro_ader : public PhysicsModule{
         alloc(F_ader_fp_x,"F_ader_fp_x",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
         alloc(dUx_sp,"dUx_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
         BC_fp_x.init(X_dim,cfg.bc[_x_],n_ader,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
+        //Prescribed-inflow state on the LOW X face, filled ONCE (time-independent).
+        //Mirrors the MHD jet's y-face fill in mhd.hpp; x1_bc = inflow is only
+        //defined for the problem that injects through that face.
+        if(cfg.bc[_x_]==_inflow_){
+            if(cfg.problem!=_ic_ha_jet_){
+                if(Master) cout<<"ERROR: x1_bc = inflow is only defined for "
+                                 "problem = ha_jet"<<endl;
+                exit(1);
+            }
+            ha_jet_fill_inflow_sd(BC_fp_x,Y_dim.sd_centers);
+        }
         alloc(U_ader_fp_y,"U_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
         alloc(F_ader_fp_y,"F_ader_fp_y",n_ader,nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
         alloc(dUy_sp,"dUy_sp",n_ader,nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -187,6 +198,7 @@ struct Hydro_ader : public PhysicsModule{
             alloc(F_x,"F_x",nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
             alloc(alpha_x,"alpha_x",nvar,Z_dim,Y_dim,X_dim,0,0,0);
             BC_x.init(X_dim,cfg.bc[_x_],nvar,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
+            if(cfg.bc[_x_]==_inflow_) ha_jet_fill_inflow_fv(BC_x,Y_dim.fv_faces);
             alloc(T_fp_x,"T_fp_x",1,nvar,Z_dim,Y_dim,X_dim,0,0,cfg.active[_x_]);
             alloc(F_y,"F_y",nvar,Z_dim,Y_dim,X_dim,0,cfg.active[_y_],0);
             alloc(alpha_y,"alpha_y",nvar,Z_dim,Y_dim,X_dim,0,0,0);
@@ -234,6 +246,11 @@ struct Hydro_ader : public PhysicsModule{
         compute_conservatives(W_sp,U_sp);
 
         Dt = compute_dt(W_cv,X_dim.h,Y_dim.h,Z_dim.h,nu);
+        {   //The setup timestep has the same blind spot as ComputeDt: a beam
+            //that enters only through a boundary is not in W_cv yet.
+            double dt_b = compute_inflow_dt(X_dim.h,Y_dim.h,Z_dim.h,W_cv.nx);
+            if(dt_b < Dt) Dt = dt_b;
+        }
         if(standalone){
             if(Master)
                 cout<<"dx = "<<X_dim.h<<" dt = "<<Dt<<endl;
@@ -303,7 +320,10 @@ struct Hydro_ader : public PhysicsModule{
     }
 
     double ComputeDt() override {
-        return compute_dt(W_cv,Xdim_.h,Ydim_.h,Zdim_.h,nu);
+        //The prescribed inflow state bounds the step too -- see Config::inflow_rho.
+        double dt_i = compute_dt(W_cv,Xdim_.h,Ydim_.h,Zdim_.h,nu);
+        double dt_b = compute_inflow_dt(Xdim_.h,Ydim_.h,Zdim_.h,W_cv.nx);
+        return dt_i < dt_b ? dt_i : dt_b;
     }
 
     void WriteOutputs() override { Write_outputs(); }

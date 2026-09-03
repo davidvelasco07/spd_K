@@ -457,6 +457,51 @@ quiescent ambient (MUSCL: 1.40e-10; and pure outflow is worse still at
 unexplained** -- it is not the boundary, since the inflow face is the BEST of the
 three there.
 
+## 8c. A boundary-fed beam is invisible to a dt taken from the interior
+
+`ha_jet` injects only through the x-min face, so at t = 0 the domain is
+quiescent and the CFL condition sees the ambient sound speed of 1.17 -- not the
+v_x = 800 about to enter. Measured: dt = 9.99e-04 against a tlim of 1e-03, i.e.
+the whole run in ONE step. The boundary is part of the problem, so its signal
+speed has to bound the step: `Config::inflow_rho/_p/_vx` hold the prescribed
+primitive state and `compute_inflow_dt` folds it in with the same CFL form the
+interior uses. It is a no-op wherever no inflow is prescribed.
+
+`mhd_jet` never showed this because its ambient carries B = 141.42, so the fast
+speed is 378 from t = 0 and the interior dt was already small. The bug was there
+all along; only the hydro problem exposed it. Cap BOTH sites -- the per-step
+`ComputeDt()` AND the setup `Dt`, which calls `compute_dt` directly.
+
+## 8d. Gate on the number the LITERATURE says is scheme-robust, not the one you like
+
+Rueda-Ramirez et al. 2023 (arXiv:2303.00374) table 5 runs the Ha jet with eight
+limiter/CFL combinations at 1024^2 DoF and reports three ranges. They disagree
+wildly about how reproducible they are:
+
+| quantity | spread across their 8 runs |
+|---|---|
+| p_max | **1.3x** |
+| rho_max | 1.7x |
+| rho_min | **18.7x** |
+
+So `hydro_ha_jet_2d` gates on p_max and says nothing about rho_min. The paper
+explains its own spread as a feedback -- less dissipation lowers rho_min, which
+raises the sound speed, which cuts dt, which cuts dissipation again. Bolm et al.
+2026 (arXiv:2607.06045) remark 8 generalises it: this benchmark family is
+"highly sensitive to minor differences in the numerical setup" because the
+calculations mix "very large numbers" with "numbers very close to 0", and they
+report asymmetric solutions from symmetric ICs. **Read the paper's own scatter
+before treating any single published number as a target.**
+
+Measured, PLM+RK2, converging against their MCL cluster at 1.748e+05:
+128^2 -> 1.605e+05, 256^2 -> 1.683e+05, 512^2 -> 1.693e+05. That is 3.2% low on
+p_max at a QUARTER of their degrees of freedom.
+
+**And do not invent a check name.** `"mass"` is not a dispatched name; adding it
+to a config is the exact mistake rule 7 records, and the hard-fail on unknown
+names is what caught it. Mass is not conserved on this problem anyway -- it
+enters through the nozzle and leaves through the far boundary.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

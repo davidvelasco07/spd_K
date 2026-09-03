@@ -29,6 +29,7 @@ int problem_id(const string &name){
     if(name == "mhd_vortex")       return _ic_mhd_vortex_;
     if(name == "mhd_blast")        return _ic_mhd_blast_;
     if(name == "mhd_jet")          return _ic_mhd_jet_;
+    if(name == "ha_jet")           return _ic_ha_jet_;
     if(name == "current_sheet")    return _ic_current_sheet_;
     if(name == "kh_mdz")           return _ic_kh_mdz_;
     if(name == "kh_rr22")          return _ic_kh_rr22_;
@@ -311,6 +312,29 @@ int main(int argc, char** argv){
         cfg.pp.cx     = pin.GetOrAddReal("problem","cx",0.5*boxlen_x);
         cfg.pp.cy     = pin.GetOrAddReal("problem","cy",0.5*boxlen_y);
         cfg.pp.cz     = pin.GetOrAddReal("problem","cz",0.5*boxlen_z);
+        //Prescribed-inflow face: what it does OUTSIDE the nozzle, and the
+        //signal speed it contributes to the timestep. Both are no-ops unless a
+        //problem actually prescribes an inflow. See Config::inflow_outside and
+        //Config::inflow_rho.
+        {
+            string jo = pin.GetOrAddString("problem","inflow_outside","reservoir");
+            if(jo=="outflow")        cfg.inflow_outside = _jo_outflow_;
+            else if(jo=="ambient")   cfg.inflow_outside = _jo_ambient_;
+            else if(jo=="reservoir") cfg.inflow_outside = _jo_reservoir_;
+            else {
+                cout<<"ERROR: unknown problem/inflow_outside '"<<jo
+                    <<"' (expected outflow, ambient or reservoir)"<<endl;
+                exit(1);
+            }
+        }
+        if(cfg.problem == _ic_ha_jet_){
+            //The beam enters only through the boundary, so a dt taken from the
+            //quiescent interior does not see it: measured 9.99e-04 against a
+            //tlim of 1e-03, i.e. the whole run in one step.
+            cfg.inflow_rho = cfg.pp.d1;
+            cfg.inflow_p   = cfg.pp.p0;
+            cfg.inflow_vx  = cfg.pp.v1;
+        }
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));

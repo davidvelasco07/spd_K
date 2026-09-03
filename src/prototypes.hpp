@@ -78,6 +78,9 @@ extern void Initialize_ep(SD_Solution,Matrix,Matrix,Matrix,int);
 
 //Hydro
 extern void compute_conservatives(SD_Solution, SD_Solution);
+extern double compute_inflow_dt(double dx, double dy, double dz, int px);
+extern void ha_jet_fill_inflow_sd(Boundaries& BC, Matrix y_centers);
+extern void ha_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fy);
 extern void compute_primitives(SD_Solution, SD_Solution);
 extern void compute_fluxes(SD_Solution, SD_Solution, int, int, int);
 extern double compute_dt(SD_Solution, double, double, double, double nu=0.0);

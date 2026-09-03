@@ -578,6 +578,53 @@ CONFIGS = {
     # still at 3.58e-02), so an SD lane would drown the boundary signal these
     # gates are for. The SD error is a real and separate issue; see
     # CLAUDE.md 7c on reading pressure off a swapped B at beta << 1.
+    # ------------------------------------------------------------------
+    # Ha et al. hypersonic jet -- the PURE HYDRO counterpart to the MHD jet
+    # above, and the only jet in this suite that can pass or fail against
+    # PUBLISHED NUMBERS. Balsara's MHD jet figure cannot: read through its own
+    # printed colourbar, its undisturbed ambient comes out at rho = 0.010 where
+    # the stated IC fixes 0.14. Rueda-Ramirez et al. 2023 (arXiv:2303.00374)
+    # table 5 gives rho and p ranges instead of only a picture.
+    #
+    # Being unmagnetized, it also separates "does spd_K do hypersonic jets"
+    # from "does spd_K do beta = 1e-4" -- two questions the MHD jet conflates.
+    "hydro_ha_jet_2d": {
+        "input": "inputs/rr23/ha_jet.athinput",
+        # 128^2 DoF and MUSCL keep this at ~9 s. The gate is p_max, which is
+        # the scheme-ROBUST number in RR23's own table (1.3x spread across
+        # eight limiter/CFL combinations, against 18.7x for rho_min).
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        # No mass check: mass is NOT conserved here by construction -- it enters
+        # through the nozzle and leaves through the far boundary.
+        "checks": ["ha_jet"],
+        "pmax_lo": 1.3e5,       # measured 1.605e+05 at this resolution
+        "pmax_hi": 2.3e5,       # RR23 report 1.726e+05-2.282e+05 at 4x the DoF
+        "sym_tol": 0.5,         # measured 0.000; the MHD jet's SDFB4 lane is 21
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
+    "hydro_ha_jet_noinflow_sensitive_2d": {
+        # Negative control for hydro_ha_jet_2d: the same deck with the nozzle
+        # switched off (x1_bc = outflow). Nothing enters, the quiescent gas is
+        # an exact stationary solution, and p_max MUST stay at its initial
+        # 0.4127 -- measured exactly that, with rho exactly 0.5 everywhere.
+        # If this goes red the inflow BC is firing when disabled; if the paired
+        # gate ever stops depending on the inflow, this is what notices.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32", "mesh/x1_bc=outflow",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["ha_jet_sensitive"],
+        "pmax_ceiling": 1.0,    # the IC is 0.4127
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
     "mhd_jet_base_equilibrium_2d": {
         # The jet deck with the injection turned OFF (problem/d1 = d0 and
         # problem/v2 = 0), so the nozzle prescribes the ambient state and the
@@ -1450,6 +1497,79 @@ def check_inlet_field_sensitive(outdir, cfg, floor):
         f"gate is vacuous)")
 
 
+def check_ha_jet(outdir, cfg, unused=None):
+    """Peak pressure and left-right symmetry on the Ha et al. hypersonic jet.
+
+    THE GATE IS ON p_max, and that choice is measured rather than assumed.
+    Rueda-Ramirez et al. 2023 (arXiv:2303.00374) table 5 runs the same problem
+    with eight limiter/CFL combinations at 1024^2 DoF, and the three quantities
+    they report do NOT agree with each other about how scheme-sensitive they are:
+
+        p_max     1.726e+05 .. 2.282e+05     spread  1.3x
+        rho_max   23.85 .. 40.67             spread  1.7x
+        rho_min   7.11e-04 .. 1.33e-02       spread 18.7x
+
+    So p_max is the one number worth gating on and rho_min is the one to avoid:
+    the paper explains its own spread as a dissipation feedback -- less
+    dissipation lowers rho_min, which raises the sound speed, which cuts dt,
+    which cuts dissipation again. Bolm et al. 2026 (arXiv:2607.06045) remark 8
+    says the same thing about this benchmark family outright: results are
+    "highly sensitive to minor differences in the numerical setup" because the
+    calculations mix "very large numbers" with "numbers very close to 0".
+
+    Measured here with PLM+RK2, converging the right way against their MCL
+    cluster at 1.748e+05-1.753e+05:
+        128^2 DoF   p_max 1.605e+05   rho_max 12.72
+        256^2 DoF   p_max 1.683e+05   rho_max 17.11
+        512^2 DoF   p_max 1.693e+05   rho_max 22.10
+    i.e. 3.2% low on p_max at a QUARTER of their degrees of freedom.
+
+    Symmetry is free and worth having: the setup and the mesh are exactly
+    symmetric about the nozzle axis, so any asymmetry is scheme noise. spd_K
+    measures 0.000 here. It is not a vacuous check -- on the Balsara MHD jet the
+    same measure reads 18-22 for the SDFB4 and AthenaK lanes.
+    """
+    grid = spdk_io.Grid(outdir)
+    idx = spdk_io.output_indices(outdir)
+    if len(idx) < 2:
+        return False, f"only {len(idx)} outputs; nothing to compare"
+    i = idx[-1]
+    # hydro layout is rho, vx, vy, vz, p (spdk_io.VARS)
+    rho = spdk_io.load_sd(grid, i, spdk_io.VARS["rho"])
+    prs = spdk_io.load_sd(grid, i, spdk_io.VARS["p"])
+    pmax = float(prs.max())
+    lo = cfg.get("pmax_lo", 1.3e5)
+    hi = cfg.get("pmax_hi", 2.3e5)
+    # the jet runs along x and the nozzle is centred in y, so mirror in y
+    r2 = np.squeeze(rho)
+    asym = float(np.abs(r2 - r2[::-1, :]).max() / r2.mean())
+    atol = cfg.get("sym_tol", 0.5)
+    ok = (lo < pmax < hi) and (asym < atol)
+    return ok, (f"p_max = {pmax:.4g} (want {lo:.2e} < p < {hi:.2e}; RR23 report "
+                f"1.73e+05-2.28e+05 at 4x the DoF), asymmetry = {asym:.3f} "
+                f"(limit {atol})")
+
+
+def check_ha_jet_sensitive(outdir, cfg, ceiling):
+    """Negative control for check_ha_jet, kept on purpose.
+
+    The same deck with x1_bc = outflow, i.e. the nozzle switched off. Nothing
+    then enters the domain and the quiescent gas is an exact stationary
+    solution, so p_max MUST stay at its initial 0.4127. If this ever rises, the
+    inflow boundary is injecting when it should not; if the paired gate ever
+    stops depending on the inflow, this is what catches it. Measured: p_max
+    exactly 0.4127 and rho exactly 0.5 everywhere.
+    """
+    grid = spdk_io.Grid(outdir)
+    worst = 0.0
+    for i in spdk_io.output_indices(outdir):
+        worst = max(worst,
+                    float(spdk_io.load_sd(grid, i, spdk_io.VARS["p"]).max()))
+    return worst < ceiling, (
+        f"nozzle off -> p_max = {worst:.6g} (must stay below {ceiling:.3g}, the "
+        f"initial 0.4127; a jet here means the inflow BC fires when disabled)")
+
+
 def check_golden_differs(outdir, cfg, floor):
     """The anti-dead-code gate for the UCT electromotive force.
 
@@ -1595,6 +1715,11 @@ def main():
             elif chk == "equilibrium_sensitive":
                 ok, msg = check_equilibrium_sensitive(outdir, cfg,
                                                       cfg.get("equil_floor", 1e-6))
+            elif chk == "ha_jet":
+                ok, msg = check_ha_jet(outdir, cfg)
+            elif chk == "ha_jet_sensitive":
+                ok, msg = check_ha_jet_sensitive(outdir, cfg,
+                                            cfg.get("pmax_ceiling", 1.0))
             elif chk == "inlet_field":
                 ok, msg = check_inlet_field(outdir, cfg,
                                             cfg.get("inlet_b2_limit", 5e5))
@@ -1619,7 +1744,7 @@ def main():
                                   f"analytic, mass_strict, mixed_levels, divb, "
                                   f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
                                   f"golden, golden_active, golden_differs, "
-                                  f"equilibrium_sensitive, static_equilibrium, inlet_field, inlet_field_sensitive)")
+                                  f"equilibrium_sensitive, static_equilibrium, inlet_field, inlet_field_sensitive, ha_jet, ha_jet_sensitive)")
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1
 

@@ -90,6 +90,8 @@ enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 //marks "not an inflow point here", and the array is initialised to that
 //sentinel so an inflow boundary nobody fills degrades to outflow.
 enum {_periodic_, _gradfree_, _reflective_, _inflow_, _outflow_};
+//What an _inflow_ face does outside the nozzle; see Config::inflow_outside.
+enum {_jo_outflow_, _jo_ambient_, _jo_reservoir_};
 enum {_integrator_ader_, _integrator_rk_};
 //MHD face Riemann solver. Appended, never reordered: llf=0 and hlld=1 are the
 //values every existing input and golden was generated under.
@@ -124,7 +126,8 @@ enum {_cfl_sum_, _cfl_min_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
       _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,
-      _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_, _ic_current_sheet_, _ic_kh_mdz_, _ic_kh_rr22_};
+      _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_, _ic_current_sheet_, _ic_kh_mdz_, _ic_kh_rr22_,
+      _ic_ha_jet_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_

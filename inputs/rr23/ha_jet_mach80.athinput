@@ -1,0 +1,73 @@
+# Ha et al. astrophysical jet, the MACH-80 case -- the gentle first gate.
+#
+# Fu 2019, "A very-high-order TENO scheme for all-speed gas dynamics and
+# turbulence", Comput. Phys. Commun. 244, 117, section 4.3.4, case 1.
+# Original problem: Ha, Gardner, Gelb & Shu, J. Sci. Comput. 24, 29 (2005).
+#
+#   domain  [0,2] x [-0.5,0.5]  -> spd_K origin-anchored: [0,2] x [0,1], cy=0.5
+#   ambient (rho, u, v, p) = (0.5, 0, 0, 0.4127)
+#   left    (5, 30, 0, 0.4127) for |y| <= 0.05, and (5, 0, 0, 0.4127) OTHERWISE
+#   right, top, bottom: outflow
+#   448 x 224, gamma = 5/3
+#
+# WHY THIS ONE FIRST. It is the same machinery as the Mach-2000 case -- same
+# nozzle inflow, same geometry, same gas -- at 27x lower injection velocity. If
+# the inflow BC, the dt handling and the shock capturing are right, this should
+# be unremarkable; if it is not clean, there is no point running Mach 2000.
+#
+# NOTE THE LEFT BOUNDARY. Fu states it outright, and it is NOT the ambient:
+# rho = 5 -- the JET density -- on the whole left face, at rest outside the
+# nozzle. That is problem/inflow_outside = reservoir. RR23 (arXiv:2303.00374)
+# run the Mach-2000 version with characteristics-based inflow/outflow instead
+# and do not specify the off-nozzle state, which is exactly the ambiguity this
+# parameter exists to make explicit rather than guess at.
+#
+# Fu gives no final time and no quantitative table for the jets, so this deck
+# has no gate of its own -- it is a robustness and eyeball check against his
+# Fig. 13. The quantitative target lives in ha_jet.athinput (RR23 table 5).
+
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 112          # 112 * 4 = 448 DoF in x
+nx2   = 56           #  56 * 4 = 224 DoF in y
+nx3   = 1
+x1len = 2.0
+x2len = 1.0
+x1_bc = inflow       # prescribed left face; see problem/inflow_outside
+x2_bc = outflow      # Fu: outflow top and bottom (RR23 use periodic)
+
+<time>
+# tlim IS NOT FROM THE PAPER -- Fu states no final time for either jet. 0.07 is
+# chosen so the beam traverses the domain once: length 2 at u = 30 is t = 0.067.
+# Any comparison against his Fig. 13 is therefore qualitative in time as well.
+tlim       = 0.07
+cfl        = 0.3
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.6666666666666667
+
+<fallback>
+max_revs  = 3
+tolerance = 1e-5
+NAD       = relative
+NAD_neighbors = 2nd
+SED       = true
+
+<problem>
+problem = ha_jet
+d0      = 0.5        # ambient rho
+d1      = 5.0        # jet rho, and the left-face reservoir density
+p0      = 0.4127
+v1      = 30.0       # Mach 80
+radius  = 0.05
+cy      = 0.5
+inflow_outside = reservoir
+
+<output>
+dt = 0.0175          # 4 frames

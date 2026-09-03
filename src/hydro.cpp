@@ -44,6 +44,82 @@ void conservatives(double* w, double* u, double gm){
     u[_e_] = w[_p_]/(gm-1.)+0.5*E_kin;
 }
 
+//Nozzle profile for the Ha et al. hypersonic jet (see ha_jet in
+//initial_conditions.cpp for the full setup and references). It lives here
+//rather than beside the IC because the inflow fills below need the pointwise
+//conservatives(), which is file-local to this translation unit -- the same
+//reason mhd_jet_fill_inflow_* live in mhd.cpp.
+KOKKOS_INLINE_FUNCTION
+double ha_jet_nozzle(int var, double y, ProblemParams pp, int outside){
+    bool nozzle = fabs(y - pp.cy) < pp.radius;
+    if(var==_p_)  return pp.p0;
+    if(var==_vx_) return nozzle ? pp.v1 : 0.0;
+    if(var==_d_){
+        if(nozzle) return pp.d1;
+        //Outside the nozzle: Fu 2019 holds the JET density (rho = 5) at rest on
+        //the whole left face; the ambient variant holds rho = d0 instead.
+        return (outside == _jo_reservoir_) ? pp.d1 : pp.d0;
+    }
+    return 0.0;
+}
+
+//Fill the prescribed-inflow state on the LOW X face, once, at setup.
+//
+// This is the x-direction twin of mhd_jet_fill_inflow_sd/_fv. Same contract:
+// the nozzle gets the prescribed conservative state, everything else on that
+// face gets the NEGATIVE-density sentinel and therefore falls back to outflow
+// in boundaries() (define.hpp). Nothing here is MHD-specific -- boundaries()
+// keys the _inflow_ branch off BC.dim, so the machinery was already
+// direction-agnostic; only the fill had to be written for x.
+//
+// SD form: the x-face array's transverse index is (j,jj), at solution points,
+// so the position is Ydim.sd_centers(j,jj).
+void ha_jet_fill_inflow_sd(Boundaries& BC, Matrix y_centers){
+    if(BC.InflowL.size()==0) return;
+    int Nx=BC.Nx, Ny=BC.Ny, Nz=BC.Nz, px=BC.nx, py=BC.ny, pz=BC.nz;
+    int nader=BC.nader, nvar=BC.nvar;
+    ProblemParams pp = cfg.pp;
+    double gm = cfg.gamma;
+    const int outside = cfg.inflow_outside;
+    SD_Vector IN = BC.InflowL;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+        double y = y_centers(j,jj);
+        //In _jo_outflow_ only the nozzle is prescribed and the rest of the face
+        //falls back to outflow via the sentinel; in the clamped modes the whole
+        //face carries a prescribed state.
+        bool inject = (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
+        double w[NVAR], u[NVAR];
+        if(inject){
+            for(int var=0;var<NVAR;var++) w[var]=ha_jet_nozzle(var,y,pp,outside);
+            conservatives(w,u,gm);
+        }
+        for(int t=0;t<nader;t++)
+        for(int var=0;var<nvar;var++)
+            IN(t,var,k,j,i,kk,jj,ii) = inject ? (var<NVAR ? u[var] : 0.0) : -1.0;
+    });
+}
+
+//FV form: the transverse position of cell j is the midpoint of its faces.
+void ha_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fy){
+    if(BC.InflowL.size()==0) return;
+    int Nx=BC.Nx, Ny=BC.Ny, Nz=BC.Nz, nvar=BC.nvar;
+    ProblemParams pp = cfg.pp;
+    double gm = cfg.gamma;
+    const int outside = cfg.inflow_outside;
+    FV_Vector IN = BC.InflowL;
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
+        double y = 0.5*(fy(j)+fy(j+1));
+        bool inject = (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
+        double w[NVAR], u[NVAR];
+        if(inject){
+            for(int var=0;var<NVAR;var++) w[var]=ha_jet_nozzle(var,y,pp,outside);
+            conservatives(w,u,gm);
+        }
+        for(int var=0;var<nvar;var++)
+            IN(var,k,j,i) = inject ? (var<NVAR ? u[var] : 0.0) : -1.0;
+    });
+}
+
 void compute_conservatives(
     SD_Solution W,
     SD_Solution U
@@ -251,6 +327,25 @@ void compute_fluxes(
     if(_v1_==_vx_)      compute_fluxes_t<_vx_,_vy_,_vz_>(U,F);
     else if(_v1_==_vy_) compute_fluxes_t<_vy_,_vz_,_vx_>(U,F);
     else                compute_fluxes_t<_vz_,_vx_,_vy_>(U,F);
+}
+
+//dt implied by the prescribed inflow state alone. Same CFL form as the
+//interior reduction in compute_dt, so time/cfl_type is honoured; returns a huge
+//number when no inflow is prescribed, so callers can just take a min.
+//See Config::inflow_rho for why this is needed at all.
+double compute_inflow_dt(double dx, double dy, double dz, int px){
+    if(cfg.inflow_rho <= 0.0) return 1e300;
+    const double gm = cfg.gamma, cfl = cfg.cfl;
+    const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double c_s = sqrt(gm*cfg.inflow_p/cfg.inflow_rho);
+    double c_max = 0.0, dx_min = 1.0, inv_dt = 0.0;
+    if(cfg.active[_x_]){ double a = fabs(cfg.inflow_vx) + c_s;
+        c_max += a; dx_min = min(dx_min,dx); inv_dt = max(inv_dt,a/dx); }
+    if(cfg.active[_y_]){ double a = fabs(cfg.inflow_vy) + c_s;
+        c_max += a; dx_min = min(dx_min,dy); inv_dt = max(inv_dt,a/dy); }
+    if(cfg.active[_z_]){ double a = fabs(cfg.inflow_vz) + c_s;
+        c_max += a; dx_min = min(dx_min,dz); inv_dt = max(inv_dt,a/dz); }
+    return cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
 }
 
 double compute_dt(

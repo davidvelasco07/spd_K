@@ -184,6 +184,53 @@ double kelvin_helmholtz(int var, double x, double y){
     return 0;
 }
 
+//========================================================================================
+// Ha et al. high-Mach astrophysical jet -- the PURE HYDRO stress test.
+//
+// Ha, Gardner, Gelb & Shu, J. Sci. Comput. 24, 29 (2005), as run in
+// Rueda-Ramirez, Bolm, Kuzmin & Gassner 2023 (arXiv:2303.00374) section 3.5.
+//
+//   domain  [-0.5,0.5]^2, gamma = 5/3, NO magnetic field
+//   ambient rho = 0.5, p = 0.4127, v = 0
+//   inlet   on the LEFT face, |y| < 0.05: rho = 5, p = 0.4127, v_x = 800
+//   Mach 2156.91 w.r.t. the JET sound speed, 682.08 w.r.t. the AMBIENT
+//   periodic top/bottom; inflow/outflow left/right; t = 1e-3
+//
+// spd_K is origin-anchored, so the box is [0,1]^2 and the nozzle is centred on
+// pp.cy (the box midpoint) rather than on y = 0.
+//
+// WHY THIS TEST, next to the Balsara 8.2 MHD jet: it is the same class of
+// problem -- a hypersonic beam into a quiescent medium -- but UNMAGNETIZED, and
+// RR23 publishes the actual numbers (their table 5: rho and p ranges at
+// t = 1e-3) rather than only a figure. The Balsara density panel cannot be read
+// quantitatively: through its own printed colourbar the undisturbed ambient
+// comes out at rho = 0.010 where the stated IC fixes 0.14. So this problem is
+// the one that can actually PASS or FAIL against a paper, and it separates
+// "does spd_K do hypersonic jets" from "does spd_K do beta = 1e-4".
+//
+// Read table 5 with care before treating any single number as a target: across
+// limiter and CFL, within ONE code at ONE resolution, their rho_min spans 19x
+// (7.11e-04 to 1.33e-02) and they explain the mechanism -- less dissipation
+// gives a lower rho_min, which raises the sound speed, which cuts dt, which
+// cuts dissipation again. The cocoon minimum is the most scheme-sensitive
+// number in the problem. rho_max is far steadier: 23.85-40.67, i.e. 4.8-8.1x
+// the injected 5, against a gamma=5/3 single-shock bound of 4 -- the excess is
+// stacked compressions at the working surface.
+//
+// pp.d0 ambient rho, pp.d1 jet rho, pp.p0 pressure (both), pp.v1 jet v_x,
+// pp.radius nozzle half-width, pp.cy nozzle centre.
+
+//Quiescent ambient EVERYWHERE. The beam enters only through the left boundary,
+//exactly as in mhd_ic_jet: a uniform beam laid into the domain would be an
+//exact steady solution and the run would do nothing.
+KOKKOS_INLINE_FUNCTION
+double ha_jet(int var, double x, double y, double z, ProblemParams pp){
+    (void)x; (void)y; (void)z;
+    if(var==_d_) return pp.d0;
+    if(var==_p_) return pp.p0;
+    return 0.0;
+}
+
 KOKKOS_INLINE_FUNCTION
 double initial_condition(int problem, int var, double x, double y, double z,
                          double gm, double gy, bool ay, bool az, ProblemParams pp){
@@ -198,6 +245,7 @@ double initial_condition(int problem, int var, double x, double y, double z,
         case _ic_kelvin_helmholtz_: return kelvin_helmholtz(var,x,y);
         case _ic_implosion_:        return implosion(var,x,y,z,pp);
         case _ic_rti_:              return rti(var,x,y,gm,gy,pp);
+        case _ic_ha_jet_:           return ha_jet(var,x,y,z,pp);
         case _ic_user_:             return user_ic(var,x,y,z,gm,ay,az,pp);
         default:                    return 0;
     }

@@ -1,0 +1,93 @@
+# Ha et al. high-Mach astrophysical jet -- the PURE HYDRO hypersonic stress test.
+#
+# Ha, Gardner, Gelb & Shu, J. Sci. Comput. 24, 29 (2005), as run in
+# Rueda-Ramirez, Bolm, Kuzmin & Gassner 2023 (arXiv:2303.00374) section 3.5.
+#
+# Domain [-0.5,0.5]^2; spd_K is origin-anchored so that is [0,1]^2 with the
+# nozzle centred on cy = 0.5. Ambient rho = 0.5, p = 0.4127, v = 0. The inlet
+# occupies |y| < 0.05 of the LEFT face and injects rho = 5 at v_x = 800.
+# gamma = 5/3, t = 1e-3. RR23 use 256x256 elements at degree N=3, i.e. 1024^2
+# degrees of freedom.
+#
+# Mach 2156.91 with respect to the JET sound speed and 682.08 with respect to
+# the AMBIENT -- the paper quotes both, and they differ by sqrt(rho_jet/rho_amb)
+# because the two gases are at the same pressure.
+#
+# WHY THIS PROBLEM IS HERE. It is the same class as the Balsara 8.2 MHD jet -- a
+# hypersonic beam into a quiescent medium -- but UNMAGNETIZED, and RR23 publish
+# the actual numbers (their table 5) rather than only a figure. Balsara's
+# density panel cannot be read quantitatively: through its own printed
+# colourbar the undisturbed ambient comes out at rho = 0.010 where the stated
+# initial condition fixes 0.14. So this is the jet that can actually pass or
+# fail against a paper, and it separates "does spd_K do hypersonic jets" from
+# "does spd_K do beta = 1e-4".
+#
+# READ TABLE 5 BEFORE TREATING ANY NUMBER AS A TARGET. Across limiter and CFL,
+# in ONE code at ONE resolution, their rho_min spans 19x (7.11e-04 to 1.33e-02),
+# and they explain why: less dissipation lowers rho_min, which raises the sound
+# speed, which cuts dt, which cuts dissipation again. The cocoon minimum is the
+# most scheme-sensitive number in the problem, so gate on rho_MAX, which is
+# steady at 23.85-40.67 across all eight of their configurations.
+#
+#   RR23 table 5, t = 1e-3, 1024^2 DoF:
+#     FCT/IDP  CFL 0.9   rho [4.43e-03, 32.15]   p [0.412, 1.726e+05]
+#     FCT/IDP  CFL 0.09  rho [7.11e-04, 40.67]   p [0.405, 2.282e+05]
+#     MCL      CFL 0.9   rho [1.07e-02, 24.71]   p [0.217, 1.748e+05]
+#     MCL      CFL 0.225 rho [7.40e-03, 23.85]   p [0.047, 1.753e+05]
+#
+# BOUNDARIES. RR23 use periodic top/bottom and characteristics-based
+# inflow/outflow left/right. spd_K has no characteristic BC, so this deck uses
+# the prescribed-nozzle inflow on x-min (outflow elsewhere on that face, the
+# same contract as the MHD jet) and plain outflow on x-max. That is a real
+# difference from the paper and is why the gate is on rho_max rather than on
+# the cocoon.
+
+<job>
+system   = hydro
+fallback = true
+
+<mesh>
+p     = 3
+nx1   = 256
+nx2   = 256
+nx3   = 1
+x1len = 1.0
+x2len = 1.0
+x1_bc = inflow      # prescribed nozzle on x-min; see problem/inflow_outside
+x2_bc = periodic    # RR23: periodic top and bottom (Fu 2019 uses outflow)
+
+<time>
+tlim       = 0.001
+cfl        = 0.3
+integrator = rk3
+cfl_type   = sum
+
+<hydro>
+gamma = 1.6666666666666667
+
+<fallback>
+max_revs  = 3
+tolerance = 1e-5
+NAD       = relative
+NAD_neighbors = 2nd
+SED       = true
+
+<problem>
+problem = ha_jet
+d0      = 0.5        # ambient rho
+d1      = 5.0        # jet rho
+p0      = 0.4127     # pressure, ambient and jet alike
+v1      = 800.0      # jet v_x
+radius  = 0.05       # nozzle half-width
+cy      = 0.5        # nozzle centre (y = 0 in the paper's coordinates)
+# What the inlet face does OUTSIDE the nozzle. The two papers disagree, so this
+# is a parameter, not a guess:
+#   reservoir  rho = d1 (the JET density) at rest -- Fu 2019 section 4.3.4
+#              states it outright: "(rho,u,p) = (5,0,0,0.4127) otherwise"
+#   ambient    rho = d0 at rest
+#   outflow    sentinel -> plain outflow copy, the MHD jet's contract and the
+#              nearest thing spd_K has to RR23's characteristics-based BC
+inflow_outside = reservoir
+
+<output>
+dt = 0.00025         # 4 frames to t = 1e-3

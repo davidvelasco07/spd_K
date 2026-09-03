@@ -154,6 +154,31 @@ struct RunConfig {
                                          //near-zero velocity components over-triggers.
     bool outputs = false;                //file outputs (opt-in via <output> block)
     ProblemParams pp;                    //initial-condition parameters
+    //Prescribed-inflow signal speed, for the TIMESTEP.
+    //
+    //A jet that enters only through a boundary is invisible to a dt computed
+    //from the interior: at t = 0 the domain is quiescent, so the CFL condition
+    //sees only the ambient sound speed. On the Ha et al. jet that gave
+    //dt = 9.99e-04 against a tlim of 1e-03 -- ONE step for the whole run --
+    //while the state about to enter carries v_x = 800. The boundary is part of
+    //the problem, so its signal speed has to bound the step.
+    //
+    //Held as the prescribed PRIMITIVE state (it is time-independent) and folded
+    //into ComputeDt with the same CFL form the interior uses, so cfl_type is
+    //honoured. inflow_rho <= 0 means "no prescribed inflow", which is the
+    //default and makes this a no-op for every existing problem.
+    //What the prescribed-inflow face does OUTSIDE the nozzle. The two papers
+    //that specify this jet disagree, so it is a parameter rather than a guess:
+    //  _jo_outflow_   sentinel -> plain outflow copy (the MHD jet's contract,
+    //                 and the closest thing to RR23's characteristics-based BC)
+    //  _jo_ambient_   clamp to the ambient state (rho = d0, v = 0)
+    //  _jo_reservoir_ clamp to the JET density at rest (rho = d1, v = 0) --
+    //                 Fu 2019 (CPC 244, 117) section 4.3.4 states this
+    //                 explicitly: "(rho,u,p) = (5,0,0,0.4127) otherwise", i.e.
+    //                 rho = 5 on the whole left face, not the ambient 0.5.
+    int inflow_outside = 0;
+    double inflow_rho = 0.0, inflow_p = 0.0;
+    double inflow_vx = 0.0, inflow_vy = 0.0, inflow_vz = 0.0;
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
     int amr_max_level = 0;               //maximum refinement level
     int amr_criterion = 0;               //0=Lohner, 1=pressure, 2=trouble, 3=shear, 4=bfield

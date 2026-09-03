@@ -104,6 +104,7 @@ divergence-free to machine precision. Two problems ship with the module:
 |---|---|
 | `orszag_tang` | Orszag-Tang vortex (Gaussian units: `rho = 25/36π`, `P = 5/12π`, `B0 = 1/√4π`), domain `[0,1]²` |
 | `field_loop` | Gardiner & Stone weak field loop (`A0 = 1e-3`, `R = 0.3`) advected by `v = (2,1,0)` |
+| `ha_jet` | Ha et al. hypersonic jet (HYDRO, `gamma = 5/3`, no field). Ambient `rho = 0.5`, `p = 0.4127`, at rest; a nozzle on `\|y - cy\| < radius` of the x-min face injects `rho = 5` at `v_x = 800`. Needs `x1_bc = inflow`. The unmagnetized counterpart to `mhd_jet`, and the only jet here with published numbers to check against -- see `inputs/rr23/ha_jet.athinput` |
 | `mhd_jet` | Mach-800 magnetized jet, Balsara (2012) with the field of Wu & Shu (2018). Quiescent ambient `rho = 0.1*gamma`, `p = 1`, `B = (0,sqrt(20000),0)`; the nozzle `|x-cx| < radius` on the y-min face injects `rho = gamma` at `v_y = 800`. Needs `x2_bc = inflow`, which is "prescribed state on the nozzle, outflow everywhere else on that face" -- see *Boundaries that carry a field* |
 
 ```bash
