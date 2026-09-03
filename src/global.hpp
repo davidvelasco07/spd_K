@@ -91,11 +91,62 @@ struct RunConfig {
                                          //rather than by an end time.
 
     int rsolver = _rsolver_llf_;         //MHD Riemann solver (faces + edges)
+    int emf = _emf_2sweep_;
+    int mhd_energy_fix = 0;              //MDZ21 6.4 energy correction, as a BITMASK
+                                         //over the three places a state's B rows
+                                         //are replaced by the CT field without the
+                                         //energy following (so p = (g-1)(E - Ekin
+                                         //- B^2/2) is then read off a B that E was
+                                         //never built from):
+                                         //  1  SD  mhd_B_to_U -- the END OF A
+                                         //        STAGE, where the Godunov B is
+                                         //        replaced wholesale by the CT
+                                         //        field. This is the one MDZ21
+                                         //        prescribes and the only one
+                                         //        that should normally be on.
+                                         //  2  FV  mhd_set_candidate_B (the PAD
+                                         //        pressure is computed here)
+                                         //  4  fp  mhd_face_B_to_fp (the state
+                                         //        the Riemann solver sees)
+                                         //2 and 4 sit MID-UPDATE rather than at a
+                                         //stage boundary, where the cell-centred
+                                         //B is a working value and not yet the
+                                         //garbage the stage-end swap discards.
+                                         //They exist to be measured, not used.
+                                         //0 = off (default; the correction moves
+                                         //every MHD result, so decks opt in).
+                                         //A bit per site so a measurement can be
+                                         //attributed to one of them (rule 2).              //MHD electromotive force (mhd/emf):
+                                         //2sweep = two 1-D edge Riemann sweeps at
+                                         //SD edges + the four-state LLF bound at
+                                         //demoted corners (the default; every MHD
+                                         //golden encodes it), uct = upwind
+                                         //constrained transport (MDZ21 eq. 33),
+                                         //whose flavour follows rsolver
+                                         //(hll -> UCT-HLL, hlld -> UCT-HLLD).
     int limiter = _lim_minmod_;          //MUSCL/FV slope limiter (fallback/limiter)
     int mood_nad_b = _nad_b_comps_;      //MHD NAD B mode: comps (default) or mag
                                          //(|B|-only is blind to Alfvénic / transverse
                                          //structure; matches AthenaK mood_nad_b=comps
                                          //and Python spd limiting_variables)
+    bool mood_pad_first_order = false;   //when true, only a PAD failure (negative
+                                         //density/pressure, non-finite) may demote
+                                         //a cell to FIRST ORDER; a NAD flag alone
+                                         //stops at MUSCL. First order is the
+                                         //positivity last resort, so it answers to
+                                         //physics rather than to ringing.
+    int mood_max_level = 2;              //deepest cascade tier the detector may
+                                         //demote to: 0 = high order only,
+                                         //1 = stop at MUSCL, 2 = allow first
+                                         //order (the historical behaviour).
+                                         //Setting 1 makes the fallback bound the
+                                         //solution from above by MUSCL, which is
+                                         //what a cascade is supposed to guarantee
+                                         //and what spd_K currently does NOT do.
+    bool mood_tier_exclude = true;       //drop cells pinned at the bottom cascade
+                                         //tier out of detection, as AthenaK does
+                                         //(mhd/mood_tier_exclude=false restores
+                                         //the previous always-flag behaviour).
     int mood_nad_v = _nad_v_off_;        //MHD NAD velocity: off (default) / mag / comps.
                                          //AthenaK HLLD+FB ringing-stable configs use comps
                                          //together with mood_nad_b=comps (and a global NAD

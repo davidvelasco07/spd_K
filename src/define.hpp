@@ -65,9 +65,32 @@
 #define _e_  _p_
 
 enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
-enum {_periodic_, _gradfree_, _reflective_};
+//_gradfree_ is zeroth-order OUTFLOW: the ghost copies the adjacent interior
+//value, so no gradient is imposed and waves leave freely.
+//_inflow_ is a PRESCRIBED state on the LOW side of the direction, and outflow
+//everywhere else -- both on the high side and, on the low side, at any point the
+//problem does not inject through. That second part is not a detail: a jet nozzle
+//occupies a fraction of its boundary, and clamping the REST of that face to a
+//fixed state walls in the cocoon backflow instead of letting it drain. The
+//prescribed state is precomputed once into Boundaries::InflowL, with a NEGATIVE
+//density marking "not an inflow point here, fall back to outflow" -- physical
+//densities are positive, so the sentinel is unambiguous and needs no mask array.
+enum {_periodic_, _gradfree_, _reflective_, _inflow_};
 enum {_integrator_ader_, _integrator_rk_};
-enum {_rsolver_llf_, _rsolver_hlld_};
+//MHD face Riemann solver. Appended, never reordered: llf=0 and hlld=1 are the
+//values every existing input and golden was generated under.
+//hll is the two-wave solver of MDZ21 eq. 28, and is the base solver whose
+//fan supplies the UCT-HLL emf coefficients (mhd_uct_hll_coeffs).
+enum {_rsolver_llf_, _rsolver_hlld_, _rsolver_hll_};
+//How the edge/corner electromotive force is built (mhd/emf).
+//  2sweep -- two sequential 1-D edge Riemann sweeps (SD) + the four-state LLF
+//            bound at demoted corners. The DEFAULT: it is what every MHD
+//            golden in the tree encodes.
+//  uct    -- upwind constrained transport (Mignone & Del Zanna 2021 eq. 33),
+//            with the a/d coefficients taken from the face solver's own fan,
+//            so mhd/rsolver picks the UCT flavour: hll -> UCT-HLL,
+//            hlld -> UCT-HLLD. Not available under llf, which has no fan.
+enum {_emf_2sweep_, _emf_uct_};
 //MUSCL/FV slope limiter (fallback/limiter). minmod is the default and is what
 //every existing golden encodes; see src/muscl.hpp.
 enum {_lim_minmod_, _lim_vanleer_, _lim_moncen_};
@@ -87,7 +110,7 @@ enum {_cfl_sum_, _cfl_min_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
       _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,
-      _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_};
+      _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_, _ic_current_sheet_, _ic_kh_mdz_, _ic_kh_rr22_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_

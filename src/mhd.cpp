@@ -345,6 +345,21 @@ void mhd_compute_fluxes(SD_Solution U, SD_Solution F, int dim){
     else              mhd_compute_fluxes_t<_mvz_,_mvx_,_mvy_,_mbz_,_mbx_,_mby_>(U,F);
 }
 
+// SPD_EMF_TRACE=1 names the EMF path each call actually takes. This exists because
+// the UCT kernels sat in the tree with ZERO call sites for a release while
+// docs/mhd.md described them as live: mhd_uct_edge_E was never called (every face
+// solve passed a default-empty UCT view, so want_uct was false) and
+// mhd_uct_corner_E was gated on a `use_uct` member hardwired to false. Both looked
+// wired up on a read. Counting calls is the only thing that settles it, and the
+// trace prints for the legacy paths too, so a silent path is real silence rather
+// than a dead printf. getenv is cached: these are host functions on the per-stage
+// path (the codebase idiom, cf. faceB_prolong_const in amr.cpp).
+inline bool emf_trace(){
+    static const bool v = getenv("SPD_EMF_TRACE") != nullptr;
+    return v;
+}
+#define EMF_TRACE(name) do{ if(emf_trace()) printf("[emf] %s\n", name); }while(0)
+
 //----------------------------------------------------------------------------------------
 // Face Riemann solvers (U carries conservative state at the flux points)
 //
@@ -471,6 +486,45 @@ void mhd_uct_hlld_coeffs(double S_L, double S_Ls, double S_M, double S_Rs, doubl
     uct[2] = 0.5*((nuR - nust)*chitR + fabs(S_Rs) - nust*S_Rs);
 }
 
+// The two-wave HLL average, given the states, their fluxes and the outer fan.
+// Factored out so mhd_riemann_hll and HLLD's degenerate-fan fallback are the SAME
+// arithmetic rather than two copies that can drift (CLAUDE.md rule 4). It takes
+// the pieces already computed instead of recomputing them, so substituting it
+// into the HLLD fallback is bit-identical to the inline form it replaced.
+KOKKOS_INLINE_FUNCTION
+void mhd_hll_flux(double* f, const double* uL, const double* uR,
+                  const double* fL, const double* fR, double S_L, double S_R){
+    if(S_L >= 0.0)      for(int var=0;var<NMHD;var++) f[var]=fL[var];
+    else if(S_R <= 0.0) for(int var=0;var<NMHD;var++) f[var]=fR[var];
+    else                for(int var=0;var<NMHD;var++)
+        f[var] = (S_R*fL[var] - S_L*fR[var] + S_L*S_R*(uR[var]-uL[var]))/(S_R - S_L);
+}
+
+// HLL (MDZ21 eq. 28): the two-wave solver, and the base scheme whose fan supplies
+// the UCT-HLL emf coefficients. Same outer wave-speed estimate as HLLD (eq. 67),
+// so the two solvers see an identical fan and differ only in what they do inside
+// it. If uct != nullptr, also writes the NUCT face coefficients.
+KOKKOS_INLINE_FUNCTION
+void mhd_riemann_hll(double* f, double* uL, double* uR,
+                     int v1, int v2, int v3, int b1, int b2, int b3, double gm,
+                     double* uct=nullptr){
+    double wL[NMHD], wR[NMHD], fL[NMHD], fR[NMHD];
+    mhd_primitives(uL,wL,gm);
+    mhd_primitives(uR,wR,gm);
+    mhd_fluxes(wL,fL,v1,v2,v3,b1,b2,b3,gm);
+    mhd_fluxes(wR,fR,v1,v2,v3,b1,b2,b3,gm);
+
+    double c_L = mhd_fast_vel(wL[_mprs_],wL[_mrho_],wL[b1],wL[b2],wL[b3],gm);
+    double c_R = mhd_fast_vel(wR[_mprs_],wR[_mrho_],wR[b1],wR[b2],wR[b3],gm);
+    double c_max = c_L>c_R ? c_L : c_R;
+    double u_L=wL[v1], u_R=wR[v1];
+    double S_L = (u_L<u_R ? u_L : u_R) - c_max;
+    double S_R = (u_L>u_R ? u_L : u_R) + c_max;
+
+    mhd_hll_flux(f,uL,uR,fL,fR,S_L,S_R);
+    if(uct) mhd_uct_hll_coeffs(S_L,S_R,wL[v2],wR[v2],wL[v3],wR[v3],uct);
+}
+
 // If uct != nullptr, also writes NUCT face coefficients for the UCT corner EMF.
 KOKKOS_INLINE_FUNCTION
 void mhd_riemann_hlld(double* f, double* uL, double* uR,
@@ -516,10 +570,7 @@ void mhd_riemann_hlld(double* f, double* uL, double* uR,
     bool ordered = isfinite(S_M) && isfinite(pT_s) && rho_sL > 0.0 && rho_sR > 0.0
                    && S_L <= S_Ls && S_Ls <= S_M && S_M <= S_Rs && S_Rs <= S_R;
     if(!ordered){
-        if(S_L >= 0.0)      for(int var=0;var<NMHD;var++) f[var]=fL[var];
-        else if(S_R <= 0.0) for(int var=0;var<NMHD;var++) f[var]=fR[var];
-        else                for(int var=0;var<NMHD;var++)
-            f[var] = (S_R*fL[var] - S_L*fR[var] + S_L*S_R*(uR[var]-uL[var]))/(S_R - S_L);
+        mhd_hll_flux(f,uL,uR,fL,fR,S_L,S_R);
         if(uct) mhd_uct_hll_coeffs(S_L,S_R,wL[v2],wR[v2],wL[v3],wR[v3],uct);
         return;
     }
@@ -577,8 +628,18 @@ void mhd_riemann(double* f, double* uL, double* uR,
                  double* uct=nullptr){
     if(rsolver==_rsolver_hlld_)
         mhd_riemann_hlld(f,uL,uR,v1,v2,v3,b1,b2,b3,gm,uct);
+    else if(rsolver==_rsolver_hll_)
+        mhd_riemann_hll(f,uL,uR,v1,v2,v3,b1,b2,b3,gm,uct);
     else
         mhd_riemann_llf(f,uL,uR,v1,v2,v3,b1,b2,b3,gm);
+}
+
+// True when this face solver exposes a wave fan the UCT coefficients can be read
+// off. llf has none (it is a single-speed bound), so mhd/emf=uct is refused for
+// it in main.cpp rather than silently falling back to the two-sweep edge.
+KOKKOS_INLINE_FUNCTION
+bool mhd_rsolver_has_fan(int rsolver){
+    return rsolver==_rsolver_hlld_ || rsolver==_rsolver_hll_;
 }
 
 template<int D,int V1,int V2,int V3,int B1,int B2,int B3>
@@ -589,7 +650,7 @@ void mhd_riemann_solver_t(SD_Solution U, SD_Solution F, SD_Solution Bn, SD_Solut
     int nader=U.n_ader;
     double gm=cfg.gamma;
     int rsolver=cfg.rsolver;
-    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    bool want_uct = (mhd_rsolver_has_fan(rsolver) && UCT.n_var>=NUCT);
     bool use_bn = (Bn.n_var>=1);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         double uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
@@ -634,7 +695,7 @@ void mhd_riemann_solver_t_b(SD_Solution U, SD_Solution F, SD_Solution Bn, SD_Sol
     int nab=Bn.n_var>=1 ? Bn.n_ader : 1;
     double gm=cfg.gamma;
     int rsolver=cfg.rsolver;
-    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    bool want_uct = (mhd_rsolver_has_fan(rsolver) && UCT.n_var>=NUCT);
     int nau=want_uct ? UCT.n_ader : 1;
     bool use_bn = (Bn.n_var>=1);
     sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
@@ -701,8 +762,18 @@ void mhd_face_B_to_fp(SD_Solution U_fp, SD_Solution B_fp, int dim){
     //exactly the HLLD lane figure 22 wants. One kernel, both backends.
     SD_Vector Vuf = U_fp.Vector;
     SD_Vector Vbf = B_fp.Vector;
+    //Energy consistency, bit 4 of mhd/energy_fix. This state is CONSERVATIVE and
+    //the Riemann solver recovers p from it as (g-1)(E - Ekin - B^2/2), so
+    //replacing the normal B without moving E hands the solver a pressure that
+    //is off by (B_CT^2 - B_rec^2)/2. A code that reconstructed PRIMITIVES would
+    //not have this problem -- pressure is carried directly -- which is why the
+    //issue is specific to this discretisation rather than to CT.
+    bool fix=(cfg.mhd_energy_fix & 4);
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
-        Vuf(0,brow,k,j,i,kk,jj,ii) = Vbf(0,0,k,j,i,kk,jj,ii);
+        double bo = Vuf(0,brow,k,j,i,kk,jj,ii);
+        double bn = Vbf(0,0,k,j,i,kk,jj,ii);
+        Vuf(0,brow,k,j,i,kk,jj,ii) = bn;
+        if(fix) Vuf(0,_mprs_,k,j,i,kk,jj,ii) += 0.5*(bn*bn - bo*bo);
     });
 }
 
@@ -714,9 +785,13 @@ void mhd_face_B_to_fp_b(SD_Solution U_fp, SD_Solution B_fp, int dim){
     int nau=U_fp.n_ader, nab=B_fp.n_ader;
     SD_Vector Vuf = U_fp.Vector;
     SD_Vector Vbf = B_fp.Vector;
+    bool fix=(cfg.mhd_energy_fix & 4);   //see mhd_face_B_to_fp
     sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
         KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
-        Vuf(b*nau+0,brow,k,j,i,kk,jj,ii) = Vbf(b*nab+0,0,k,j,i,kk,jj,ii);
+        double bo = Vuf(b*nau+0,brow,k,j,i,kk,jj,ii);
+        double bn = Vbf(b*nab+0,0,k,j,i,kk,jj,ii);
+        Vuf(b*nau+0,brow,k,j,i,kk,jj,ii) = bn;
+        if(fix) Vuf(b*nau+0,_mprs_,k,j,i,kk,jj,ii) += 0.5*(bn*bn - bo*bo);
     }, "mhd_face_B_to_fp_b");
 }
 
@@ -1088,6 +1163,7 @@ void mhd_E_riemann(double* es, const double* eL, const double* eR,
 
 //Pack-wide form of mhd_E_riemann_solver.
 void mhd_E_riemann_solver_b(SD_Solution E, int dim, int v_index){
+    EMF_TRACE("E_riemann_solver_b (SD, 2sweep, batched)");
     int nb=E.nb;
     int Nx=E.Nx-(dim==_x_), Ny=E.Ny-(dim==_y_), Nz=E.Nz-(dim==_z_);
     int px=dim==_x_?1:E.nx, py=dim==_y_?1:E.ny, pz=dim==_z_?1:E.nz;
@@ -1111,6 +1187,7 @@ void mhd_E_riemann_solver_b(SD_Solution E, int dim, int v_index){
 }
 
 void mhd_E_riemann_solver(SD_Solution E, int dim, int v_index){
+    EMF_TRACE("E_riemann_solver (SD, 2sweep)");
     int Nx=E.Nx-(dim==_x_), Ny=E.Ny-(dim==_y_), Nz=E.Nz-(dim==_z_);
     int px=dim==_x_?1:E.nx, py=dim==_y_?1:E.ny, pz=dim==_z_?1:E.nz;
     int n=mhd_choose(dim,E.nx,E.ny,E.nz);
@@ -1160,8 +1237,13 @@ double mhd_uct_formula(double aW, double aE, double aS, double aN,
 // Interpolate UCT face coefficient `uvar` on the face normal to `dim1` at interface
 // index id1_if. When `dim2` is sp on that face, read at sp index id2; when fp on the
 // edge, sum sp nodes along dim2 with sp_to_fp(id2,·).
+//
+// `aoff` is the leading-axis offset: 0 for a block's own view, b*n_ader for a pack
+// view (CLAUDE.md rule 1 -- SD packs fold the block into the leading axis). It is a
+// parameter rather than two copies of the function so the per-block and batched
+// edge kernels are the SAME arithmetic by construction.
 KOKKOS_INLINE_FUNCTION
-double sd_interp_uct_face(const SD_Solution& UCT, int uvar,
+double sd_interp_uct_face(const SD_Solution& UCT, int aoff, int uvar,
                           int k,int j,int i,int kk,int jj,int ii,
                           int dim1, int dim2, int id1_if, int id2,
                           const Matrix& sp_to_fp, int q){
@@ -1169,58 +1251,74 @@ double sd_interp_uct_face(const SD_Solution& UCT, int uvar,
         if(dim2==_y_){
             double v=0;
             for(int ll=0;ll<q;ll++)
-                v += UCT.Vector(0,uvar,k,j,i,kk,ll,id1_if)*sp_to_fp(id2,ll);
+                v += UCT.Vector(aoff,uvar,k,j,i,kk,ll,id1_if)*sp_to_fp(id2,ll);
             return v;
         }
-        return UCT.Vector(0,uvar,k,j,i,id2,jj,id1_if);
+        return UCT.Vector(aoff,uvar,k,j,i,id2,jj,id1_if);
     }
     if(dim1==_y_){
         if(dim2==_x_){
             double v=0;
             for(int ll=0;ll<q;ll++)
-                v += UCT.Vector(0,uvar,k,j,i,kk,id1_if,ll)*sp_to_fp(id2,ll);
+                v += UCT.Vector(aoff,uvar,k,j,i,kk,id1_if,ll)*sp_to_fp(id2,ll);
             return v;
         }
-        return UCT.Vector(0,uvar,k,j,i,kk,id1_if,ii);
+        return UCT.Vector(aoff,uvar,k,j,i,kk,id1_if,ii);
     }
     if(dim2==_x_){
         double v=0;
         for(int ll=0;ll<q;ll++)
-            v += UCT.Vector(0,uvar,k,j,i,id1_if,jj,ll)*sp_to_fp(id2,ll);
+            v += UCT.Vector(aoff,uvar,k,j,i,id1_if,jj,ll)*sp_to_fp(id2,ll);
         return v;
     }
     double v=0;
     for(int ll=0;ll<q;ll++)
-        v += UCT.Vector(0,uvar,k,j,i,id1_if,ll,ii)*sp_to_fp(id2,ll);
+        v += UCT.Vector(aoff,uvar,k,j,i,id1_if,ll,ii)*sp_to_fp(id2,ll);
     return v;
 }
 
 KOKKOS_INLINE_FUNCTION
-double sd_E_comp(const SD_Solution& E, int var,
+double sd_E_comp(const SD_Solution& E, int aoff, int var,
                  int k,int j,int i,int kk,int jj,int ii){
-    return E.Vector(0,var,k,j,i,kk,jj,ii);
+    return E.Vector(aoff,var,k,j,i,kk,jj,ii);
 }
 
-template<int EDIM>
-void mhd_uct_edge_E_t(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matrix sp_to_fp){
-    const int dim1 = (EDIM==_z_?_x_:(EDIM==_y_?_z_:_y_));
-    const int dim2 = (EDIM==_z_?_y_:(EDIM==_y_?_x_:_z_));
-    int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz, px=E.nx, py=E.ny, pz=E.nz;
-    int n1 = mhd_choose(dim1,px,py,pz);
-    int n2 = mhd_choose(dim2,px,py,pz);
-    int q1 = n1 - 1; // sp nodes along dim1 on UCT1 face
-    int q2 = n2 - 1; // sp nodes along dim2 on UCT2 face
 
-    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+// One edge point of the UCT composition (MDZ21 eq. 33). Shared verbatim by the
+// per-block and pack kernels below -- the only difference between them is the
+// launch shape and the leading-axis offset `aoff`, so there is no second copy of
+// this arithmetic to drift (CLAUDE.md rule 4).
+KOKKOS_INLINE_FUNCTION
+double mhd_uct_edge_point(const SD_Solution& E, const SD_Solution& UCT1,
+                          const SD_Solution& UCT2, const Matrix& sp_to_fp,
+                          int aoff, int dim1, int dim2, int n1, int n2,
+                          int q1, int q2, int Nx, int Ny, int Nz,
+                          int k,int j,int i,int kk,int jj,int ii){
+        //An element interface only has two sides if the neighbour element
+        //exists. On the OUTERMOST ghost ring it does not, and reading it
+        //indexes element -1 / Nx. Treat that point as CONTINUOUS instead --
+        //the same branch a non-interface point takes. This has to be a guard
+        //rather than a smaller loop: edge_integral ranges over N+1 elements, so
+        //the last edge of the active region lives in the first GHOST element's
+        //storage (CLAUDE.md rule 6), and skipping ghosts leaves it holding the
+        //un-composed value. Measured: that left the assembled E0z non-periodic
+        //at 1.6e-03 and the cascade lane drifting 1.6e-08 in mass, with every
+        //per-level EMF already clean.
+        const int NE1 = (dim1==_x_?Nx:(dim1==_y_?Ny:Nz));
+        const int NE2 = (dim2==_x_?Nx:(dim2==_y_?Ny:Nz));
+        const int e1  = (dim1==_x_?i:(dim1==_y_?j:k));
+        const int e2  = (dim2==_x_?i:(dim2==_y_?j:k));
         int id1 = mhd_choose(dim1,ii,jj,kk);
         int id2 = mhd_choose(dim2,ii,jj,kk);
-        bool on_IF1 = (id1==0 || id1==n1-1);
-        bool on_IF2 = (id2==0 || id2==n2-1);
+        bool on_IF1 = (id1==0 || id1==n1-1)
+                      && (id1==0 ? e1-1 >= 0 : e1+1 < NE1);
+        bool on_IF2 = (id2==0 || id2==n2-1)
+                      && (id2==0 ? e2-1 >= 0 : e2+1 < NE2);
 
-        double v1_loc = sd_E_comp(E,3,k,j,i,kk,jj,ii);
-        double v2_loc = sd_E_comp(E,4,k,j,i,kk,jj,ii);
-        double B1_loc = sd_E_comp(E,1,k,j,i,kk,jj,ii);
-        double B2_loc = sd_E_comp(E,2,k,j,i,kk,jj,ii);
+        double v1_loc = sd_E_comp(E,aoff,3,k,j,i,kk,jj,ii);
+        double v2_loc = sd_E_comp(E,aoff,4,k,j,i,kk,jj,ii);
+        double B1_loc = sd_E_comp(E,aoff,1,k,j,i,kk,jj,ii);
+        double B2_loc = sd_E_comp(E,aoff,2,k,j,i,kk,jj,ii);
 
         double v1W,v1E,v2S,v2N,B2W,B2E,B1S,B1N;
         double aW,aE,aS,aN,dW,dE,dS,dN;
@@ -1238,15 +1336,15 @@ void mhd_uct_edge_E_t(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matrix 
                 else if(dim1==_y_){ jE=j+1; jjW=n1-1; jjE=0; }
                 else { kE=k+1; kkW=n1-1; kkE=0; }
             }
-            v1W = sd_E_comp(E,3,kW,jW,iW,kkW,jjW,iiW);
-            v1E = sd_E_comp(E,3,kE,jE,iE,kkE,jjE,iiE);
-            B2W = sd_E_comp(E,2,kW,jW,iW,kkW,jjW,iiW);
-            B2E = sd_E_comp(E,2,kE,jE,iE,kkE,jjE,iiE);
+            v1W = sd_E_comp(E,aoff,3,kW,jW,iW,kkW,jjW,iiW);
+            v1E = sd_E_comp(E,aoff,3,kE,jE,iE,kkE,jjE,iiE);
+            B2W = sd_E_comp(E,aoff,2,kW,jW,iW,kkW,jjW,iiW);
+            B2E = sd_E_comp(E,aoff,2,kE,jE,iE,kkE,jjE,iiE);
             int id1_if = (id1==0 ? 0 : n1-1);
-            aW = mhd_sd_clamp_a(sd_interp_uct_face(UCT1,0,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
+            aW = mhd_sd_clamp_a(sd_interp_uct_face(UCT1,aoff,0,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
             aE = 1.0 - aW;
-            dW = mhd_sd_clamp_d(sd_interp_uct_face(UCT1,1,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
-            dE = mhd_sd_clamp_d(sd_interp_uct_face(UCT1,2,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
+            dW = mhd_sd_clamp_d(sd_interp_uct_face(UCT1,aoff,1,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
+            dE = mhd_sd_clamp_d(sd_interp_uct_face(UCT1,aoff,2,k,j,i,kk,jj,ii,dim1,dim2,id1_if,id2,sp_to_fp,q1));
         }else{
             v1W=v1E=v1_loc; B2W=B2E=B2_loc; aW=aE=0.5; dW=dE=0.0;
         }
@@ -1264,29 +1362,114 @@ void mhd_uct_edge_E_t(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matrix 
                 else if(dim2==_y_){ jN=j+1; jjS=n2-1; jjN=0; }
                 else { kN=k+1; kkS=n2-1; kkN=0; }
             }
-            v2S = sd_E_comp(E,4,kS,jS,iS,kkS,jjS,iiS);
-            v2N = sd_E_comp(E,4,kN,jN,iN,kkN,jjN,iiN);
-            B1S = sd_E_comp(E,1,kS,jS,iS,kkS,jjS,iiS);
-            B1N = sd_E_comp(E,1,kN,jN,iN,kkN,jjN,iiN);
+            v2S = sd_E_comp(E,aoff,4,kS,jS,iS,kkS,jjS,iiS);
+            v2N = sd_E_comp(E,aoff,4,kN,jN,iN,kkN,jjN,iiN);
+            B1S = sd_E_comp(E,aoff,1,kS,jS,iS,kkS,jjS,iiS);
+            B1N = sd_E_comp(E,aoff,1,kN,jN,iN,kkN,jjN,iiN);
             int id2_if = (id2==0 ? 0 : n2-1);
-            aS = mhd_sd_clamp_a(sd_interp_uct_face(UCT2,0,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
+            aS = mhd_sd_clamp_a(sd_interp_uct_face(UCT2,aoff,0,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
             aN = 1.0 - aS;
-            dS = mhd_sd_clamp_d(sd_interp_uct_face(UCT2,1,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
-            dN = mhd_sd_clamp_d(sd_interp_uct_face(UCT2,2,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
+            dS = mhd_sd_clamp_d(sd_interp_uct_face(UCT2,aoff,1,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
+            dN = mhd_sd_clamp_d(sd_interp_uct_face(UCT2,aoff,2,k,j,i,kk,jj,ii,dim2,dim1,id2_if,id1,sp_to_fp,q2));
         }else{
             v2S=v2N=v2_loc; B1S=B1N=B1_loc; aS=aN=0.5; dS=dN=0.0;
         }
 
-        E.Vector(0,0,k,j,i,kk,jj,ii) = mhd_uct_formula(
+        return mhd_uct_formula(
             aW,aE,aS,aN, v1W,v1E,v2S,v2N, B2W,B2E,B1S,B1N, dW,dE,dS,dN);
+}
+
+// The (dim1, dim2) transverse pair for an edge running along EDIM, and the point
+// counts on each. Shared by both launch shapes so they cannot disagree.
+#define UCT_EDGE_GEOM(EDIM)                                                   \
+    const int dim1 = (EDIM==_z_?_x_:(EDIM==_y_?_z_:_y_));                     \
+    const int dim2 = (EDIM==_z_?_y_:(EDIM==_y_?_x_:_z_));                     \
+    const int n1 = mhd_choose(dim1,E.nx,E.ny,E.nz);                           \
+    const int n2 = mhd_choose(dim2,E.nx,E.ny,E.nz);                           \
+    const int q1 = n1 - 1;  /* sp nodes along dim1 on the UCT1 face */        \
+    const int q2 = n2 - 1   /* sp nodes along dim2 on the UCT2 face */
+
+//Runs over EVERY element, ghosts included, with the missing-neighbour guard in
+//mhd_uct_edge_point handling the outermost ring. The two-sweep edge solver
+//writes both sides of every interface for the same reason: edge_integral needs
+//the first ghost element's edge to carry a composed value.
+template<int EDIM>
+void mhd_uct_edge_E_t(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matrix sp_to_fp){
+    UCT_EDGE_GEOM(EDIM);
+    int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz, px=E.nx, py=E.ny, pz=E.nz;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+        E.Vector(0,0,k,j,i,kk,jj,ii) = mhd_uct_edge_point(
+            E,UCT1,UCT2,sp_to_fp,0,dim1,dim2,n1,n2,q1,q2,Nx,Ny,Nz,k,j,i,kk,jj,ii);
     });
+}
+
+//Pack-wide twin. The block index is a kernel axis, not a host loop (CLAUDE.md
+//rule 1): one launch spans every block. SD packs fold the block into the leading
+//axis as b*n_ader, which is what `boff` carries into the shared point kernel.
+template<int EDIM>
+void mhd_uct_edge_E_t_b(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matrix sp_to_fp){
+    UCT_EDGE_GEOM(EDIM);
+    int nb=E.nb;
+    int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz, px=E.nx, py=E.ny, pz=E.nz;
+    int nader=E.n_ader;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        BOFF(nader);
+        E.Vector(boff,0,k,j,i,kk,jj,ii) = mhd_uct_edge_point(
+            E,UCT1,UCT2,sp_to_fp,boff,dim1,dim2,n1,n2,q1,q2,Nx,Ny,Nz,k,j,i,kk,jj,ii);
+    }, "mhd_uct_edge_E_b");
+}
+
+// Zero the wall-TANGENTIAL electric field on a reflecting boundary.
+//
+// A perfectly conducting wall has E_t = 0, and under CT that is exactly the
+// condition that keeps the NORMAL face field pinned: dB_n/dt is the tangential
+// curl of E, so a tangential E that vanishes on the wall leaves B_n at whatever
+// the initial condition set -- zero, given the reflective state parity
+// (boundary.cpp flips row 5+dim). Without it the wall slowly grows a normal
+// field and the "equilibrium" current-sheet test stops being one.
+//
+// `wall` is the direction normal to the wall; the wall edge points are the
+// first/last flux point of the first/last ACTIVE element along it.
+//
+// KNOWN GAP: this pins the SD edge arrays only. The MOOD cascade assembles its
+// EMF on the FV lattice (E0z from E1z/E2z), and those are NOT wall-pinned, so a
+// cell demoted while sitting ON a reflecting wall would update the wall's normal
+// face field. The equilibrium gate does not catch it -- nothing demotes on a
+// stationary solution -- so this is latent rather than measured. It needs the
+// same treatment on E0*/E1*/E2* before a wall test that actually shocks at the
+// boundary (the paper's KH develops rolls mid-domain, not at y = +-1).
+void mhd_zero_wall_emf(SD_Solution E, int wall){
+    if(cfg.bc[wall] != _reflective_) return;
+    const int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz;
+    const int px=E.nx, py=E.ny, pz=E.nz;
+    const int NG = (wall==_x_?NGHx:(wall==_y_?NGHy:NGHz));
+    const int NE = (wall==_x_?Nx:(wall==_y_?Ny:Nz));
+    const int np = (wall==_x_?px:(wall==_y_?py:pz));
+    //Low wall: element NG, flux point 0. High wall: element NE-NG-1, point np-1.
+    const int eLo=NG, pLo=0, eHi=NE-NG-1, pHi=np-1;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+        const int e = (wall==_x_?i:(wall==_y_?j:k));
+        const int q = (wall==_x_?ii:(wall==_y_?jj:kk));
+        if((e==eLo && q==pLo) || (e==eHi && q==pHi))
+            E.Vector(0,0,k,j,i,kk,jj,ii) = 0.0;
+    }, "mhd_zero_wall_emf");
 }
 
 void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
                     Matrix sp_to_fp, int edim){
+    EMF_TRACE("uct_edge_E (SD, UCT)");
     if(edim==_x_)      mhd_uct_edge_E_t<_x_>(E,UCT1,UCT2,sp_to_fp);
     else if(edim==_y_) mhd_uct_edge_E_t<_y_>(E,UCT1,UCT2,sp_to_fp);
     else               mhd_uct_edge_E_t<_z_>(E,UCT1,UCT2,sp_to_fp);
+}
+
+void mhd_uct_edge_E_b(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
+                      Matrix sp_to_fp, int edim){
+    EMF_TRACE("uct_edge_E_b (SD, UCT, batched)");
+    if(edim==_x_)      mhd_uct_edge_E_t_b<_x_>(E,UCT1,UCT2,sp_to_fp);
+    else if(edim==_y_) mhd_uct_edge_E_t_b<_y_>(E,UCT1,UCT2,sp_to_fp);
+    else               mhd_uct_edge_E_t_b<_z_>(E,UCT1,UCT2,sp_to_fp);
 }
 
 //----------------------------------------------------------------------------------------
@@ -1349,19 +1532,74 @@ static void project_face_to_row_b(SD_Solution U, int brow, SD_Solution B,
     }, "project_face_to_row_b");
 }
 
+// Shift the magnetic term of the total energy by `sign` * B^2/2, using U's OWN
+// B rows. Called with +1 before B_to_U overwrites those rows and -1 after, which
+// leaves the thermal + kinetic energy exactly invariant across the replacement:
+//
+//     E <- E - Bc^2/2 (old rows) ... rows replaced ... E <- E + Bf^2/2 (new rows)
+//
+// i.e. E <- E - (Bc^2 - Bf^2)/2, which is MDZ21 section 6.4's prescription
+// verbatim. WHY IT IS NEEDED: E is advanced by the Godunov step using the
+// cell-centred B, then mhd_B_to_U REPLACES those rows with the projection of the
+// staggered CT field without touching E -- so p = (gm-1)(E - Ekin - B^2/2) is
+// then evaluated with a B that E was never built from. At beta ~ 1 the mismatch
+// is irrelevant; at the 3D blast's beta ~ 2.5e-4 the thermal energy is 0.06% of
+// the magnetic one and the leftover is larger than the entire pressure.
+// MEASURED on the 192^3 blast WITHOUT this correction: |Bc^2-Bf^2|/2 has median
+// 1.5e-03 in cells that hit the pressure floor against 3.8e-08 in cells that do
+// not, and 15% of the domain ends up floored at the RAMSES smallp. The paper
+// says as much: "no scheme preserves energy positivity without energy
+// correction for this test, not even with a minmod limiter".
+//
+// Off by default (mhd/energy_fix): switching it on changes every MHD result, so
+// it is opt-in and the decks that want it say so.
+static void mhd_shift_Emag(SD_Solution U, double sign){
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    SD_Vector Vu = U.Vector;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+        double bx=Vu(0,_mbx_,k,j,i,kk,jj,ii);
+        double by=Vu(0,_mby_,k,j,i,kk,jj,ii);
+        double bz=Vu(0,_mbz_,k,j,i,kk,jj,ii);
+        Vu(0,_mprs_,k,j,i,kk,jj,ii) += sign*0.5*(bx*bx+by*by+bz*bz);
+    });
+}
+
+//Pack-wide form: one launch over every block (CLAUDE.md rule 1).
+static void mhd_shift_Emag_b(SD_Solution U, double sign){
+    int nb=U.nb, Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, px=U.nx, py=U.ny, pz=U.nz;
+    int nau=U.n_ader;
+    SD_Vector Vu = U.Vector;
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii){
+        double bx=Vu(b*nau+0,_mbx_,k,j,i,kk,jj,ii);
+        double by=Vu(b*nau+0,_mby_,k,j,i,kk,jj,ii);
+        double bz=Vu(b*nau+0,_mbz_,k,j,i,kk,jj,ii);
+        Vu(b*nau+0,_mprs_,k,j,i,kk,jj,ii) += sign*0.5*(bx*bx+by*by+bz*bz);
+    });
+}
+
 void mhd_B_to_U_b(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
-                  Matrix fp_to_sp){
+                  Matrix fp_to_sp, bool cons){
+    //`cons` says U really is the CONSERVATIVE state. The energy correction is
+    //only meaningful there: the same function is called on the PRIMITIVE W_sp
+    //at initialisation, where row _mprs_ holds the PRESSURE, and shifting it
+    //corrupts the state rather than repairing it.
+    if(cons && (cfg.mhd_energy_fix & 1)) mhd_shift_Emag_b(U,-1.0);
     if(cfg.active[_x_]) project_face_to_row_b(U,_mbx_,Bx,fp_to_sp,_x_);
     if(cfg.active[_y_]) project_face_to_row_b(U,_mby_,By,fp_to_sp,_y_);
     if(cfg.active[_z_]) project_face_to_row_b(U,_mbz_,Bz,fp_to_sp,_z_);
+    if(cons && (cfg.mhd_energy_fix & 1)) mhd_shift_Emag_b(U,+1.0);
 }
 
 void mhd_B_to_U(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
-                SD_Solution Tx, SD_Solution Ty, SD_Solution Tz, Matrix fp_to_sp){
+                SD_Solution Tx, SD_Solution Ty, SD_Solution Tz, Matrix fp_to_sp,
+                bool cons){
     (void)Tx;(void)Ty;(void)Tz;
+    if(cons && (cfg.mhd_energy_fix & 1)) mhd_shift_Emag(U,-1.0);
     if(cfg.active[_x_]) project_face_to_row(U,_mbx_,Bx,fp_to_sp,_x_);
     if(cfg.active[_y_]) project_face_to_row(U,_mby_,By,fp_to_sp,_y_);
     if(cfg.active[_z_]) project_face_to_row(U,_mbz_,Bz,fp_to_sp,_z_);
+    if(cons && (cfg.mhd_energy_fix & 1)) mhd_shift_Emag(U,+1.0);
 }
 
 void mhd_compute_B_sp_from_fp(SD_Solution Bcc, SD_Solution Bx, SD_Solution By,
@@ -1588,6 +1826,9 @@ void mhd_NAD(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles,
 void mhd_PAD(FV_Solution U, FV_Solution troubles){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
     double gm=cfg.gamma, mrho=cfg.pad_min_rho, mP=cfg.pad_min_P;
+    //2 marks a PHYSICAL failure so update_cascade can let it (and only it)
+    //reach first order; 1 keeps the historical, indistinguishable flag.
+    const double padmark = cfg.mood_pad_first_order ? 2.0 : 1.0;
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
         bool bad=false;
         for(int var=0;var<NMHD;var++){
@@ -1602,9 +1843,9 @@ void mhd_PAD(FV_Solution U, FV_Solution troubles){
                         +U.Vector(_mbz_,k,j,i)*U.Vector(_mbz_,k,j,i));
         double p=(U.Vector(_mprs_,k,j,i)-Ekin-Emag)*(gm-1.);
         if(bad || !isfinite(p) || !isfinite(Ekin) || !isfinite(Emag))
-            troubles.Vector(0,k,j,i)=1;
-        if(rho<mrho || rho>rho_max) troubles.Vector(0,k,j,i)=1;
-        if(p<mP || p>p_max)         troubles.Vector(0,k,j,i)=1;
+            troubles.Vector(0,k,j,i)=padmark;
+        if(rho<mrho || rho>rho_max) troubles.Vector(0,k,j,i)=padmark;
+        if(p<mP || p>p_max)         troubles.Vector(0,k,j,i)=padmark;
     });
 }
 
@@ -1666,6 +1907,9 @@ void mhd_NAD_b(FV_Solution det_new, FV_Solution det_old, FV_Solution troubles,
 }
 
 void mhd_PAD_b(FV_Solution U, FV_Solution troubles){
+    //2 marks a PHYSICAL failure so update_cascade can let it (and only it)
+    //reach first order; 1 keeps the historical, indistinguishable flag.
+    const double padmark = cfg.mood_pad_first_order ? 2.0 : 1.0;
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb;
     const int unv=U.n_var, tnv=troubles.n_var;
     double gm=cfg.gamma, mrho=cfg.pad_min_rho, mP=cfg.pad_min_P;
@@ -1684,9 +1928,9 @@ void mhd_PAD_b(FV_Solution U, FV_Solution troubles){
                         +U.Vector(uof+_mbz_,k,j,i)*U.Vector(uof+_mbz_,k,j,i));
         double p=(U.Vector(uof+_mprs_,k,j,i)-Ekin-Emag)*(gm-1.);
         if(bad || !isfinite(p) || !isfinite(Ekin) || !isfinite(Emag))
-            troubles.Vector(tof+0,k,j,i)=1;
-        if(rho<mrho || rho>rho_max) troubles.Vector(tof+0,k,j,i)=1;
-        if(p<mP || p>p_max)         troubles.Vector(tof+0,k,j,i)=1;
+            troubles.Vector(tof+0,k,j,i)=padmark;
+        if(rho<mrho || rho>rho_max) troubles.Vector(tof+0,k,j,i)=padmark;
+        if(p<mP || p>p_max)         troubles.Vector(tof+0,k,j,i)=padmark;
     }, "mhd_PAD_b");
 }
 
@@ -1730,6 +1974,80 @@ double mhd_fv_dslope(FV_Vector W, int var, int k, int j, int i, int dim,
     wm=W(var,k-1,j,i); wp=W(var,k+1,j,i);
     return limited_slope((wp-w)/(z_c(k+1)-z_c(k)),(w-wm)/(z_c(k)-z_c(k-1)),
                          z_c(k+1)-z_c(k),z_c(k)-z_c(k-1),z_f(k),z_f(k+1),lim);
+}
+
+// Hancock half-step prediction for ideal MHD in primitive variables. Ported from
+// the Python spd reference (spd/finite_volume/muscl.py: compute_prediction_mhd),
+// which follows RAMSES trace2d/trace3d (mhd/umuscl.f90). Per sweep direction n
+// with velocity v_n and normal field B_n, t being the two transverse components:
+//
+//   drho/dt -= v_n drho + rho dv_n
+//   dp/dt   -= v_n dp   + gamma p dv_n
+//   dv_n/dt -= v_n dv_n + (dp + sum_t B_t dB_t)/rho
+//   dv_t/dt -= v_n dv_t - B_n dB_t/rho             (magnetic tension)
+//   dB_t/dt -= v_n dB_t + B_t dv_n - B_n dv_t      (induction)
+//
+// The B_n dB_n magnetic-pressure/tension pair cancels in the NORMAL momentum
+// equation, B_n has no source from its own sweep (it is constant in that 1D
+// subsystem, and under CT it is the single-valued face value anyway), and the
+// v(div B) terms are dropped as in RAMSES.
+//
+// dW holds true GRADIENTS (per unit length), not the half-increments the hydro
+// corrector takes. That is deliberate: the FV sub-grid is non-uniform and the
+// three directions do not share a cell size, so folding h into the slope would
+// let a transverse term be divided by the sweep direction's h.
+//
+// The transverse loop runs over both other components even when a direction is
+// INACTIVE -- in 2D, d(vz)/dx and d(Bz)/dx are real gradients along an active
+// axis. Only the outer sweep loop is gated on activity.
+KOKKOS_INLINE_FUNCTION
+void mhd_corrector(const double* W, double* dWt, const double dW[3][NMHD],
+                   bool ay, bool az, double gm){
+    for(int var=0; var<NMHD; var++) dWt[var]=0.0;
+    const double rho = W[_mrho_];
+    const int vel[3] = {_mvx_,_mvy_,_mvz_};
+    const int bcomp[3] = {_mbx_,_mby_,_mbz_};
+    const bool act[3] = {true, ay, az};
+    for(int d=0; d<3; d++){
+        if(!act[d]) continue;
+        const int vn = vel[d], bn = bcomp[d];
+        const double* g = dW[d];
+        dWt[_mrho_] -= W[vn]*g[_mrho_] + rho*g[vn];
+        dWt[_mprs_] -= W[vn]*g[_mprs_] + gm*W[_mprs_]*g[vn];
+        double dptot = g[_mprs_];
+        for(int t=0; t<3; t++) if(t!=d) dptot += W[bcomp[t]]*g[bcomp[t]];
+        dWt[vn] -= W[vn]*g[vn] + dptot/rho;
+        for(int t=0; t<3; t++){
+            if(t==d) continue;
+            const int vt = vel[t], bt = bcomp[t];
+            dWt[vt] -= W[vn]*g[vt] - W[bn]*g[bt]/rho;
+            dWt[bt] -= W[vn]*g[bt] + W[bt]*g[vn] - W[bn]*g[vt];
+        }
+    }
+}
+
+// One cell's Hancock-predicted primitive state: W + (dt/2) dW/dt.
+// mhd_fv_dslope returns the limited HALF-INCREMENT (0.5*slope*h), so the
+// gradient is that times 2/h.
+KOKKOS_INLINE_FUNCTION
+void mhd_fv_predict(FV_Vector W, int k, int j, int i, double sdt, double gm,
+                    Vector x_c, Vector x_f, Vector y_c, Vector y_f,
+                    Vector z_c, Vector z_f, bool ay, bool az, int lim,
+                    double* w_out){
+    double g[3][NMHD];
+    for(int d=0; d<3; d++) for(int v=0; v<NMHD; v++) g[d][v]=0.0;
+    const double hx = x_f(i+1)-x_f(i);
+    const double hy = ay ? (y_f(j+1)-y_f(j)) : 1.0;
+    const double hz = az ? (z_f(k+1)-z_f(k)) : 1.0;
+    for(int v=0; v<NMHD; v++){
+        g[_x_][v] = mhd_fv_dslope(W,v,k,j,i,_x_,x_c,x_f,y_c,y_f,z_c,z_f,lim)*2.0/hx;
+        if(ay) g[_y_][v] = mhd_fv_dslope(W,v,k,j,i,_y_,x_c,x_f,y_c,y_f,z_c,z_f,lim)*2.0/hy;
+        if(az) g[_z_][v] = mhd_fv_dslope(W,v,k,j,i,_z_,x_c,x_f,y_c,y_f,z_c,z_f,lim)*2.0/hz;
+    }
+    double w[NMHD], dWt[NMHD];
+    for(int v=0; v<NMHD; v++) w[v]=W(v,k,j,i);
+    mhd_corrector(w,dWt,g,ay,az,gm);
+    for(int v=0; v<NMHD; v++) w_out[v] = w[v] + 0.5*sdt*dWt[v];
 }
 
 // Pack-wide twin of mhd_fv_dslope: identical arithmetic, geometry read from the
@@ -1785,15 +2103,21 @@ void mhd_face_B_to_fv(SD_Solution B, FV_Solution Bfv, int dim){
 template<int D>
 void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                      Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
-                     bool muscl){
+                     bool muscl, Vector w_rk, int ader, double dt){
     const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
+    //MUSCL-Hancock: half-step the CELL state before reconstructing, exactly as
+    //the Python reference does (predict M, then faces = M_pred +- S with the
+    //UNPREDICTED slopes). Only meaningful at the MUSCL level -- donor cell has
+    //no slopes to correct with -- and only under job/scheme=vl2.
+    const bool pred = muscl && cfg.fv_predictor;
+    const bool ay_ = cfg.active[_y_], az_ = cfg.active[_z_];
     // Drive the face loop from the CELL-array extent (as hydro::fallback_fluxes does):
     // fv_for_faces then covers exactly the active faces, and the +-2 cell reconstruction
     // stays inside the (haloed) 2-ghost frame of W.
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
     double gm=cfg.gamma;
     int rsolver=cfg.rsolver;
-    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    bool want_uct = (mhd_rsolver_has_fan(rsolver) && UCT.n_var>=NUCT);
     // Take the normal B from the single-valued CT face field rather than
     // reconstructing it. Gated on the solver for the same reason as the SD-side
     // mhd_face_B_to_fp: under llf the amr line reconstructed b1 like any other
@@ -1807,14 +2131,25 @@ void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution
     const int b1 = (D==_x_?_mbx_:(D==_y_?_mby_:_mbz_));
     const int b2 = (D==_x_?_mby_:(D==_y_?_mbz_:_mbx_));
     const int b3 = (D==_x_?_mbz_:(D==_y_?_mbx_:_mby_));
+    Vector wv = w_rk;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
         int kL=k-(D==_z_), jL=j-(D==_y_), iL=i-(D==_x_);
         double wL[NMHD], wR[NMHD], uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
+        double cL[NMHD], cR[NMHD];
+        if(pred){
+            const double sdt = wv(ader)*dt;
+            mhd_fv_predict(W.Vector,kL,jL,iL,sdt,gm,x_c,x_f,y_c,y_f,z_c,z_f,ay_,az_,lim,cL);
+            mhd_fv_predict(W.Vector,k ,j ,i ,sdt,gm,x_c,x_f,y_c,y_f,z_c,z_f,ay_,az_,lim,cR);
+        }
         for(int var=0;var<NMHD;var++){
             double dL = muscl ? mhd_fv_dslope(W.Vector,var,kL,jL,iL,D,x_c,x_f,y_c,y_f,z_c,z_f,lim) : 0.0;
             double dR = muscl ? mhd_fv_dslope(W.Vector,var,k ,j ,i ,D,x_c,x_f,y_c,y_f,z_c,z_f,lim) : 0.0;
-            wL[var]=W.Vector(var,kL,jL,iL)+dL;   // right face of the left cell
-            wR[var]=W.Vector(var,k ,j ,i )-dR;   // left  face of the right cell
+            //Base state: the Hancock-predicted cell value under vl2, the plain
+            //cell average otherwise. The SLOPES stay unpredicted either way.
+            const double bL = pred ? cL[var] : W.Vector(var,kL,jL,iL);
+            const double bR = pred ? cR[var] : W.Vector(var,k ,j ,i );
+            wL[var]=bL+dL;   // right face of the left cell
+            wR[var]=bR-dR;   // left  face of the right cell
         }
         if(take_bn) wL[b1]=wR[b1]=Bn_f.Vector(0,k,j,i);  // CT face field, never reconstructed
         mhd_conservatives(wL,uL,gm);
@@ -1827,10 +2162,34 @@ void mhd_fv_fluxes_t(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution
 
 void mhd_fv_fluxes(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                    Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
-                   int dim, bool muscl){
-    if(dim==_x_)      mhd_fv_fluxes_t<_x_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
-    else if(dim==_y_) mhd_fv_fluxes_t<_y_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
-    else              mhd_fv_fluxes_t<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+                   int dim, bool muscl, Vector w_rk, int ader, double dt){
+    if(dim==_x_)      mhd_fv_fluxes_t<_x_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
+    else if(dim==_y_) mhd_fv_fluxes_t<_y_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
+    else              mhd_fv_fluxes_t<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
+}
+
+//Pack-wide twin of mhd_fv_predict. Only the gradient GATHER differs (packed
+//geometry, block-offset variable axis); the source terms themselves stay in the
+//single shared mhd_corrector, so the two paths cannot drift on the physics.
+KOKKOS_INLINE_FUNCTION
+void mhd_fv_predict_b(FV_Vector W, int wo, int k, int j, int i, double sdt, double gm,
+                      Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
+                      Matrix z_c, Matrix z_f, int b, bool ay, bool az, int lim,
+                      double* w_out){
+    double g[3][NMHD];
+    for(int d=0; d<3; d++) for(int v=0; v<NMHD; v++) g[d][v]=0.0;
+    const double hx = x_f(b,i+1)-x_f(b,i);
+    const double hy = ay ? (y_f(b,j+1)-y_f(b,j)) : 1.0;
+    const double hz = az ? (z_f(b,k+1)-z_f(b,k)) : 1.0;
+    for(int v=0; v<NMHD; v++){
+        g[_x_][v] = mhd_fv_dslope_b(W,wo,v,k,j,i,_x_,x_c,x_f,y_c,y_f,z_c,z_f,b,lim)*2.0/hx;
+        if(ay) g[_y_][v] = mhd_fv_dslope_b(W,wo,v,k,j,i,_y_,x_c,x_f,y_c,y_f,z_c,z_f,b,lim)*2.0/hy;
+        if(az) g[_z_][v] = mhd_fv_dslope_b(W,wo,v,k,j,i,_z_,x_c,x_f,y_c,y_f,z_c,z_f,b,lim)*2.0/hz;
+    }
+    double w[NMHD], dWt[NMHD];
+    for(int v=0; v<NMHD; v++) w[v]=W(wo+v,k,j,i);
+    mhd_corrector(w,dWt,g,ay,az,gm);
+    for(int v=0; v<NMHD; v++) w_out[v] = w[v] + 0.5*sdt*dWt[v];
 }
 
 //Pack-wide twin of mhd_fv_fluxes_t. The face body is the same arithmetic; only the
@@ -1840,12 +2199,14 @@ void mhd_fv_fluxes(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution U
 template<int D>
 void mhd_fv_fluxes_t_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                        Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
-                       Matrix z_c, Matrix z_f, bool muscl){
+                       Matrix z_c, Matrix z_f, bool muscl, Vector w_rk, int ader, double dt){
     const int lim = cfg.limiter;
+    const bool pred = muscl && cfg.fv_predictor;
+    const bool ay_ = cfg.active[_y_], az_ = cfg.active[_z_];
     int nb=W.nb, Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
     double gm=cfg.gamma;
     int rsolver=cfg.rsolver;
-    bool want_uct = (rsolver==_rsolver_hlld_ && UCT.n_var>=NUCT);
+    bool want_uct = (mhd_rsolver_has_fan(rsolver) && UCT.n_var>=NUCT);
     const bool take_bn = (rsolver!=_rsolver_llf_);
     const int nvw=W.n_var, nvf=F.n_var, nvb=Bn_f.n_var;
     const int nvu=want_uct?UCT.n_var:1;
@@ -1855,17 +2216,26 @@ void mhd_fv_fluxes_t_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Soluti
     const int b1 = (D==_x_?_mbx_:(D==_y_?_mby_:_mbz_));
     const int b2 = (D==_x_?_mby_:(D==_y_?_mbz_:_mbx_));
     const int b3 = (D==_x_?_mbz_:(D==_y_?_mbx_:_mby_));
+    Vector wv = w_rk;
     fv_for_faces_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
         const int wo=b*nvw, fo=b*nvf, bo=b*nvb, uo=b*nvu;
         int kL=k-(D==_z_), jL=j-(D==_y_), iL=i-(D==_x_);
         double wL[NMHD], wR[NMHD], uL[NMHD], uR[NMHD], f[NMHD], uct[NUCT];
+        double cL[NMHD], cR[NMHD];
+        if(pred){
+            const double sdt = wv(ader)*dt;
+            mhd_fv_predict_b(W.Vector,wo,kL,jL,iL,sdt,gm,x_c,x_f,y_c,y_f,z_c,z_f,b,ay_,az_,lim,cL);
+            mhd_fv_predict_b(W.Vector,wo,k ,j ,i ,sdt,gm,x_c,x_f,y_c,y_f,z_c,z_f,b,ay_,az_,lim,cR);
+        }
         for(int var=0;var<NMHD;var++){
             double dL = muscl ? mhd_fv_dslope_b(W.Vector,wo,var,kL,jL,iL,D,
                                                 x_c,x_f,y_c,y_f,z_c,z_f,b,lim) : 0.0;
             double dR = muscl ? mhd_fv_dslope_b(W.Vector,wo,var,k ,j ,i ,D,
                                                 x_c,x_f,y_c,y_f,z_c,z_f,b,lim) : 0.0;
-            wL[var]=W.Vector(wo+var,kL,jL,iL)+dL;
-            wR[var]=W.Vector(wo+var,k ,j ,i )-dR;
+            const double bL = pred ? cL[var] : W.Vector(wo+var,kL,jL,iL);
+            const double bR = pred ? cR[var] : W.Vector(wo+var,k ,j ,i );
+            wL[var]=bL+dL;
+            wR[var]=bR-dR;
         }
         if(take_bn) wL[b1]=wR[b1]=Bn_f.Vector(bo+0,k,j,i);
         mhd_conservatives(wL,uL,gm);
@@ -1878,10 +2248,11 @@ void mhd_fv_fluxes_t_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Soluti
 
 void mhd_fv_fluxes_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                      Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
-                     Matrix z_c, Matrix z_f, int dim, bool muscl){
-    if(dim==_x_)      mhd_fv_fluxes_t_b<_x_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
-    else if(dim==_y_) mhd_fv_fluxes_t_b<_y_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
-    else              mhd_fv_fluxes_t_b<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
+                     Matrix z_c, Matrix z_f, int dim, bool muscl,
+                     Vector w_rk, int ader, double dt){
+    if(dim==_x_)      mhd_fv_fluxes_t_b<_x_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
+    else if(dim==_y_) mhd_fv_fluxes_t_b<_y_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
+    else              mhd_fv_fluxes_t_b<_z_>(W,F,Bn_f,UCT,x_c,x_f,y_c,y_f,z_c,z_f,muscl,w_rk,ader,dt);
 }
 
 //----------------------------------------------------------------------------------------
@@ -2034,6 +2405,7 @@ void mhd_uct_corner_E(FV_Solution E, FV_Solution Bx, FV_Solution By, FV_Solution
                       int Nz, int Ny, int Nx,
                       Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                       int dim, bool muscl){
+    EMF_TRACE("uct_corner_E (FV, UCT)");
     if(dim==_x_)
         mhd_uct_corner_E_t<_x_>(E,By,Bz,UCTy,UCTz,Nz,Ny,Nx,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
     else if(dim==_y_)
@@ -2102,6 +2474,7 @@ void mhd_four_state_E_t(FV_Solution E, FV_Solution W,
 void mhd_four_state_E(FV_Solution E, FV_Solution W,
                       Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                       int dim, bool muscl){
+    EMF_TRACE("four_state_E (FV, LLF bound)");
     if(dim==_x_)      mhd_four_state_E_t<_x_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
     else if(dim==_y_) mhd_four_state_E_t<_y_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
     else              mhd_four_state_E_t<_z_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
@@ -2165,6 +2538,7 @@ void mhd_four_state_E_t_b(FV_Solution E, FV_Solution W,
 void mhd_four_state_E_b(FV_Solution E, FV_Solution W,
                         Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
                         Matrix z_c, Matrix z_f, int dim, bool muscl){
+    EMF_TRACE("four_state_E_b (FV, LLF bound, batched)");
     if(dim==_x_)      mhd_four_state_E_t_b<_x_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
     else if(dim==_y_) mhd_four_state_E_t_b<_y_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
     else              mhd_four_state_E_t_b<_z_>(E,W,x_c,x_f,y_c,y_f,z_c,z_f,muscl);
@@ -2207,13 +2581,41 @@ void mhd_assign_edge_E(FV_Solution E0, FV_Solution E1, FV_Solution E2,
 // CT-evolved (active direction) components are replaced: in 2D the Bz row is a plain
 // cell-centered conserved variable already updated by the fluid fluxes (Python: only
 // sim.dims rows).
+//
+// ENERGY CONSISTENCY (mhd/energy_fix). This is the FV twin of the swap that
+// mhd_B_to_U performs on the SD state, and it has the same consequence: the
+// energy row was built with the Godunov-updated B and is left untouched while
+// the B rows are replaced, so the PAD's gas pressure -- E minus kinetic minus
+// magnetic -- is evaluated with a B that E was never formed from. At beta ~ 1
+// that is noise; at the 3D blast's beta ~ 2.5e-4 the thermal energy is 0.06% of
+// the magnetic one and the residual swamps it. Shifting E by the same amount
+// keeps thermal + kinetic invariant across the swap (MDZ21 section 6.4).
+//
+// The shift uses exactly the rows that are REPLACED: in 2D the Bz row is a
+// plain conserved variable the fluid fluxes already advanced, so it is not
+// swapped and must not enter the correction. Accumulating old and new over the
+// same component set makes that automatic.
 void mhd_set_candidate_B(FV_Solution U_new, FV_Solution B_cand){
     int Nx=U_new.Nx, Ny=U_new.Ny, Nz=U_new.Nz;
     bool az=cfg.active[_z_];
+    bool fix=(cfg.mhd_energy_fix & 2);
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
+        double eo=0, en=0;
+        if(fix){
+            double bx=U_new.Vector(_mbx_,k,j,i), by=U_new.Vector(_mby_,k,j,i);
+            eo = bx*bx + by*by;
+            en = B_cand.Vector(0,k,j,i)*B_cand.Vector(0,k,j,i)
+               + B_cand.Vector(1,k,j,i)*B_cand.Vector(1,k,j,i);
+            if(az){
+                double bz=U_new.Vector(_mbz_,k,j,i);
+                eo += bz*bz;
+                en += B_cand.Vector(2,k,j,i)*B_cand.Vector(2,k,j,i);
+            }
+        }
         U_new.Vector(_mbx_,k,j,i)=B_cand.Vector(0,k,j,i);
         U_new.Vector(_mby_,k,j,i)=B_cand.Vector(1,k,j,i);
         if(az) U_new.Vector(_mbz_,k,j,i)=B_cand.Vector(2,k,j,i);
+        if(fix) U_new.Vector(_mprs_,k,j,i) += 0.5*(en - eo);
     });
 }
 
@@ -2275,11 +2677,25 @@ void mhd_set_candidate_B_b(FV_Solution U_new, FV_Solution B_cand){
     int Nx=U_new.Nx, Ny=U_new.Ny, Nz=U_new.Nz;
     int nvu = U_new.n_var, nvb = B_cand.n_var;
     bool az=cfg.active[_z_];
+    bool fix=(cfg.mhd_energy_fix & 2);  //see mhd_set_candidate_B for what this is for
     fv_for_cells_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
         const int uo = b*nvu, bo = b*nvb;
+        double eo=0, en=0;
+        if(fix){
+            double bx=U_new.Vector(uo+_mbx_,k,j,i), by=U_new.Vector(uo+_mby_,k,j,i);
+            eo = bx*bx + by*by;
+            en = B_cand.Vector(bo+0,k,j,i)*B_cand.Vector(bo+0,k,j,i)
+               + B_cand.Vector(bo+1,k,j,i)*B_cand.Vector(bo+1,k,j,i);
+            if(az){
+                double bz=U_new.Vector(uo+_mbz_,k,j,i);
+                eo += bz*bz;
+                en += B_cand.Vector(bo+2,k,j,i)*B_cand.Vector(bo+2,k,j,i);
+            }
+        }
         U_new.Vector(uo+_mbx_,k,j,i)=B_cand.Vector(bo+0,k,j,i);
         U_new.Vector(uo+_mby_,k,j,i)=B_cand.Vector(bo+1,k,j,i);
         if(az) U_new.Vector(uo+_mbz_,k,j,i)=B_cand.Vector(bo+2,k,j,i);
+        if(fix) U_new.Vector(uo+_mprs_,k,j,i) += 0.5*(en - eo);
     }, "mhd_set_candidate_B_b");
 }
 
@@ -2375,32 +2791,243 @@ double mhd_ic_kelvin_helmholtz(int var, double x, double y, ProblemParams pp){
     return 0.0;
 }
 
+// Blast wave in a strongly magnetized ambient: Wu & Shu (2018) in 2D and
+// Balsara & Spicer (1999) in 3D, the latter being Mignone & Del Zanna 2021
+// section 6.4. Uniform rho = d0, v = 0, p = p0 outside a sphere of radius
+// `radius` and p = p1 inside, threaded by a uniform field at an angle
+// (MDZ21 eq. 61):
+//     B = B0 (sin(th) cos(ph), sin(th) sin(ph), cos(th)),   B0 = pp.amp
+// The direction is given as a VECTOR (pp.v1, pp.v2, pp.v3), normalised here,
+// not as the angles (th, ph). That is deliberate: no double is an exact
+// arccos of zero, so cos(0.5*PI) = 6.12e-17 and an "axis-aligned" default
+// expressed as th = pi/2 gives Bz = 6.12e-14 instead of 0 -- measured, it moved
+// the inputs/balsara decks off their pre-change dumps. A direction vector has
+// exact axis alignment, and the default (1,0,0) reproduces the old B = (amp,0,0)
+// BIT-IDENTICALLY (checked on blast_smoke_p3_fb: 9/9 dumps).
+// MDZ21's th = pi/2, ph = pi/4 is the direction (1,1,0).
+//
+// The radius picks up z only when the z direction is ACTIVE. In a 2D run z is
+// left at 0 by the quadrature loops in mhd_initial_conditions while pp.cz is
+// half the box length, so an unguarded 3D radius would silently add cz^2 to
+// every cell and move the existing 2D decks.
+//
+// MDZ21 uses rho=1, p0=0.1, p1=1e3, radius=0.1, B0=100/sqrt(4 pi) and the
+// direction (1,1,0) on [-1/2,1/2]^3, giving beta ~ 2.5e-4 in the ambient
+// medium -- a genuinely hard test: the paper notes no scheme keeps the pressure
+// positive on it without an energy correction.
 KOKKOS_INLINE_FUNCTION
-double mhd_ic_blast(int var, double x, double y, double z, ProblemParams pp){
+double mhd_ic_blast(int var, double x, double y, double z, bool az, ProblemParams pp){
     double xr = x - pp.cx;
     double yr = y - pp.cy;
-    double r = sqrt(xr*xr + yr*yr);
+    double zr = az ? z - pp.cz : 0.0;
+    double r = sqrt(xr*xr + yr*yr + zr*zr);
     if(var==_mrho_) return pp.d0;
     if(var==_mprs_) return r < pp.radius ? pp.p1 : pp.p0;
-    if(var==_mbx_)  return pp.amp;
+    //B is set from the vector potential (mhd_ic_vector_potential) so that the
+    //staggered field is divergence-free by construction; these cell-centred
+    //rows only seed W and must agree with it.
+    double bn = sqrt(pp.v1*pp.v1 + pp.v2*pp.v2 + pp.v3*pp.v3);
+    if(bn == 0.0) bn = 1.0;
+    if(var==_mbx_)  return pp.amp*pp.v1/bn;
+    if(var==_mby_)  return pp.amp*pp.v2/bn;
+    if(var==_mbz_)  return pp.amp*pp.v3/bn;
     return 0.0;
 }
 
 // Wu & Shu (2018) Mach-800 magnetized jet ambient (+ nozzle IC at t=0).
 // Ambient: rho=d0, p=p0, v=0, B=(0,amp,0). Nozzle (|x-cx|<radius): rho=d1, vy=v2.
+//
+// pp.sigma is the nozzle EDGE WIDTH. sigma = 0 is the paper's sharp top hat and
+// is what this IC always did; sigma > 0 replaces the jump by
+//     s(x) = [1 - tanh((|x - cx| - radius)/sigma)] / 2
+// with rho = d0 + (d1-d0) s and vy = v2 s.
+//
+// WHY THE SMOOTH OPTION EXISTS. A top hat is a discontinuity, and the IC is laid
+// down by evaluating this function at SOLUTION POINTS -- a degree-p polynomial
+// per element. Where an element straddles the jump the polynomial overshoots
+// (Gibbs), and at Mach 800 that overshoot is fatal before a single step is
+// taken. MEASURED on the pure-hydro jet, reading p and v_y straight out of the
+// t = 0 dump:
+//
+//   nx1   dx      nozzle edge on an element boundary?   p_min      max|v_y|
+//   20    0.05    yes                                   1.000      800.0
+//   25    0.04    no                                    7.14e-25   805.7
+//   50    0.02    no                                    7.14e-25   854.5
+//   100   0.01    yes                                   1.000      800.0
+//
+// i.e. unless dx happens to divide the nozzle half-width, rho undershoots while
+// rho*v stays large, the recovered p = (g-1)(E - rho v^2/2) goes NEGATIVE and is
+// floored -- at t = 0, with no evolution at all. That is why the failure was
+// indifferent to the Riemann solver, the emf, the CFL, the energy fix and even
+// to switching the MOOD fallback off: none of them can repair a broken IC.
+//
+// Smoothing changes the problem slightly and the paper's nozzle is sharp, so
+// sigma stays 0 by DEFAULT and the existing inputs/balsara/jet_*.athinput decks
+// are bit-identical across this change.
+// The nozzle state at transverse position x: rho and vy blend from ambient to
+// jet across the nozzle edge. pp.sigma = 0 is the paper's sharp top hat (the
+// original expression verbatim -- `d0 + (d1-d0)*1.0` is not bit-identical to
+// `d1` for arbitrary values); sigma > 0 smooths it over that width.
+KOKKOS_INLINE_FUNCTION
+double mhd_jet_nozzle(int var, double x, ProblemParams pp){
+    if(var==_mprs_) return pp.p0;
+    if(var==_mby_)  return pp.amp;
+    if(pp.sigma <= 0.0){
+        bool nozzle = fabs(x - pp.cx) < pp.radius;
+        if(var==_mrho_) return nozzle ? pp.d1 : pp.d0;
+        if(var==_mvy_)  return nozzle ? pp.v2 : 0.0;
+        return 0.0;
+    }
+    double s = 0.5*(1.0 - tanh((fabs(x - pp.cx) - pp.radius)/pp.sigma));
+    if(var==_mrho_) return pp.d0 + (pp.d1 - pp.d0)*s;
+    if(var==_mvy_)  return pp.v2*s;
+    return 0.0;
+}
+
+// INITIAL CONDITION: quiescent ambient EVERYWHERE. rho = d0, p = p0, v = 0,
+// B = (0, amp, 0). The jet enters only through the lower boundary
+// (mhd_ic_jet_inflow), which is the standard setup for this test.
+//
+// This used to return the NOZZLE state instead -- and mhd_jet_nozzle has no y
+// dependence, so the beam spanned the entire domain height. A uniform beam in
+// pressure equilibrium with its surroundings is an EXACT steady solution, so the
+// run did nothing: measured at 400x600 DoF to the paper's t = 0.002, 2080 steps
+// and max|rho - rho(0)| = 1.4e-10, with |B|^2 uniform to 1e-6. It looked like a
+// working jet only because it never developed a bow shock, a cocoon, or anything
+// else. Nothing referenced the old behaviour -- there is no jet configuration in
+// the test suite and no golden.
 KOKKOS_INLINE_FUNCTION
 double mhd_ic_jet(int var, double x, double y, double z, ProblemParams pp){
-    bool nozzle = fabs(x - pp.cx) < pp.radius;
-    if(var==_mrho_) return nozzle ? pp.d1 : pp.d0;
-    if(var==_mvy_)  return nozzle ? pp.v2 : 0.0;
+    (void)x; (void)y; (void)z;
+    if(var==_mrho_) return pp.d0;
     if(var==_mprs_) return pp.p0;
     if(var==_mby_)  return pp.amp;
     return 0.0;
 }
 
+// BOUNDARY: the nozzle, imposed on the y-min ghost row every stage.
 KOKKOS_INLINE_FUNCTION
 double mhd_ic_jet_inflow(int var, double x, double y, ProblemParams pp){
-    return mhd_ic_jet(var, x, y, 0.0, pp);
+    (void)y;
+    return mhd_jet_nozzle(var, x, pp);
+}
+
+// Magnetized current sheet, Mignone & Del Zanna 2021 section 6.2.
+//
+// A Harris sheet, B(y) = B0 tanh(y/a) x^, held in equilibrium by a thermal
+// pressure gradient that counteracts the Lorentz force:
+//     p(y) = (B0^2/2)(beta + 1) - Bx(y)^2/2
+// so p + B^2/2 is uniform. With beta = 2 p_inf / B0^2 = 10 and a = 0.04.
+// Domain x in [-1,1], y in [-1/2,1/2], periodic in x, REFLECTING at y = +-1/2.
+// spd_K's mesh starts at the origin, so the box is [0,2] x [0,1] and the sheet
+// sits at y = cy (pp.cy, defaulting to the box midpoint).
+//
+// pp.amp = B0, pp.p0 = beta, pp.sigma = a (the sheet half-width),
+// pp.d0 = rho, pp.p1 = epsilon (the perturbation amplitude).
+//
+// WHY THIS TEST: with no physical resistivity the UNPERTURBED sheet is an exact
+// stationary solution of ideal MHD, so any evolution is the scheme's own
+// numerical resistivity. That makes it both the paper's dissipation measure and
+// a gate that cannot be fudged -- see mhd_current_sheet_equilibrium_2d.
+// Magnetized Kelvin-Helmholtz, Mignone & Del Zanna 2021 section 6.5. This is a
+// DIFFERENT problem from mhd_ic_kelvin_helmholtz above, which is Stone+2020
+// figure 22.
+//
+//   vx = (M/2) tanh(y/a),  a = 0.01,  M = 1 (the sonic Mach number)
+//   rho = 1,  p = 1/Gamma  (so c_s = 1 and velocities are in units of it)
+//   B = B0 x^,  B0 = vA sqrt(rho)  with vA = 1/2
+//   vy = eps M exp(-(y/20a)^2)   seeding the instability
+//
+// Paper domain x in [0,1], y in [-1,1]; on spd_K's origin-anchored mesh that is
+// [0,1] x [0,2] with the shear layer at y = cy. Periodic in x, REFLECTING at
+// y = 0 and y = 2. The field is flow-aligned, so magnetic tension stabilises the
+// instability and the configuration is only weakly unstable -- which is what
+// makes it a sharp test of a scheme's dissipation.
+//
+// THE SEED IS NOT THE PAPER'S. The paper draws eps per zone from a uniform
+// random distribution. A per-QUADRATURE-POINT random value would not survive
+// this code's initialisation: Initialize integrates the IC over each cell, so
+// white noise inside a cell averages back to ~0 and seeds nothing. Rather than
+// fake a cell index from a physical coordinate, this uses a deterministic sum of
+// modes with fixed irrational phases -- broadband, so the fastest-growing mode
+// that fits the box still emerges and the measured growth rate is comparable,
+// but reproducible run to run and resolution to resolution. pp.p1 = eps.
+KOKKOS_INLINE_FUNCTION
+double mhd_ic_kh_mdz(int var, double x, double y, ProblemParams pp){
+    const double M = pp.v1, a = pp.sigma, B0 = pp.amp, eps = pp.p1;
+    const double yr = y - pp.cy;
+    const double Lx = 2.0*pp.cx;
+    if(var==_mrho_) return pp.d0;
+    if(var==_mvx_)  return 0.5*M*tanh(yr/a);
+    if(var==_mvy_){
+        //Broadband seed: modes 1..8 across the box with fixed incommensurate
+        //phases, normalised so the peak amplitude is eps*M as in the paper.
+        double sum = 0.0, norm = 0.0;
+        for(int n=1; n<=8; n++){
+            const double ph = 2.0*PI*fmod(n*0.7548776662466927, 1.0); //phi = frac(n/phi_golden)
+            sum  += sin(2.0*PI*n*x/Lx + ph)/n;
+            norm += 1.0/n;
+        }
+        const double env = exp(-(yr/(20.0*a))*(yr/(20.0*a)));
+        return eps*M*env*sum/norm;
+    }
+    if(var==_mprs_) return pp.p0;
+    if(var==_mbx_)  return B0;   //overwritten by the vector-potential init
+    return 0.0;
+}
+
+// Magnetized Kelvin-Helmholtz of Rueda-Ramirez, Hindenlang, Chan & Gassner 2022
+// (arXiv:2203.06062) section 5.2, who take it from Mignone et al. It is the same
+// family as mhd_ic_kh_mdz above but far better posed for a high-order code:
+//
+//   rho = 1,  p = 1/gamma  (so c_s = 1),  gamma = 5/3
+//   v1 = (M/2) tanh(y/y0),        M = 1,  y0 = 1/20
+//   v2 = v2_0 sin(2 pi x) exp(-y^2/sigma^2),   v2_0 = 0.01, sigma = 0.1
+//   B  = (ca cos theta, 0, ca sin theta),      ca = 0.1, theta = pi/3
+//
+// Three things make this the better KH test here:
+//  - The perturbation is a SINGLE DETERMINISTIC MODE, so there is no random
+//    seed to reproduce and no caveat about cell-integrated white noise (see
+//    mhd_ic_kh_mdz, which needs one).
+//  - y0 = 0.05 is five times the MDZ21 shear width, so it is actually resolved:
+//    at 128x256 DoF it spans ~6 cells rather than ~1.3.
+//  - The reference runs it at polynomial degree N = 3 and N = 7, which are
+//    exactly this code's SDFB4 and SDFB8 lanes.
+//
+// B has a TOROIDAL component B3 = ca sin theta. In true 2D that row is a plain
+// cell-centred conserved variable (B_to_U does not overwrite it), which is what
+// makes the Lorentz force act on the z-momentum -- the "three-dimensional
+// effects in a pseudo-2D example" the paper notes.
+//
+// pp: amp = ca, v1 = M, v2 = v2_0, p1 = theta, sigma = y0, radius = perturbation
+// width, d0 = rho, p0 = p. Domain x in [0,1], y in [-1,1] maps to spd_K's
+// origin-anchored [0,1] x [0,2] with the shear layer at y = pp.cy.
+KOKKOS_INLINE_FUNCTION
+double mhd_ic_kh_rr22(int var, double x, double y, ProblemParams pp){
+    const double M=pp.v1, y0=pp.sigma, ca=pp.amp, th=pp.p1;
+    const double v20=pp.v2, sg=pp.radius;
+    const double yr = y - pp.cy;
+    const double Lx = 2.0*pp.cx;
+    if(var==_mrho_) return pp.d0;
+    if(var==_mvx_)  return 0.5*M*tanh(yr/y0);
+    if(var==_mvy_)  return v20*sin(2.0*PI*x/Lx)*exp(-(yr*yr)/(sg*sg));
+    if(var==_mvz_)  return 0.0;
+    if(var==_mprs_) return pp.p0;
+    if(var==_mbx_)  return ca*cos(th);   //overwritten from the vector potential
+    if(var==_mbz_)  return ca*sin(th);   //toroidal; cell-centred in true 2D
+    return 0.0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double mhd_ic_current_sheet(int var, double x, double y, ProblemParams pp){
+    const double B0 = pp.amp, beta = pp.p0, a = pp.sigma;
+    const double yr = y - pp.cy;
+    const double Bx = B0*tanh(yr/a);
+    if(var==_mrho_) return pp.d0;
+    if(var==_mprs_) return 0.5*B0*B0*(beta + 1.0) - 0.5*Bx*Bx;
+    if(var==_mbx_)  return Bx;   //overwritten by the vector-potential init
+    (void)x;
+    return 0.0;                  //v = 0, By = Bz = 0
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -2414,25 +3041,38 @@ double mhd_ic_orszag_tang(int var, double x, double y, double z){
     return 0.0;
 }
 
-// Field-loop advection (Gardiner & Stone): weak magnetic loop advected
-// diagonally by a uniform flow; B stays a passive loop and div(B)=0 must hold.
-// Quasi-2D setup on the z-invariant slab: rho=1, p=1, v=(2,1,0).
+// Field-loop advection (Gardiner & Stone; MDZ21 section 6.1): a weak magnetic
+// loop advected diagonally by a uniform flow. B stays a passive loop and
+// div(B)=0 must hold. Quasi-2D on the z-invariant slab.
+//
+// Parameterised so the paper's 2:1 rectangle is reachable: it uses
+// x in [-1,1], y in [-1/2,1/2] with the loop at the origin, which on spd_K's
+// origin-anchored mesh is [0,2] x [0,1] with the loop at (1, 0.5) -- i.e. the
+// box midpoint, which is what pp.cx/pp.cy default to. The defaults below
+// (v=(2,1), rho=p=1, A0=1e-3, R=0.3) reproduce the previous hardcoded values
+// exactly, so the four mhd_field_loop_* goldens are untouched.
 KOKKOS_INLINE_FUNCTION
-double mhd_ic_field_loop(int var, double x, double y, double z){
-    if(var==_mrho_) return 1.0;
-    if(var==_mvx_)  return 2.0;
-    if(var==_mvy_)  return 1.0;
-    if(var==_mprs_) return 1.0;
+double mhd_ic_field_loop(int var, double x, double y, double z, ProblemParams pp){
+    (void)x; (void)y; (void)z;
+    if(var==_mrho_) return pp.d0;
+    if(var==_mvx_)  return pp.v1;
+    if(var==_mvy_)  return pp.v2;
+    if(var==_mvz_)  return pp.v3;
+    if(var==_mprs_) return pp.p0;
     return 0.0;
 }
 
 KOKKOS_INLINE_FUNCTION
-double mhd_ic_primitive(int problem, int var, double x, double y, double z, ProblemParams pp){
-    if(problem==_ic_field_loop_) return mhd_ic_field_loop(var,x,y,z);
+double mhd_ic_primitive(int problem, int var, double x, double y, double z,
+                        bool az, ProblemParams pp){
+    if(problem==_ic_field_loop_) return mhd_ic_field_loop(var,x,y,z,pp);
     if(problem==_ic_mhd_vortex_) return mhd_ic_vortex(var,x,y,z,pp);
-    if(problem==_ic_mhd_blast_)   return mhd_ic_blast(var,x,y,z,pp);
+    if(problem==_ic_mhd_blast_)   return mhd_ic_blast(var,x,y,z,az,pp);
     if(problem==_ic_mhd_jet_)     return mhd_ic_jet(var,x,y,z,pp);
     if(problem==_ic_kelvin_helmholtz_) return mhd_ic_kelvin_helmholtz(var,x,y,pp);
+    if(problem==_ic_current_sheet_) return mhd_ic_current_sheet(var,x,y,pp);
+    if(problem==_ic_kh_mdz_) return mhd_ic_kh_mdz(var,x,y,pp);
+    if(problem==_ic_kh_rr22_) return mhd_ic_kh_rr22(var,x,y,pp);
     return mhd_ic_orszag_tang(var,x,y,z);
 }
 
@@ -2443,10 +3083,13 @@ double mhd_ic_primitive(int problem, int var, double x, double y, double z, Prob
 // Field loop: Az = A0 (R - r) inside r < R (loop centred at (0.5,0.5)).
 KOKKOS_INLINE_FUNCTION
 double mhd_ic_vector_potential(int problem, int dim, double x, double y, double z, ProblemParams pp){
+    //Az = A0 (R - r) inside r < R, centred on (pp.cx, pp.cy) -- the box
+    //midpoint by default, which is where both the unit-box and the paper's
+    //2:1-box versions put the loop.
     if(problem==_ic_field_loop_){
-        const double A0=1e-3, R=0.3;
+        const double A0=pp.amp, R=pp.radius;
         if(dim==_z_){
-            double r = sqrt((x-0.5)*(x-0.5) + (y-0.5)*(y-0.5));
+            double r = sqrt((x-pp.cx)*(x-pp.cx) + (y-pp.cy)*(y-pp.cy));
             return r<R ? A0*(R-r) : 0.0;
         }
         return 0.0;
@@ -2465,7 +3108,16 @@ double mhd_ic_vector_potential(int problem, int dim, double x, double y, double 
         return 0.0;
     }
     if(problem==_ic_mhd_blast_){
-        if(dim==_z_) return pp.amp*y;
+        //MDZ21 eq. 61 as a vector potential, so the staggered field is
+        //divergence-free by construction. For a uniform B = (bx,by,bz),
+        //  Ax = 0,  Ay = bz x,  Az = bx y - by x
+        //gives Bx = dAz/dy, By = -dAz/dx, Bz = dAy/dx exactly.
+        //The default direction (1,0,0) collapses to Az = amp*y, which is the
+        //expression this branch had before the direction was a parameter.
+        double bn = sqrt(pp.v1*pp.v1 + pp.v2*pp.v2 + pp.v3*pp.v3);
+        if(bn == 0.0) bn = 1.0;
+        if(dim==_y_) return pp.amp*(pp.v3/bn)*x;
+        if(dim==_z_) return pp.amp*((pp.v1/bn)*y - (pp.v2/bn)*x);
         return 0.0;
     }
     if(problem==_ic_mhd_jet_){
@@ -2476,6 +3128,32 @@ double mhd_ic_vector_potential(int problem, int dim, double x, double y, double 
     if(problem==_ic_kelvin_helmholtz_){
         if(dim==_z_) return pp.amp*y;
         return 0.0;
+    }
+    //Current sheet. Bx = dAz/dy, so the Harris profile B0 tanh(y/a) comes from
+    //Az = B0 a ln(cosh(y/a)). The paper perturbs with
+    //     dAz = eps B0 cos(ky y / 2) cos(kx x),   kx = 2pi/Lx, ky = 2pi/Ly
+    //and differentiates THAT rather than setting dB directly, which is how the
+    //perturbed state stays divergence-free to machine precision (eq. 59 and the
+    //sentence after it). pp.p1 = eps.
+    //Poloidal part of the RR22 field is uniform Bx = ca cos(theta), so
+    //Az = ca cos(theta) y. The toroidal B3 is NOT set from A: in true 2D it is a
+    //cell-centred conserved row seeded by the primitive IC above.
+    if(problem==_ic_kh_rr22_){
+        if(dim==_z_) return pp.amp*cos(pp.p1)*y;
+        return 0.0;
+    }
+    //Uniform flow-aligned field: Bx = dAz/dy, so Az = B0 y.
+    if(problem==_ic_kh_mdz_){
+        if(dim==_z_) return pp.amp*y;
+        return 0.0;
+    }
+    if(problem==_ic_current_sheet_){
+        if(dim!=_z_) return 0.0;
+        const double B0=pp.amp, a=pp.sigma, eps=pp.p1;
+        const double yr = y - pp.cy;
+        const double Lx = 2.0*pp.cx, Ly = 2.0*pp.cy;
+        const double kx = 2.0*PI/Lx, ky = 2.0*PI/Ly;
+        return B0*a*log(cosh(yr/a)) + eps*B0*cos(0.5*ky*yr)*cos(kx*(x-pp.cx));
     }
     const double B0 = 1.0/sqrt(4.0*PI);
     if(dim==_z_)
@@ -2505,7 +3183,7 @@ void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_
                     if(ay) y = fy(j,jj) + xs(mm)*(fy(j,jj+1)-fy(j,jj));
                     for(int ll=0;ll<px;ll++){
                         x = fx(i,ii) + xs(ll)*(fx(i,ii+1)-fx(i,ii));
-                        double s = mhd_ic_primitive(problem,var,x,y,z,pp)*ws(ll);
+                        double s = mhd_ic_primitive(problem,var,x,y,z,az,pp)*ws(ll);
                         if(ay) s*=ws(mm);
                         if(az) s*=ws(nn);
                         value+=s;
@@ -2526,7 +3204,7 @@ void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_
                     if(ay) y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
                     for(int ll=0;ll<px;ll++){
                         x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
-                        double s = mhd_ic_primitive(problem,var,x,y,z,pp)*w_sp(ll);
+                        double s = mhd_ic_primitive(problem,var,x,y,z,az,pp)*w_sp(ll);
                         if(ay) s*=w_sp(mm);
                         if(az) s*=w_sp(nn);
                         value+=s;
@@ -2562,7 +3240,76 @@ void mhd_Initialize_A(SD_Solution A, Matrix Xs, Matrix Ys, Matrix Zs, int dim){
 #endif
 }
 
-// Overwrite y-min ghost element with jet/nozzle primitives, then conservatives.
+// Fill a boundary's prescribed-inflow state ONCE, at setup. The state is
+// time-independent, so precomputing it keeps boundary.cpp free of any problem
+// knowledge: the BC branch just copies InflowL where its density row is >= 0 and
+// falls back to outflow where it is negative (see define.hpp).
+//
+// The nozzle occupies |x - cx| < radius of the y-min face; everywhere else on
+// that face gets the sentinel, i.e. OUTFLOW. That distinction is the whole point.
+// Clamping the entire face to a fixed ambient state -- which is what a naive
+// "apply the nozzle profile along the boundary" does, since mhd_jet_nozzle
+// returns ambient outside the nozzle -- pins v = 0 there and walls in the cocoon
+// backflow instead of letting it drain, which shows up as a visibly wrong jet
+// base.
+//
+// SD form: the y-face array's transverse index (i,ii) sits at solution points, so
+// its position is Xdim.sd_centers(i,ii).
+void mhd_jet_fill_inflow_sd(Boundaries& BC, Matrix x_centers){
+    if(BC.InflowL.size()==0) return;
+    int Nx=BC.Nx, Ny=BC.Ny, Nz=BC.Nz, px=BC.nx, py=BC.ny, pz=BC.nz;
+    int nader=BC.nader, nvar=BC.nvar;
+    ProblemParams pp = cfg.pp;
+    double gm = cfg.gamma;
+    SD_Vector IN = BC.InflowL;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
+        double x = x_centers(i,ii);
+        bool inject = fabs(x - pp.cx) < pp.radius + (pp.sigma>0.0 ? 4.0*pp.sigma : 0.0);
+        double w[NMHD], u[NMHD];
+        if(inject){
+            for(int var=0;var<NMHD;var++) w[var]=mhd_jet_nozzle(var,x,pp);
+            mhd_conservatives(w,u,gm);
+        }
+        for(int t=0;t<nader;t++)
+        for(int var=0;var<nvar;var++)
+            IN(t,var,k,j,i,kk,jj,ii) = inject ? (var<NMHD ? u[var] : 0.0) : -1.0;
+    });
+}
+
+// FV form: the transverse position of cell i is the midpoint of its faces.
+void mhd_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fx){
+    if(BC.InflowL.size()==0) return;
+    int Nx=BC.Nx, Ny=BC.Ny, Nz=BC.Nz, nvar=BC.nvar;
+    ProblemParams pp = cfg.pp;
+    double gm = cfg.gamma;
+    FV_Vector IN = BC.InflowL;
+    fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
+        double x = 0.5*(fx(i)+fx(i+1));
+        bool inject = fabs(x - pp.cx) < pp.radius + (pp.sigma>0.0 ? 4.0*pp.sigma : 0.0);
+        double w[NMHD], u[NMHD];
+        if(inject){
+            for(int var=0;var<NMHD;var++) w[var]=mhd_jet_nozzle(var,x,pp);
+            mhd_conservatives(w,u,gm);
+        }
+        for(int var=0;var<nvar;var++)
+            IN(var,k,j,i) = inject ? (var<NMHD ? u[var] : 0.0) : -1.0;
+    });
+}
+
+// Overwrite the y-min GHOST element with jet/nozzle primitives, then conservatives.
+//
+// The guard is `j > 0`, i.e. ghost row j = 0 ONLY. It used to be `j > 1`, which
+// with NGH = 1 also pinned j = 1 -- the first PHYSICAL element row -- re-imposing
+// the nozzle state on live interior cells at every stage. That contradicted this
+// function's own comment and it is why the Mach-800 jet had never run: the test
+// went non-finite within ~50 steps at every resolution, solver, emf, CFL, with
+// the energy correction on and off, and with the MOOD fallback disabled entirely.
+// MEASURED with the one-character fix, PLM+RK2 at the paper's 400x600 DoF and its
+// full t = 0.002: 2080 steps, zero non-finite values, sharp nozzle.
+//
+// Clamping a physical row is wrong even when it does not blow up: it holds the
+// solution at the inflow state where the flow should be free to respond, so the
+// working surface never forms.
 void mhd_jet_inflow_apply(SD_Solution W, SD_Solution U,
                             Matrix faces_x, Matrix faces_y,
                             Vector x_sp, Vector w_sp){
@@ -2579,7 +3326,7 @@ void mhd_jet_inflow_apply(SD_Solution W, SD_Solution U,
     Kokkos::deep_copy(Wh, W.Vector);
     Kokkos::deep_copy(Uh, U.Vector);
     sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        if(j > 1) return;
+        if(j > 0) return;
         double w[NMHD], u[NMHD];
         for(int var=0;var<NMHD;var++) w[var]=0;
         for(int nn=0;nn<pz;nn++){
@@ -2607,7 +3354,7 @@ void mhd_jet_inflow_apply(SD_Solution W, SD_Solution U,
     SD_Vector Vw = W.Vector;
     SD_Vector Vu = U.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
-        if(j > 1) return;
+        if(j > 0) return;
         double w[NMHD], u[NMHD];
         for(int var=0;var<NMHD;var++) w[var]=0;
         for(int nn=0;nn<pz;nn++){

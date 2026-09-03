@@ -333,14 +333,37 @@ void theta_from_flagged_b(FV_Solution flagged, FV_Solution theta){
 
 //Demote every flagged cell by one level, up to n_cascade. Returns the number
 //demoted, so the caller can stop revising once a sweep changes nothing.
+// A cell already at the BOTTOM tier has nothing left to demote to. spd_K has
+// always declined to increment it (c < n_cascade), but it still left the trouble
+// FLAG set, so a saturated cell kept advertising itself as troubled to everything
+// downstream that reads `flagged`. AthenaK drops such a cell out of detection
+// entirely (hydro_mood.cpp / mhd_mood.cpp: `if (lv >= n_fb) { fofc_ = false;
+// return; }`). cfg.mood_tier_exclude reproduces that: clear the flag once the
+// cell is pinned at the floor of the cascade.
+//
+// MEASURED: in spd_K this is a NO-OP. Current sheet, UCT-HLLD, tol 1e-5,
+// 128x64 DoF, with and without it -- E_B(30) 0.9527 both ways at p=3 and 0.4651
+// both ways at p=7, and the level-1/level-2 fractions agree to every digit.
+// The reason is structural: downstream assembly keys off the CASCADE LEVEL
+// (mhd_assign_face_flux / mhd_assign_edge_E pool `cascade`), not off the trouble
+// flag, so clearing the flag changes nothing. In AthenaK the same guard DOES
+// matter because its `fofc_` flag is what drives the face revision.
+// Kept, switchable, because it makes the two codes structurally comparable and
+// because it would start mattering the moment `flagged` gained a consumer.
 int update_cascade(FV_Solution flagged, FV_Solution cascade, int n_cascade){
     int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz;
     FV_Vector fl=flagged.Vector, ca=cascade.Vector;
+    bool excl=cfg.mood_tier_exclude;
+    bool pad1st=cfg.mood_pad_first_order;
     double demoted = fv_sum_cells_ngh2(Nz,Ny,Nx,
         KOKKOS_LAMBDA(int k,int j,int i,double& s){
             double tr=fl(0,k,j,i);
             double c =ca(0,k,j,i);
-            if(tr>0 && c<n_cascade){ ca(0,k,j,i)=c+1; s+=1; }
+            //A NAD flag (1) may only reach MUSCL; first order needs a PAD
+            //failure (2). Without pad_1st the cap is n_cascade for both.
+            int cap = (pad1st && tr<2 && n_cascade>1) ? 1 : n_cascade;
+            if(tr>0 && c<cap){ ca(0,k,j,i)=c+1; s+=1; }
+            else if(excl && c>=cap) fl(0,k,j,i)=0;
         });
     return (int)demoted;
 }
@@ -351,11 +374,15 @@ int update_cascade_b(FV_Solution flagged, FV_Solution cascade, int n_cascade){
     int Nx=flagged.Nx, Ny=flagged.Ny, Nz=flagged.Nz, nb=flagged.nb;
     int fnv=flagged.n_var, cnv=cascade.n_var;
     FV_Vector fl=flagged.Vector, ca=cascade.Vector;
+    bool excl=cfg.mood_tier_exclude;
+    bool pad1st=cfg.mood_pad_first_order;
     double demoted = fv_sum_cells_ngh2_b(nb,Nz,Ny,Nx,
         KOKKOS_LAMBDA(int b,int k,int j,int i,double& s){
             double tr=fl(b*fnv,k,j,i);
             double c =ca(b*cnv,k,j,i);
-            if(tr>0 && c<n_cascade){ ca(b*cnv,k,j,i)=c+1; s+=1; }
+            int cap = (pad1st && tr<2 && n_cascade>1) ? 1 : n_cascade;
+            if(tr>0 && c<cap){ ca(b*cnv,k,j,i)=c+1; s+=1; }
+            else if(excl && c>=cap) fl(b*fnv,k,j,i)=0;   //see update_cascade
         });
     return (int)demoted;
 }

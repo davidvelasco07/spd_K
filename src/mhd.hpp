@@ -47,6 +47,7 @@ extern void mhd_riemann_solver(SD_Solution U, SD_Solution F, int dim,
 extern void mhd_face_B_to_fp(SD_Solution U_fp, SD_Solution B_fp, int dim);
 extern void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
                            Matrix sp_to_fp, int edim);
+extern void mhd_zero_wall_emf(SD_Solution E, int wall);
 extern double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz);
 
 // CT coupling kernels (mhd.cpp): edge EMF from fluid velocity + face B
@@ -55,9 +56,9 @@ extern void mhd_compute_E(SD_Solution E, SD_Solution W_sp,
                           Matrix sp_to_fp, int dim);
 extern void mhd_E_riemann_solver(SD_Solution E, int dim, int v_index);
 extern void mhd_B_to_U(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
-                       SD_Solution Tx, SD_Solution Ty, SD_Solution Tz, Matrix fp_to_sp);
+                       SD_Solution Tx, SD_Solution Ty, SD_Solution Tz, Matrix fp_to_sp, bool cons=false);
 extern void mhd_B_to_U_b(SD_Solution U, SD_Solution Bx, SD_Solution By, SD_Solution Bz,
-                         Matrix fp_to_sp);
+                         Matrix fp_to_sp, bool cons=false);
 extern void mhd_compute_B_sp_from_fp(SD_Solution Bcc, SD_Solution Bx, SD_Solution By,
                                      SD_Solution Bz, Matrix fp_to_sp);
 
@@ -65,6 +66,8 @@ extern void mhd_compute_B_sp_from_fp(SD_Solution Bcc, SD_Solution Bx, SD_Solutio
 extern void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_z,
                            Vector x_sp, Vector w_sp);
 extern void mhd_Initialize_A(SD_Solution A, Matrix Xs, Matrix Ys, Matrix Zs, int dim);
+extern void mhd_jet_fill_inflow_sd(Boundaries& BC, Matrix x_centers);
+extern void mhd_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fx);
 extern void mhd_jet_inflow_apply(SD_Solution W, SD_Solution U,
                                  Matrix faces_x, Matrix faces_y,
                                  Vector x_sp, Vector w_sp);
@@ -97,7 +100,7 @@ extern void mhd_detect_troubles(FV_Solution U_new, FV_Solution U_old,
 extern void mhd_face_B_to_fv(SD_Solution B, FV_Solution Bfv, int dim);
 extern void mhd_fv_fluxes(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                           Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
-                          int dim, bool muscl);
+                          int dim, bool muscl, Vector w_rk, int ader, double dt);
 extern void mhd_four_state_E(FV_Solution E, FV_Solution W,
                              Vector x_c, Vector x_f, Vector y_c, Vector y_f, Vector z_c, Vector z_f,
                              int dim, bool muscl);
@@ -123,9 +126,12 @@ extern void mhd_riemann_solver_b(SD_Solution U, SD_Solution F, int dim,
 extern void mhd_compute_E_b(SD_Solution E, SD_Solution W_sp, SD_Solution B1,
                             SD_Solution B2, SD_Solution Bcc, Matrix sp_to_fp, int dim);
 extern void mhd_E_riemann_solver_b(SD_Solution E, int dim, int v_index);
+extern void mhd_uct_edge_E_b(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
+                             Matrix sp_to_fp, int edim);
 extern void mhd_fv_fluxes_b(FV_Solution W, FV_Solution F, FV_Solution Bn_f, FV_Solution UCT,
                             Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
-                            Matrix z_c, Matrix z_f, int dim, bool muscl);
+                            Matrix z_c, Matrix z_f, int dim, bool muscl,
+                            Vector w_rk, int ader, double dt);
 extern void mhd_four_state_E_b(FV_Solution E, FV_Solution W,
                                Matrix x_c, Matrix x_f, Matrix y_c, Matrix y_f,
                                Matrix z_c, Matrix z_f, int dim, bool muscl);
@@ -138,6 +144,14 @@ extern void mhd_four_state_E_b(FV_Solution E, FV_Solution W,
 //         conserved variable, exactly as in the Python spd reference. Registers its
 //         tasks into the Driver's stage lists.
 //========================================================================================
+
+//True when the EMF is built by UCT (mhd/emf = uct) rather than the two-sweep edge
+//sweep at SD edges and the four-state LLF bound at demoted corners. A free
+//function reading cfg, not a member: the UCT face-coefficient arrays are
+//allocated in the constructor, and a member initializer would be ordering-
+//dependent there. cfg is fully parsed before any Block is constructed.
+inline bool mhd_use_uct(){ return cfg.emf == _emf_uct_; }
+
 struct MHD_ader : public PhysicsModule {
     int n_ader;   // 1 (RK only)
     int nvar;     // 8
@@ -317,21 +331,36 @@ struct MHD_ader : public PhysicsModule {
         //`amr/bs_make_blocks` measured 570 ms per regrid at ~600 leaves, 16.5 s
         //of a 21.4 s amr/build_solvers, itself 23.5% of the run's fenced total.
         //The standalone path and the unit tests still allocate them.
-        if(standalone) BC_fp_x.init(X_dim,cfg.bc[_x_],1,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1);
+        if(standalone) BC_fp_x.init(X_dim,cfg.bc[_x_],1,nvar,Z_dim.N_total,Y_dim.N_total,1,Z_dim.n_sp,Y_dim.n_sp,1,/*mhd=*/true);
         alloc(U_ader_fp_y, "U_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
         alloc(F_ader_fp_y, "F_ader_fp_y",1,nvar,Z_dim,Y_dim,X_dim,0,1,0);
-        if(standalone) BC_fp_y.init(Y_dim,cfg.bc[_y_],1,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp);
+        if(standalone) BC_fp_y.init(Y_dim,cfg.bc[_y_],1,nvar,Z_dim.N_total,1,X_dim.N_total,Z_dim.n_sp,1,X_dim.n_sp,/*mhd=*/true);
+        //Prescribed-inflow state, filled ONCE (it does not depend on time).
+        if(standalone && cfg.bc[_y_]==_inflow_){
+            if(cfg.problem!=_ic_mhd_jet_){
+                if(Master) cout<<"ERROR: x2_bc = inflow is only defined for "
+                                 "problem = mhd_jet"<<endl;
+                exit(1);
+            }
+            mhd_jet_fill_inflow_sd(BC_fp_y,X_dim.sd_centers);
+        }
         alloc(U_ader_fp_z, "U_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
         alloc(F_ader_fp_z, "F_ader_fp_z",1,nvar,Z_dim,Y_dim,X_dim,1,0,0);
-        if(standalone) BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp);
-        //UCT face coefficients: three NUCT-variable SD arrays per block, read
-        //only under `use_uct`, which is hardwired false (the tree computes the
-        //four-state LLF corner EMF). Allocating them per block per regrid is pure
-        //cost; when UCT is wired in this becomes `if(standalone || use_uct)`.
-        if(use_uct || standalone){
-            UCT_fp_x.init("UCT_fp_x",1,NUCT,Z_dim,Y_dim,X_dim,0,0,1);
-            UCT_fp_y.init("UCT_fp_y",1,NUCT,Z_dim,Y_dim,X_dim,0,1,0);
-            UCT_fp_z.init("UCT_fp_z",1,NUCT,Z_dim,Y_dim,X_dim,1,0,0);
+        if(standalone) BC_fp_z.init(Z_dim,cfg.bc[_z_],1,nvar,1,Y_dim.N_total,X_dim.N_total,1,Y_dim.n_sp,X_dim.n_sp,/*mhd=*/true);
+        //UCT face coefficients: three NUCT-variable SD arrays per block, read by
+        //mhd_uct_edge_E (SD edges) and mhd_uct_corner_E (demoted corners) under
+        //mhd/emf=uct. Allocating them per block per regrid is pure cost under
+        //2sweep, so the standalone lane -- which allocates once -- keeps them
+        //unconditionally and the Mesh lane pays only when UCT is on.
+        //alloc(), not init(): init() allocates a bare per-block view and never
+        //registers the name in the BlockPack, so sd_pack_view could not find it
+        //and the whole batched Mesh path had no way to reach these arrays. That
+        //is one of the two reasons UCT was unreachable (the other being that
+        //Riemann_Solver passed a default-empty UCT view).
+        if(mhd_use_uct() || standalone){
+            alloc(UCT_fp_x, "UCT_fp_x",1,NUCT,Z_dim,Y_dim,X_dim,0,0,1);
+            alloc(UCT_fp_y, "UCT_fp_y",1,NUCT,Z_dim,Y_dim,X_dim,0,1,0);
+            alloc(UCT_fp_z, "UCT_fp_z",1,NUCT,Z_dim,Y_dim,X_dim,1,0,0);
         }
 
         alloc(Bx_fp_x, "Bx_fp_x",1,1,Z_dim,Y_dim,X_dim,0,0,1);
@@ -371,6 +400,8 @@ struct MHD_ader : public PhysicsModule {
             alloc(cascade, "cascade",1,Z_dim,Y_dim,X_dim,0,0,0);
             if(standalone) BCu_x.init(X_dim,cfg.bc[_x_],NMHD,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
             if(standalone) BCu_y.init(Y_dim,cfg.bc[_y_],NMHD,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
+            if(standalone && cfg.bc[_y_]==_inflow_)
+                mhd_jet_fill_inflow_fv(BCu_y,X_dim.fv_faces);
             if(standalone) BCu_z.init(Z_dim,cfg.bc[_z_],NMHD,nGHz,Y_dim.fv_ncells,X_dim.fv_ncells);
             if(standalone) BCs_x.init(X_dim,cfg.bc[_x_],1,Z_dim.fv_ncells,Y_dim.fv_ncells,nGHx);
             if(standalone) BCs_y.init(Y_dim,cfg.bc[_y_],1,Z_dim.fv_ncells,nGHy,X_dim.fv_ncells);
@@ -489,11 +520,12 @@ struct MHD_ader : public PhysicsModule {
         return TaskStatus::complete;
     }
 
-    void apply_jet_inflow(){
-        if(cfg.problem!=_ic_mhd_jet_) return;
-        mhd_jet_inflow_apply(W_sp,U_sp,Xdim_.sd_faces,Ydim_.sd_faces,xx,wx);
-        Kokkos::deep_copy(U_ader_sp.Vector,U_sp.Vector);
-    }
+    //The jet inflow is a BOUNDARY CONDITION now (mhd/x2_bc = inflow), filled
+    //once into Boundaries::InflowL and applied by boundaries() like any other BC.
+    //It used to be this: a pre-step overwrite of the CELL state, which the
+    //boundary fill then erased -- so it only ever took effect by also clamping
+    //the first physical row, which is what went non-finite at Mach 800.
+    void apply_jet_inflow(){}
 
     TaskStatus TaskAdvance(Driver* d, int stage){
         apply_jet_inflow();
@@ -522,7 +554,7 @@ struct MHD_ader : public PhysicsModule {
     }
 
     TaskStatus TaskBtoU(Driver* d, int stage){
-        mhd_B_to_U(U_sp,Bx_fp_x,By_fp_y,Bz_fp_z,Tx_,Ty_,Tz_,fp_to_sp);
+        mhd_B_to_U(U_sp,Bx_fp_x,By_fp_y,Bz_fp_z,Tx_,Ty_,Tz_,fp_to_sp,/*cons=*/true);
         return TaskStatus::complete;
     }
 
@@ -578,9 +610,21 @@ struct MHD_ader : public PhysicsModule {
 
     void Riemann_Solver(){
         bool az=cfg.active[_z_];
-        mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_);
-        mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_);
-        if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_);
+        //Under UCT the face solve also emits the five MDZ21 coefficients
+        //(aL, dL, dR, vt1, vt2) on the face flux-point lattice, which
+        //mhd_uct_edge_E composes into the edge EMF. Passing an EMPTY view under
+        //2sweep is what keeps that lane bit-identical: want_uct tests
+        //UCT.n_var >= NUCT, so an unassigned view switches the whole coefficient
+        //branch off rather than needing a second gate.
+        if(mhd_use_uct()){
+            mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_,{},UCT_fp_x);
+            mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_,{},UCT_fp_y);
+            if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_,{},UCT_fp_z);
+        }else{
+            mhd_riemann_solver(U_ader_fp_x,F_ader_fp_x,_x_);
+            mhd_riemann_solver(U_ader_fp_y,F_ader_fp_y,_y_);
+            if(az) mhd_riemann_solver(U_ader_fp_z,F_ader_fp_z,_z_);
+        }
     }
 
     void Solve_faces(CommHelper comm){
@@ -603,6 +647,20 @@ struct MHD_ader : public PhysicsModule {
 
     void E_Riemann_Solver(){
         bool az=cfg.active[_z_];
+        if(mhd_use_uct()){
+            //One UCT composition per edge family (MDZ21 eq. 33), replacing the
+            //two sequential sweeps entirely -- that is the whole point of UCT:
+            //the edge is upwinded in both transverse directions at once from the
+            //two adjacent face fans, not one direction after the other.
+            //(UCT1,UCT2) are the faces normal to the edge's (dim1,dim2), the same
+            //pairing mhd_uct_edge_E_t derives internally.
+            mhd_uct_edge_E(Ez_ep_xy,UCT_fp_x,UCT_fp_y,sp_to_fp,_z_);
+            if(az){
+                mhd_uct_edge_E(Ey_ep_zx,UCT_fp_z,UCT_fp_x,sp_to_fp,_y_);
+                mhd_uct_edge_E(Ex_ep_yz,UCT_fp_y,UCT_fp_z,sp_to_fp,_x_);
+            }
+            return;
+        }
         //Edge Riemann (LLF-E); v_index 3/4 per the induction/Python convention
         if(az) mhd_E_riemann_solver(Ey_ep_zx,_x_,4);
         mhd_E_riemann_solver(Ez_ep_xy,_x_,3);
@@ -618,6 +676,30 @@ struct MHD_ader : public PhysicsModule {
         Compute_E();
         if(standalone_) apply_E_boundaries(comm);
         E_Riemann_Solver();
+        //Re-apply AFTER the UCT composition. The two-sweep edge solver is a
+        //symmetric function of the two neighbouring states and writes both sides
+        //of every interface, so it carries a periodic input to a periodic
+        //output on its own. The UCT composition cannot: on the outermost ghost
+        //ring the neighbour element does not exist, so that point falls back to
+        //the continuous branch and is NOT the periodic image of the interior
+        //value it mirrors. edge_integral then reads it -- it ranges over N+1
+        //elements, so the last edge of the active region lives in ghost storage
+        //(CLAUDE.md rule 6) -- and the assembled E0z stops being periodic.
+        //Measured on Orszag-Tang 16^2, live cascade: E0z non-periodic at
+        //3.2e-04 with every per-level EMF and the cascade itself already clean,
+        //giving 5.5e-09 of mass drift. Copying the composed interior value into
+        //the ghosts fixes it at the source.
+        if(standalone_ && mhd_use_uct()) apply_E_boundaries(comm);
+        //Reflecting walls last: apply_E_boundaries has just written ghost values
+        //that mirror the interior, and the wall condition overrides them.
+        //In 2D only the Ez family exists; the 3D families are pinned on the two
+        //walls whose normal is transverse to the edge direction.
+        mhd_zero_wall_emf(Ez_ep_xy,_x_);
+        mhd_zero_wall_emf(Ez_ep_xy,_y_);
+        if(cfg.active[_z_]){
+            mhd_zero_wall_emf(Ex_ep_yz,_y_); mhd_zero_wall_emf(Ex_ep_yz,_z_);
+            mhd_zero_wall_emf(Ey_ep_zx,_z_); mhd_zero_wall_emf(Ey_ep_zx,_x_);
+        }
     }
 
     void apply_E_boundaries(CommHelper comm){
@@ -825,9 +907,7 @@ struct MHD_ader : public PhysicsModule {
         mhd_set_candidate_B(U_old_fv,B_old_cv);
     }
 
-    //True when the EMF is built by UCT. Wired to the emf knob; false for now, so
-    //the merged tree reproduces HEAD's four-state LLF corner EMF exactly.
-    bool use_uct = false;
+    //True when the EMF is built by UCT (mhd/emf = uct); see mhd_use_uct().
     int n_det = 3;              //live detection variables (mhd_detection_vars)
     double nad_gscale[8] = {};  //frozen global NAD scales for grange/gcfl
 
@@ -861,17 +941,19 @@ struct MHD_ader : public PhysicsModule {
                 FV_Solution &Bn=(dim==_x_?Bx_old:(dim==_y_?By_old:Bz_old));
                 FV_Solution &U1=(dim==_x_?UCT1_x:(dim==_y_?UCT1_y:UCT1_z));
                 FV_Solution &U2=(dim==_x_?UCT2_x:(dim==_y_?UCT2_y:UCT2_z));
+                //wt/0/dt is the same stage weighting fv_update_solution applies,
+                //so the Hancock half-step is centred on the stage it feeds.
                 mhd_fv_fluxes(W_fv,F1,Bn,U1,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
-                              Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true);
+                              Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true,wt,0,dt);
                 mhd_fv_fluxes(W_fv,F2,Bn,U2,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
-                              Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
+                              Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false,wt,0,dt);
             }
             int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
             int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
             if(cfg.active[d1] && cfg.active[d2]){
                 FV_Solution &E1=(dim==_x_?E1x:(dim==_y_?E1y:E1z));
                 FV_Solution &E2=(dim==_x_?E2x:(dim==_y_?E2y:E2z));
-                if(use_uct){
+                if(mhd_use_uct()){
                     //Halo UCT after all face sweeps for this level pair; do once
                     //outside the dim loop below after both MUSCL and FO fills.
                 }else{
@@ -882,8 +964,33 @@ struct MHD_ader : public PhysicsModule {
                 }
             }
         }
-        if(use_uct){
+        if(mhd_use_uct()){
             //UCT coeffs need transverse ghosts before the corner composition.
+            //mood_halo_uct goes through this block's OWN FV_Boundaries (BCu_*),
+            //which only the standalone lane initialises -- under a Mesh they are
+            //default-constructed and this is a straight segfault. main.cpp
+            //refuses Mesh + emf=uct + fallback at startup for exactly this
+            //reason, so reaching here without standalone_ is a logic error.
+            if(!standalone_){
+                if(Master) cout<<"ERROR: the MOOD corner UCT halo is standalone-only; "
+                    "Mesh + mhd/emf=uct + job/fallback should have been refused at "
+                    "startup (main.cpp)"<<endl;
+                exit(1);
+            }
+            //The face fields need the SAME transverse ghosts as the
+            //coefficients: mhd_uct_corner_E reads Bx_old at y-CELLS {j-1,j} and
+            //By_old at x-CELLS {i-1,i}. mood_halo_face_B was written for this
+            //and had ZERO callers, so those ghosts were whatever
+            //mhd_face_B_to_fv last left there.
+            //
+            //MEASURED, Orszag-Tang 16^2 at mood_force_level=1, one step:
+            //  before  Bx_old y-ghosts 3.382e-02, By_old x-ghosts 6.696e-02
+            //          -> E1z non-periodic at 6.236e-03 from PERIODIC inputs
+            //          -> mass drift 2.9e-06 against a 1e-12 limit.
+            //The four-state path never needed this because it takes B from
+            //W_fv, which mood_halo_U fills; only the UCT corner reads the
+            //face-field copies transversally.
+            mood_halo_face_B(comm_);
             mood_halo_uct(comm_,UCT1_x,UCT1_y,UCT1_z);
             mood_halo_uct(comm_,UCT2_x,UCT2_y,UCT2_z);
             for(int dim=0; dim<3; dim++){
@@ -892,6 +999,32 @@ struct MHD_ader : public PhysicsModule {
                 if(!(cfg.active[d1] && cfg.active[d2])) continue;
                 FV_Solution &E1=(dim==_x_?E1x:(dim==_y_?E1y:E1z));
                 FV_Solution &E2=(dim==_x_?E2x:(dim==_y_?E2y:E2z));
+                //SPD_UCT_CORNER_OFF=1 keeps the SD-edge UCT and builds the
+                //DEMOTED corners with the four-state LLF bound instead. This is
+                //the A/B that localised the open defect below, and the switch to
+                //bisect with when fixing it.
+                //
+                //KNOWN BROKEN: mhd_uct_corner_E does not conserve mass.
+                //Measured on Orszag-Tang 16^2, mhd/mood_force_level=1 (pinned,
+                //so no detection is involved), to t=0.15:
+                //    corner UCT ON  -> mass drift 2.869e-06
+                //    corner UCT OFF -> mass drift 1.720e-14
+                //Ruled out: the coefficient halo (drift survives
+                //SPD_NO_UCT_HALO), the ctoprim floors (min rho 0.11, min p 0.046,
+                //nowhere near 1e-10), an instability (rho/p/B ranges track the
+                //two-sweep run to 3 decimals), the true-2D Bz path (3D slab
+                //drifts identically, 2.063e-09 vs 2.065e-09), and the loop
+                //extents (identical fv_for_faces range to mhd_four_state_E_t).
+                //The drift grows exponentially in time (7.8e-15 -> 2.1e-09 over
+                //t=0..0.05) while the solution stays healthy. Levels 1 AND 2 are
+                //both affected; level 0 (the SD edge UCT) is clean at 1.7e-14.
+                if(getenv("SPD_UCT_CORNER_OFF")){
+                    mhd_four_state_E(E1,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                                     Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,true);
+                    mhd_four_state_E(E2,W_fv,Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
+                                     Ydim_.fv_faces,Zdim_.fv_centers,Zdim_.fv_faces,dim,false);
+                    continue;
+                }
                 mhd_uct_corner_E(E1,Bx_old,By_old,Bz_old,UCT1_x,UCT1_y,UCT1_z,
                                  W_fv.Nz,W_fv.Ny,W_fv.Nx,
                                  Xdim_.fv_centers,Xdim_.fv_faces,Ydim_.fv_centers,
@@ -933,7 +1066,7 @@ struct MHD_ader : public PhysicsModule {
         mhd_detection_vars(U_new_fv,det_new);
         mhd_NAD(det_new,det_old,troubles,cfg.nad_tolerance,n_det,nad_gscale);
         mhd_PAD(U_new_fv,troubles);
-        return update_cascade(troubles,cascade,2);
+        return update_cascade(troubles,cascade,cfg.mood_max_level);
     }
 
     //One cascade revision; returns demoted count (caller may MPI-reduce).
@@ -946,11 +1079,134 @@ struct MHD_ader : public PhysicsModule {
 
     //Commit from an already-assembled (and, under a mesh, already corrected)
     //flux/edge-E set.
+    //SPD_MASS_DBG=1 prints the FV mass across each stage commit: the mass of
+    //U_old_fv going in and U_new_fv coming out. The two numbers separate a
+    //FLUX-conservation defect (a nonzero per-stage delta -- the assembled face
+    //flux is not single-valued) from one introduced anywhere ELSE in the stage
+    //chain (a gap between one stage's new_fv and the next stage's old_fv:
+    //cv<->sp, the RK combine, B_to_U).
+    //
+    //This is what localised the open mhd_uct_corner_E defect. Over 71 stage
+    //commits of Orszag-Tang 16^2 at mood_force_level=1, to t=0.05:
+    //    emf=2sweep  max per-stage delta 1.4e-15, inter-stage gaps 3.5e-15
+    //    emf=uct     max per-stage delta 1.3e-10, inter-stage gaps -5.0e-10
+    //So the corner UCT makes the ASSEMBLED FACE FLUX non-single-valued, which
+    //is the surprise: a corner EMF should only drive the induction equation.
+    //The flux is computed from W_fv and the face field Bn, so the route is
+    //presumably corner EMF -> face B -> the HLLD wave speeds in mhd_fv_fluxes;
+    //what remains is to find why the two sides of a shared face then disagree.
+    double dbg_mass_fv(FV_Solution U){
+        int Nz=U.Nz, Ny=U.Ny, Nx=U.Nx;
+        Vector fx=Xdim_.fv_faces, fy=Ydim_.fv_faces, fz=Zdim_.fv_faces;
+        bool ay=cfg.active[_y_], az=cfg.active[_z_];
+        return fv_sum_cells_ngh2(Nz,Ny,Nx,
+            KOKKOS_LAMBDA(int k,int j,int i,double& acc){
+                double V = fx(i+1)-fx(i);
+                if(ay) V *= fy(j+1)-fy(j);
+                if(az) V *= fz(k+1)-fz(k);
+                acc += U.Vector(_mrho_,k,j,i)*V;
+            });
+    }
+
+    //Periodicity residual of an FV array along `dim`, in the sense that matches
+    //the array's staggering:
+    //  stag=1 (FACE/EDGE along dim): the low and high DOMAIN-BOUNDARY faces are
+    //    the same physical location, so compare index ng with N-ng-1 directly.
+    //  stag=0 (CELL-CENTRED along dim): the boundary cells are NOT the same
+    //    location -- comparing them measures the solution's own gradient, not a
+    //    defect (it read 4.4e-02 on W_fv in a perfectly healthy run). Compare
+    //    each GHOST against the active cell it is the periodic image of.
+    //A nonzero residual on a flux array breaks the telescoping sum and with it
+    //conservation; on an EMF array it breaks the CT update's periodicity.
+    double dbg_periodicity(FV_Solution Q, int dim, int stag){
+        int Nz=Q.Nz, Ny=Q.Ny, Nx=Q.Nx;
+        int nv=Q.n_var;
+        const int ng = (dim==_x_?nGHx:(dim==_y_?nGHy:nGHz));
+        const int N  = (dim==_x_?Nx:(dim==_y_?Ny:Nz));
+        int Mz=(dim==_z_?1:Nz), My=(dim==_y_?1:Ny), Mx=(dim==_x_?1:Nx);
+        double worst=0;
+        Kokkos::parallel_reduce("dbg_periodicity",
+            flat_range(0,flat_total((int64_t)nv*Mz*My*Mx)),
+            KOKKOS_LAMBDA(const int64_t f, double& acc){
+                int64_t t=f; int i=t%Mx; t/=Mx; int j=t%My; t/=My; int k=t%Mz; t/=Mz; int v=(int)t;
+                int al,ah;
+                //FACE: the two domain-boundary faces are one physical location.
+                //CELL: EVERY ghost, on BOTH sides, must match its periodic
+                //source. The MUSCL slope inside the corner EMF reaches two cells
+                //out, so one stale ghost anywhere in the frame is enough to make
+                //the composition asymmetric -- and checking only the low side
+                //hides exactly the half the high boundary edge reads.
+                //  low  ghost g in [0, ng)      <- active  N-2*ng+g
+                //  high ghost g in [N-ng, N)    <- active  g-(N-2*ng)
+                const int idx = (dim==_x_?i:(dim==_y_?j:k));
+                if(stag){ al=ng; ah=N-ng-1; }
+                else if(idx < ng)        { al=idx; ah=N-2*ng+idx; }
+                else if(idx >= N-ng)     { al=idx; ah=idx-(N-2*ng); }
+                else return;   //active cell: no periodic partner to compare
+                int kl=k,jl=j,il=i, kh=k,jh=j,ih=i;
+                if(dim==_x_){ il=al; ih=ah; } else if(dim==_y_){ jl=al; jh=ah; } else { kl=al; kh=ah; }
+                if(al<0||ah<0||al>=N||ah>=N) return;
+                double d=fabs(Q.Vector(v,kl,jl,il)-Q.Vector(v,kh,jh,ih));
+                if(d>acc) acc=d;
+            }, Kokkos::Max<double>(worst));
+        return worst;
+    }
+
     void mood_commit_assembled(){
         bool az=cfg.active[_z_];
+        const bool mdbg = getenv("SPD_MASS_DBG") != nullptr;
+        //BOTH readings are taken AFTER the call, on purpose. fv_update_solution
+        //seeds U_old from U_cv as a side effect (transforms.cpp:704 -- the
+        //two-jobs-in-one-call trap CLAUDE.md rule 2 records), so before the call
+        //U_old_fv still holds the PREVIOUS stage's state and a before/after pair
+        //straddling it compares two different things. After the call, U_old_fv is
+        //this update's input and U_new_fv its output, so the difference is the
+        //genuine flux imbalance over the active region.
+        double m0=0,m1=0;
         mood_fluid_update(true);
+        if(mdbg) m0 = dbg_mass_fv(U_old_fv);
+        if(mdbg) m1 = dbg_mass_fv(U_new_fv);
         mood_ct_update();
         if(cfg.floor_cons) mhd_floor_cv(U_cv,B_new_cv);
+        if(mdbg) printf("[mass] old_fv=%.17e  new_fv=%.17e  d=%.6e\n", m0,m1,m1-m0);
+        //Which array first stops being periodic. Order follows the causal chain
+        //corner EMF -> face B -> the FV flux, so the first nonzero one is the
+        //source rather than a symptom.
+        //The corner composition reads UCT1_x transversally in Y and UCT1_y
+        //transversally in X (mood_halo_uct fills exactly those), so those are
+        //the residuals that matter for a periodic edge EMF.
+        //E1z/E2z are the corner kernel's OWN output; E0z is what the cascade
+        //assembly made of them. Probing both separates a defect in the kernel
+        //from one in mhd_assign_edge_E.
+        //TRANSVERSE ghosts of the face fields. mhd_uct_corner_E reads Bx_old at
+        //y-CELLS {j-1,j} and By_old at x-CELLS {i-1,i}, so these are the ones the
+        //composition actually needs -- not the staggered directions probed
+        //below. mood_halo_uct halos the UCT coefficients transversally and
+        //there is no equivalent for the face fields; the four-state path never
+        //needed one because it takes B from W_fv, which mood_halo_U does fill.
+        //SPD_MASS_DBG=1 also prints the PERIODICITY RESIDUAL of each array in
+        //the causal chain, in the order the corner EMF propagates through it:
+        //    cascade -> E1z/E2z (per-level EMF) -> E0z (assembled)
+        //    -> Bx_old/By_old (face field) -> F0x/F0y (assembled flux)
+        //Under periodic BCs each of these must agree with its own periodic
+        //image, and a nonzero residual on the FLUX is what breaks the
+        //telescoping sum and therefore conservation. Reading the chain
+        //left-to-right and taking the FIRST nonzero entry is what localised the
+        //corner-UCT defect: every input was clean and E1z was not, which put the
+        //bug inside mhd_uct_corner_E rather than in anything feeding it.
+        //W_fv is the control -- mood_halo_U fills it, so it must read 0, and a
+        //nonzero there means the probe itself is wrong (it read 4.4e-02 on a
+        //healthy run until the cell-centred comparison was fixed to test each
+        //ghost against its periodic source instead of the two boundary cells,
+        //which are different physical locations).
+        if(mdbg) printf("[per ] casc=%.1e | E1z=%.1e E2z=%.1e E0z=%.1e | "
+                        "Bxo_t=%.1e Byo_t=%.1e | F0x=%.1e F0y=%.1e | W_fv=%.1e\n",
+                        dbg_periodicity(cascade,_x_,0),
+                        dbg_periodicity(E1z,_x_,1), dbg_periodicity(E2z,_x_,1),
+                        dbg_periodicity(E0z,_x_,1),
+                        dbg_periodicity(Bx_old,_y_,0), dbg_periodicity(By_old,_x_,0),
+                        dbg_periodicity(F0_x,_x_,1), dbg_periodicity(F0_y,_y_,1),
+                        dbg_periodicity(W_fv,_x_,0));
         transform_cv_to_sp(U_cv,U_sp);
         transform_a_to_b_2d(Bxf,Bx_fp_x,TB_x,cv_to_sp,_x_);
         transform_a_to_b_2d(Byf,By_fp_y,TB_y,cv_to_sp,_y_);

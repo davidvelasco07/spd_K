@@ -8,6 +8,8 @@ int bc_id(const string &name){
     if(name == "periodic")   return _periodic_;
     if(name == "gradfree")   return _gradfree_;
     if(name == "reflective") return _reflective_;
+    if(name == "outflow")    return _gradfree_;   //alias: gradfree IS outflow
+    if(name == "inflow")     return _inflow_;
     cout<<"ERROR: unknown boundary type '"<<name<<"'"<<endl;
     exit(1);
 }
@@ -27,6 +29,9 @@ int problem_id(const string &name){
     if(name == "mhd_vortex")       return _ic_mhd_vortex_;
     if(name == "mhd_blast")        return _ic_mhd_blast_;
     if(name == "mhd_jet")          return _ic_mhd_jet_;
+    if(name == "current_sheet")    return _ic_current_sheet_;
+    if(name == "kh_mdz")           return _ic_kh_mdz_;
+    if(name == "kh_rr22")          return _ic_kh_rr22_;
     if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
@@ -71,8 +76,32 @@ void problem_defaults(int problem, ProblemParams &pp){
         case _ic_mhd_vortex_:      //amp=V, v1/v2 background, p0 base P, p1=|B|, sigma>0 -> Leidi kernel
             pp = {1.0, 1.0,1.0,0.0, 1.0,0.0, 1.0,1.0, 0.0,0.0, 0};
             break;
-        case _ic_mhd_blast_:        //d0=rho, p0/p1 ambient/overpressure, amp=Bx, radius
-            pp = {1000.0, 0.0,0.0,0.0, 1.0,0.0, 0.1,10000.0, 0.1,0.0, 0};
+        case _ic_mhd_blast_:        //d0=rho, p0/p1 ambient/overpressure, amp=B0,
+                                    //v1/v2/v3 = field DIRECTION (normalised in
+                                    //the IC), radius = overpressured sphere.
+            //(1,0,0) is B = (amp,0,0), the orientation this IC had before the
+            //direction was a parameter, so inputs/balsara/* are bit-identical.
+            //MDZ21's theta=pi/2, phi=pi/4 is the direction (1,1,0).
+            pp = {1000.0, 1.0,0.0,0.0, 1.0,0.0, 0.1,10000.0, 0.1,0.0, 0};
+            break;
+        case _ic_field_loop_:       //amp=A0, radius=R, v1..v3 advection, d0=rho, p0=P
+            //Exactly the values that used to be hardcoded in mhd_ic_field_loop
+            //and mhd_ic_vector_potential, so the existing goldens do not move.
+            pp = {1e-3, 2.0,1.0,0.0, 1.0,0.0, 1.0,0.0, 0.3,0.0, 0};
+            break;
+        case _ic_kh_rr22_:          //amp=ca, v1=M, v2=v2_0, p1=theta, sigma=y0,
+                                    //radius=perturbation width, d0=rho, p0=p
+            //RR22 sec 5.2: ca=0.1, M=1, v2_0=0.01, theta=pi/3, y0=1/20,
+            //sigma=0.1, rho=1, p=1/gamma=0.6 for gamma=5/3.
+            pp = {0.1, 1.0,0.01,0.0, 1.0,0.0, 0.6,1.0471975511965976, 0.1,0.05, 0};
+            break;
+        case _ic_kh_mdz_:           //amp=B0, v1=M, sigma=a, d0=rho, p0=P, p1=eps
+            //B0 = vA sqrt(rho) = 0.5, M = 1, a = 0.01, p = 1/Gamma = 0.6 for
+            //Gamma = 5/3 (set p0 explicitly if gamma differs), eps = 1e-5.
+            pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 0.6,1e-5, 0.0,0.01, 0};
+            break;
+        case _ic_current_sheet_:    //amp=B0, p0=beta, sigma=a, d0=rho, p1=eps
+            pp = {1.0, 0.0,0.0,0.0, 1.0,0.0, 10.0,1e-3, 0.0,0.04, 0};
             break;
         case _ic_mhd_jet_:          //d0 ambient rho, d1 jet rho, p0, v2 jet vy, amp=By, radius nozzle
             pp = {141.421356, 0.0,800.0,0.0, 0.14,1.4, 1.0,0.0, 0.05,0.0, 0};
@@ -161,8 +190,22 @@ int main(int argc, char** argv){
 
         //SD at p=3 is unstable at cfl=0.8: dt is exactly constant until
         //t~0.1 and then falls six orders of magnitude. Measured stable at
-        //0.4 and below (see the dt-collapse guard in driver.hpp). Higher p
-        //has a tighter limit still and has not been measured.
+        //0.4 and below (see the dt-collapse guard in driver.hpp).
+        //THE LIMIT DEPENDS ON time/cfl_type. MEASURED 2026-09-01 on the
+        //unperturbed Harris sheet -- an EXACT equilibrium, so any motion at all
+        //is the scheme going unstable, which catches slow growth that a
+        //"did dt collapse?" probe misses entirely (64 DoF, t=0.5, round-off
+        //~6e-13):
+        //           cfl:   0.50      0.40      0.30      0.25      0.20
+        //   p=3 min      2.6e-01   1.3e-02   6.3e-13   6.3e-13   6.3e-13
+        //   p=3 sum      6.3e-13   6.3e-13   6.3e-13   6.3e-13   6.3e-13
+        //   p=7 min      collapse  collapse  collapse  1.3e-01   1.9e-14
+        //   p=7 sum      1.3e-01   3.0e-14   2.5e-14   3.0e-14   4.0e-14
+        //So: p=3 needs <= 0.30 under min and holds 0.5 under sum; p=7 needs
+        //<= 0.20 under min and <= 0.40 under sum. An earlier Orszag-Tang probe
+        //reported "p=7 stable at 0.30" under min -- WRONG, because it only
+        //looked for dt collapse and the run was quietly unstable well before
+        //that. Probe stability on a problem whose exact answer you know.
         cfg.cfl      = pin.GetOrAddReal("time","cfl",0.4);
         //time/cfl_type = sum | min. SUM is the default because it is what every
         //golden in the tree was generated with; MIN is the standard unsplit
@@ -180,6 +223,15 @@ int main(int argc, char** argv){
             }
         }
         cfg.nlim     = pin.GetOrAddInteger("time","nlim",-1);
+        //`nlim = 0` reads as "zero steps" and is NOT: the driver's cap is
+        //`cfg.nlim > 0`, so 0 falls through as UNLIMITED. That trap, combined
+        //with a small output/dt, is how two runs here wrote ~740 GB each and
+        //filled the filesystem twice. -1 is the documented way to say unlimited.
+        if(cfg.nlim == 0){
+            if(Master) cout<<"ERROR: time/nlim = 0 is ambiguous. Use -1 for an "
+                             "unlimited step count, or a positive cap."<<endl;
+            exit(1);
+        }
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
         //Constant gravitational acceleration (source term); default 0 leaves
         //the homogeneous Euler equations untouched. Set e.g. hydro/g2 for a
@@ -321,16 +373,90 @@ int main(int argc, char** argv){
             string rs = pin.GetOrAddString("mhd","rsolver","llf");
             if(rs=="llf")       cfg.rsolver = _rsolver_llf_;
             else if(rs=="hlld") cfg.rsolver = _rsolver_hlld_;
+            else if(rs=="hll")  cfg.rsolver = _rsolver_hll_;
             else{
                 if(Master) cout<<"ERROR: mhd/rsolver = '"<<rs
-                               <<"' not implemented (llf|hlld)"<<endl;
+                               <<"' not implemented (llf|hll|hlld)"<<endl;
                 exit(1);
+            }
+            //Electromotive force construction. Default 2sweep, which is what
+            //every MHD golden in the tree was generated with; uct selects the
+            //Mignone & Del Zanna 2021 upwind CT composition (eq. 33), taking its
+            //a/d coefficients from the face solver's own wave fan -- so the UCT
+            //flavour follows mhd/rsolver rather than being named separately.
+            //Refused under llf: a single-speed bound has no fan to read them off,
+            //and silently falling back to 2sweep would report a scheme that did
+            //not run (the failure mode that left UCT dead in the tree for a
+            //release -- both UCT kernels had zero call sites while docs/mhd.md
+            //described them as live).
+            {
+                string em = pin.GetOrAddString("mhd","emf","2sweep");
+                if(em=="2sweep")   cfg.emf = _emf_2sweep_;
+                else if(em=="uct") cfg.emf = _emf_uct_;
+                else{
+                    if(Master) cout<<"ERROR: mhd/emf = '"<<em
+                                   <<"' not implemented (2sweep|uct)"<<endl;
+                    exit(1);
+                }
+                if(cfg.emf==_emf_uct_ && cfg.rsolver==_rsolver_llf_){
+                    if(Master) cout<<"ERROR: mhd/emf=uct needs a Riemann solver "
+                        "with a wave fan to take the UCT coefficients from. Use "
+                        "mhd/rsolver=hll (UCT-HLL) or mhd/rsolver=hlld "
+                        "(UCT-HLLD)."<<endl;
+                    exit(1);
+                }
+            }
+            //MDZ21 6.4's energy correction: when B_to_U replaces U's B rows with
+            //the projection of the staggered CT field, shift E by the same amount
+            //so the thermal energy is invariant. OFF by default because it moves
+            //every MHD result; strongly magnetized decks (the 3D blast, beta ~
+            //2.5e-4) need it or 15% of the domain hits the pressure floor.
+            {
+                //Accept a bitmask (0/1/2/4/7) or the older true/false spelling,
+                //where true means "every site".
+                string ef = pin.GetOrAddString("mhd","energy_fix","0");
+                if(ef=="true")       cfg.mhd_energy_fix = 7;
+                else if(ef=="false") cfg.mhd_energy_fix = 0;
+                else {
+                    try { cfg.mhd_energy_fix = std::stoi(ef); }
+                    catch(...) {
+                        if(Master) cout<<"ERROR: mhd/energy_fix = '"<<ef
+                            <<"' is not an integer bitmask (0|1|2|4|7) or true/false"<<endl;
+                        exit(1);
+                    }
+                }
             }
             //NAD on the candidate CT field: magnitude (default) or components.
             //comps is what AthenaK / Python spd use and is the better detector --
             //|B|-only misses Alfvénic / transverse oscillations -- but flipping
             //the default moves the MHD goldens, so it waits until the global NAD
             //scale is decomposition-invariant and they can be regenerated once.
+            //NOTE the code default and the parser default USED TO DISAGREE:
+            //global.hpp documents `comps` while this line parsed "mag", and the
+            //parser wins -- so every run so far has detected on |B| alone.
+            //`comps` is available and is AthenaK's default, but it stays
+            //non-default here because it is measurably worse on the one
+            //benchmark with an exactly known answer. MDZ21 current sheet,
+            //128x64 DoF, UCT-HLLD, tol 1e-5, where the correct E_B(30) is 1:
+            //     mood_nad_b=mag    p=3  0.9527    p=7  0.4651
+            //     mood_nad_b=comps  p=3  0.3998    p=7  0.4784
+            //Three components fire more often than |B|, and on a smooth
+            //equilibrium the extra firing is entirely spurious: p=3 loses a
+            //factor of 2.4. |B| really is blind to a magnitude-preserving
+            //rotation, so `comps` is the better DETECTOR in principle; what
+            //makes it expensive is the CASCADE's response to the extra flags.
+            //Deepest cascade tier. 2 (default) is the historical behaviour and
+            //admits first order; 1 stops the cascade at MUSCL, so the fallback
+            //can never be MORE dissipative than the scheme it falls back to.
+            cfg.mood_max_level = pin.GetOrAddInteger("mhd","mood_max_level",2);
+            if(cfg.mood_max_level < 0 || cfg.mood_max_level > 2){
+                if(Master) cout<<"ERROR: mhd/mood_max_level must be 0, 1 or 2"<<endl;
+                exit(1);
+            }
+            //Only a PAD failure may take a cell to first order; a NAD flag alone
+            //stops at MUSCL. Off by default (bit-identical); see mhd_PAD.
+            cfg.mood_pad_first_order = pin.GetOrAddBoolean("mhd","mood_pad_first_order",false);
+            cfg.mood_tier_exclude = pin.GetOrAddBoolean("mhd","mood_tier_exclude",true);
             string nadb = pin.GetOrAddString("mhd","mood_nad_b","mag");
             if(nadb=="mag")         cfg.mood_nad_b = _nad_b_mag_;
             else if(nadb=="comps")  cfg.mood_nad_b = _nad_b_comps_;
@@ -388,26 +514,47 @@ int main(int argc, char** argv){
             //with detection live and with it pinned. A low-order MHD lane is
             //reachable only through the cascade level, so map plm onto it and
             //refuse vl2 rather than let either be reported as a scheme it is not.
+            //job/scheme for MHD. Both low-order lanes pin every cell at the
+            //cascade's MUSCL level, which IS limited-slope reconstruction on the
+            //sub-cell mesh; they differ in cfg.fv_predictor:
+            //  plm  slopes only -- time accuracy comes from the outer
+            //       integrator, so pair it with rk2/rk3
+            //  vl2  slopes plus the MHD Hancock half-step (mhd_fv_predict,
+            //       ported from the Python spd reference / RAMSES trace3d), so
+            //       it is second order in time on its own -- pair it with rk1
+            //vl2 used to be REFUSED here because mhd_fv_fluxes_t had no
+            //predictor and would have run plain PLM under that name. It has one
+            //now -- but MEASURED, it does not buy second order in time.
+            //
+            //Orszag-Tang 64^2 DoF at t=0.05 (smooth), MUSCL level, mesh FIXED
+            //and only dt refined so the spatial error cancels:
+            //    plm + rk1        L1 1.10e-03 at cfl 0.4, order 1.06 - 1.22
+            //    vl2 + rk1        L1 2.85e-04 at cfl 0.4, order 1.03 - 1.22
+            //    plm + rk2        L1 2.00e-05 at cfl 0.4, order 1.99 - 2.07
+            //The control confirms the method resolves second order, so vl2's
+            //first order is real: a LOCAL Hancock predictor time-centres the
+            //fluid fluxes (hence the 4x smaller error) but cannot time-centre
+            //the CT FACE FIELD, whose half-step needs the edge EMF and is
+            //therefore non-local. That is why Athena++/AthenaK use a two-stage
+            //VL2 (a conservative donor-cell half-step INCLUDING a CT update)
+            //for MHD rather than MUSCL-Hancock.
+            //
+            //Note MDZ21's own 2nd-order base scheme is SSP-RK2 with piecewise
+            //linear reconstruction -- that is job/scheme=plm + time/integrator=rk2,
+            //which is second order here. vl2 is an extra lane, not the paper's.
             if(system_name=="mhd" && scheme!="sd"){
-                if(scheme=="vl2"){
-                    if(Master) cout<<"ERROR: job/scheme=vl2 is hydro-only. The "
-                        "MUSCL-Hancock predictor lives in hydro.cpp (cfg.fv_predictor) "
-                        "and the MHD FV flux path has no predictor, so this would run "
-                        "plain PLM under the name vl2. Use job/scheme=plm with "
-                        "time/integrator=rk2 (two-stage, second order, the closest "
-                        "lane to the paper's VL2), and see mhd_fv_fluxes_t if a real "
-                        "MHD predictor is wanted."<<endl;
-                    exit(1);
-                }
-                //plm: pin every cell at the cascade's MUSCL level, which IS
-                //limited-slope PLM on the sub-cell mesh. An explicit
-                //mhd/mood_force_level wins, so the two can still be combined.
                 if(!force_level_given)
                     cfg.mood_force_level = 1;
                 else if(cfg.mood_force_level != 1 && Master)
-                    cout<<"NOTE: job/scheme=plm asks for the MUSCL level but "
+                    cout<<"NOTE: job/scheme="<<scheme<<" asks for the MUSCL level but "
                           "mhd/mood_force_level="<<cfg.mood_force_level
                         <<" was set explicitly; the explicit value wins"<<endl;
+                if(scheme=="vl2" && cfg.integrator==_integrator_rk_
+                   && cfg.rk_order>1 && Master)
+                    cout<<"NOTE: job/scheme=vl2 is MUSCL-Hancock, already second "
+                          "order in time; pairing it with rk"<<cfg.rk_order
+                        <<" applies the time integration twice. time/integrator=rk1 "
+                          "is the matching choice."<<endl;
             }
         }
 
@@ -426,6 +573,41 @@ int main(int argc, char** argv){
         int nbx = Nx/NBx, nby = Ny/NBy, nbz = Nz/NBz;
         bool multiblock = (NBx!=Nx)||(NBy!=Ny)||(NBz!=Nz);
         bool use_mesh = multiblock || cfg.amr_max_level>0;
+
+        //UCT at DEMOTED corners is standalone-only for now. The SD edge UCT is
+        //batched and runs fine under a Mesh (mhd_uct_edge_E_b), but the FV corner
+        //composition needs the five face coefficients haloed across block
+        //boundaries first, and the only halo for them (MHD_ader::mood_halo_uct)
+        //goes through per-block FV_Boundaries that the Mesh lane never
+        //initialises -- so the Mesh path has no UCT corners at all and would
+        //silently assemble them with the four-state LLF bound instead.
+        //Refuse rather than report a run as UCT when half its faces are not:
+        //that exact failure -- a scheme named in the input and absent from the
+        //build -- is what left both UCT kernels with zero call sites while
+        //docs/mhd.md described them as live.
+        //MEASURED (Orszag-Tang 16^2, t=0.03, pure SD): single-block and a 2x2
+        //decomposition agree to 0.000e+00 under emf=2sweep -- exact bit
+        //identity is the invariant every other path in this tree satisfies --
+        //but differ by 2.3e-04 (UCT-HLLD) and 4.3e-06 (UCT-HLL) under emf=uct.
+        //The face coefficients are only ever written at interfaces the Riemann
+        //solve covers, so a ghost element's OUTER face keeps whatever it was
+        //initialised with; the edge composition reads it, and which elements are
+        //ghosts depends on the decomposition. The batched and per-block UCT
+        //kernels agree bit-for-bit with each other, so this is not the pack --
+        //it is a missing halo of UCT_fp_*, and fixing it needs an exchange that
+        //writes a point layer the existing fp gather does not.
+        //Refused rather than warned: a multiblock UCT number would be a function
+        //of the block layout, and nothing downstream would say so.
+        if(system_name=="mhd" && cfg.emf==_emf_uct_ && use_mesh){
+            if(Master) cout<<"ERROR: mhd/emf=uct is single-block only for now. "
+                "The UCT face coefficients are not haloed, so a ghost element's "
+                "outer face is unwritten and the edge composition reads it: the "
+                "solution then depends on the block decomposition (measured "
+                "2.3e-04 on Orszag-Tang at 16^2 by t=0.03, against exactly 0 for "
+                "mhd/emf=2sweep). Drop meshblock/nx* and amr/max_level for a "
+                "single-block run, or use mhd/emf=2sweep."<<endl;
+            exit(1);
+        }
 
         std::vector<RefinementRegion> refinements;
         std::regex ref_re("^refinement\\d+$");
@@ -506,7 +688,10 @@ int main(int argc, char** argv){
                 <<(cfg.integrator==_integrator_ader_ ? "ader" : "rk"+to_string(cfg.rk_order));
             if(system_name=="mhd"){
                 cout<<", rsolver = "
-                    <<(cfg.rsolver==_rsolver_hlld_ ? "hlld" : "llf")
+                    <<(cfg.rsolver==_rsolver_hlld_ ? "hlld"
+                       : (cfg.rsolver==_rsolver_hll_ ? "hll" : "llf"))
+                    <<", emf = "
+                    <<(cfg.emf==_emf_uct_ ? "uct" : "2sweep")
                     <<", mood_nad_b = "
                     <<(cfg.mood_nad_b==_nad_b_mag_ ? "mag" : "comps")
                     <<", mood_nad_v = "

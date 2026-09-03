@@ -870,6 +870,31 @@ static void fill_interior_face_B_2d(SD_Solution Bx, SD_Solution By,
 //The average is the flux-point-spacing weighted sum of the control volumes, not
 //a plain mean: the control volumes tile the face unevenly, and only the true
 //integral makes the coarse element's face balance equal its (zero) divergence.
+//A minmod-limited LINEAR profile along the shared face, which is what AthenaK's
+//ProlongFCSharedX1Face/X2Face do, replacing the piecewise-CONSTANT copy this used
+//to be. The two fine sub-faces take the coarse transverse average -+ 0.25 of the
+//limited slope, so their mean is the coarse value exactly -- the face flux is
+//conserved, and minmod introduces no new extrema. It is the face-field twin of
+//prolongate_block_lim, which is already AthenaK's cell-centred operator.
+//
+//WHY IT MATTERS, measured: the constant version is one order lower, so every
+//refine event stepped B across the newly refined coarse-fine face, and B feeds
+//back on the flow through the Lorentz force exactly where the rolls stretch it.
+//On the figure-22 lane spd_K's AMR-vs-uniform rms was 8.3x AthenaK's at t=1.5
+//while being within 2x of it through t=1.2, and freezing the mesh (no regrid
+//transfers at all, same mixed-level machinery) recovered 4.1x of that -- which is
+//what pointed here rather than at the coarse-fine coupling.
+//
+//Reads the coarse block's transverse NEIGHBOURS, so the face-B ghosts have to be
+//current at snapshot time; adapt() refreshes them for the same reason it already
+//exchanges U_sp at p=0.
+//
+//SPD_FACEB_PROLONG_CONST=1 restores the constant profile (the A/B reference).
+static bool faceB_prolong_const(){
+    static const bool v = getenv("SPD_FACEB_PROLONG_CONST") != nullptr;
+    return v;
+}
+
 static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                                           int face_dim, int cx, int cy, int cz){
     int Nx=F.Nx, Ny=F.Ny, Nz=F.Nz;
@@ -879,6 +904,7 @@ static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
     Vector xfp = amr_x_fp;
     GHOST_LOCALS;
     (void)cz;
+    const int lin = faceB_prolong_const() ? 0 : 1;
     if(face_dim==_x_){
         int nty=F.ny, ntyC=C.ny;
         for_box3p1(NGHz,Nz-NGHz,NGHy,Ny-NGHy,NGHx,Nx-NGHx,nz, KOKKOS_LAMBDA(int k, int j, int i, int kk){
@@ -893,12 +919,22 @@ static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                     bool on_coarse = ax ? (side ? ((gx%2)==1) : ((gx%2)==0)) : true;
                     if(!on_coarse) continue;
                     int cii = side ? C.nx-1 : 0;
-                    double a=0;
-                    for(int jj=0; jj<ntyC; jj++)
-                        a += (xfp(jj+1)-xfp(jj))
-                           * C.Vector(0,0,cez,cey,cex,kk,jj,cii);
+                    //Transverse average of the coarse face, and of its two
+                    //neighbours along the face, for the limited slope.
+                    double a=0, aL=0, aR=0;
+                    for(int jj=0; jj<ntyC; jj++){
+                        const double w = xfp(jj+1)-xfp(jj);
+                        a  += w * C.Vector(0,0,cez,cey,  cex,kk,jj,cii);
+                        aL += w * C.Vector(0,0,cez,cey-1,cex,kk,jj,cii);
+                        aR += w * C.Vector(0,0,cez,cey+1,cex,kk,jj,cii);
+                    }
+                    double v = a;
+                    if(lin && ay){
+                        const double sl = amr_minmod(aR-a, a-aL);
+                        v += ((gy&1) ? 0.25 : -0.25) * sl;
+                    }
                     for(int jj=0; jj<nty; jj++)
-                        F.Vector(0,0,k,j,i,kk,jj,ii) = a;
+                        F.Vector(0,0,k,j,i,kk,jj,ii) = v;
                 }
             }, "prolong_shared_Bx_const");
     } else if(face_dim==_y_){
@@ -915,12 +951,20 @@ static void prolongate_shared_face_B_const(SD_Solution C, SD_Solution F,
                     bool on_coarse = ay ? (side ? ((gy%2)==1) : ((gy%2)==0)) : true;
                     if(!on_coarse) continue;
                     int cjj = side ? C.ny-1 : 0;
-                    double a=0;
-                    for(int ii=0; ii<ntxC; ii++)
-                        a += (xfp(ii+1)-xfp(ii))
-                           * C.Vector(0,0,cez,cey,cex,kk,cjj,ii);
+                    double a=0, aL=0, aR=0;
+                    for(int ii=0; ii<ntxC; ii++){
+                        const double w = xfp(ii+1)-xfp(ii);
+                        a  += w * C.Vector(0,0,cez,cey,cex,  kk,cjj,ii);
+                        aL += w * C.Vector(0,0,cez,cey,cex-1,kk,cjj,ii);
+                        aR += w * C.Vector(0,0,cez,cey,cex+1,kk,cjj,ii);
+                    }
+                    double v = a;
+                    if(lin && ax){
+                        const double sl = amr_minmod(aR-a, a-aL);
+                        v += ((gx&1) ? 0.25 : -0.25) * sl;
+                    }
                     for(int ii=0; ii<ntx; ii++)
-                        F.Vector(0,0,k,j,i,kk,jj,ii) = a;
+                        F.Vector(0,0,k,j,i,kk,jj,ii) = v;
                 }
             }, "prolong_shared_By_const");
     }

@@ -292,6 +292,7 @@ struct Mesh : public PhysicsModule {
         FV_Solution E1x, E1y, E1z, E2x, E2y, E2z;
         FV_Solution W_fv, det_old, det_new, mhd_cascade;
         FV_Solution UCT1_x, UCT1_y, UCT1_z, UCT2_x, UCT2_y, UCT2_z;
+        SD_Solution UCT_fp_x, UCT_fp_y, UCT_fp_z;  //SD face UCT coeffs (mhd/emf=uct)
         SD_Solution mhd_U_ader_sp;
     } pv;
 
@@ -327,6 +328,20 @@ struct Mesh : public PhysicsModule {
             pv.Ey_ep_zx = sd_pack_view(pack,"Ey_ep_zx");
             pv.Ez_ep_xy = sd_pack_view(pack,"Ez_ep_xy");
             pv.mhd_U_ader_sp = sd_pack_view(pack,"U_ader_sp");
+            //The SD face UCT coefficients exist under mhd/emf=uct, and
+            //MHD_ader allocates them OUTSIDE its cfg.fallback block -- the SD
+            //edge EMF needs them whether or not the MOOD cascade is on. So they
+            //must be claimed ABOVE the guard below: putting them after it left
+            //pv.UCT_fp_* default-empty on every job/fallback=false run and
+            //mhd_uct_edge_E_b dereferenced null. That is the same trap the
+            //`troubles` note above records, in the same function.
+            //sd_pack_view aborts on a name missing from the pack, so this guard
+            //has to match the allocation guard in mhd.hpp exactly.
+            if(mhd_use_uct()){
+                pv.UCT_fp_x = sd_pack_view(pack,"UCT_fp_x");
+                pv.UCT_fp_y = sd_pack_view(pack,"UCT_fp_y");
+                pv.UCT_fp_z = sd_pack_view(pack,"UCT_fp_z");
+            }
             //Everything past here is allocated only when the MOOD cascade is on
             //(mhd.hpp: `if(cfg.fallback){ ... }`).
             if(!cfg.fallback) return;
@@ -2114,7 +2129,7 @@ struct Mesh : public PhysicsModule {
         mhd_NAD_b(pv.det_new, pv.det_old, pv.troubles, cfg.nad_tolerance,
                   nd, b0.nad_gscale);
         mhd_PAD_b(pv.U_new_fv, pv.troubles);
-        return update_cascade_b(pv.troubles, pv.mhd_cascade, 2);
+        return update_cascade_b(pv.troubles, pv.mhd_cascade, cfg.mood_max_level);
         }
     }
 
@@ -2170,10 +2185,12 @@ struct Mesh : public PhysicsModule {
                 //Only the levels the assembly can read. See pinned_level().
                 if(cascade_level_live(1))
                     mhd_fv_fluxes_b(pv.W_fv,F1,Bn,U1, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                    fvzc_p,fvz_p, dim, true);
+                                    fvzc_p,fvz_p, dim, true,
+                                    blocks[0].wt, 0, dt);
                 if(cascade_level_live(2))
                     mhd_fv_fluxes_b(pv.W_fv,F2,Bn,U2, fvxc_p,fvx_p,fvyc_p,fvy_p,
-                                    fvzc_p,fvz_p, dim, false);
+                                    fvzc_p,fvz_p, dim, false,
+                                    blocks[0].wt, 0, dt);
             }
             const int d1=(dim==_z_?_x_:(dim==_y_?_z_:_y_));
             const int d2=(dim==_z_?_y_:(dim==_y_?_x_:_z_));
@@ -2220,9 +2237,18 @@ struct Mesh : public PhysicsModule {
         if constexpr (!is_mhd) return;
         else {
         const bool az = cfg.active[_z_];
-        mhd_riemann_solver_b(pv.U_ader_fp_x, pv.F_ader_fp_x, _x_);
-        mhd_riemann_solver_b(pv.U_ader_fp_y, pv.F_ader_fp_y, _y_);
-        if(az) mhd_riemann_solver_b(pv.U_ader_fp_z, pv.F_ader_fp_z, _z_);
+        //Same split as the per-block MHD_ader::Riemann_Solver: under UCT the face
+        //solve also emits the MDZ21 a/d coefficients, and under 2sweep an empty
+        //view switches that branch off via want_uct.
+        if(mhd_use_uct()){
+            mhd_riemann_solver_b(pv.U_ader_fp_x, pv.F_ader_fp_x, _x_, {}, pv.UCT_fp_x);
+            mhd_riemann_solver_b(pv.U_ader_fp_y, pv.F_ader_fp_y, _y_, {}, pv.UCT_fp_y);
+            if(az) mhd_riemann_solver_b(pv.U_ader_fp_z, pv.F_ader_fp_z, _z_, {}, pv.UCT_fp_z);
+        }else{
+            mhd_riemann_solver_b(pv.U_ader_fp_x, pv.F_ader_fp_x, _x_);
+            mhd_riemann_solver_b(pv.U_ader_fp_y, pv.F_ader_fp_y, _y_);
+            if(az) mhd_riemann_solver_b(pv.U_ader_fp_z, pv.F_ader_fp_z, _z_);
+        }
         }
     }
 
@@ -2248,6 +2274,19 @@ struct Mesh : public PhysicsModule {
         if constexpr (!is_mhd) return;
         else {
         const bool az = cfg.active[_z_];
+        if(mhd_use_uct()){
+            //One UCT composition per edge family, replacing both sweeps. Pack
+            //views, so it is one launch over every block (rule 1). sp_to_fp is
+            //the same matrix on every block -- level-independent, since each
+            //block carries the same point count -- so blocks[0]'s is the pack's.
+            Matrix sp_to_fp = blocks[0].sp_to_fp;
+            mhd_uct_edge_E_b(pv.Ez_ep_xy, pv.UCT_fp_x, pv.UCT_fp_y, sp_to_fp, _z_);
+            if(az){
+                mhd_uct_edge_E_b(pv.Ey_ep_zx, pv.UCT_fp_z, pv.UCT_fp_x, sp_to_fp, _y_);
+                mhd_uct_edge_E_b(pv.Ex_ep_yz, pv.UCT_fp_y, pv.UCT_fp_z, sp_to_fp, _x_);
+            }
+            return;
+        }
         if(az) mhd_E_riemann_solver_b(pv.Ey_ep_zx, _x_, 4);
         mhd_E_riemann_solver_b(pv.Ez_ep_xy, _x_, 3);
         mhd_E_riemann_solver_b(pv.Ez_ep_xy, _y_, 4);
@@ -2361,12 +2400,12 @@ struct Mesh : public PhysicsModule {
             PHASE("sd/B_to_U");
             if(mhd_batched(64))
                 mhd_B_to_U_b(pv.U_sp, pv.Bx_fp_x, pv.By_fp_y, pv.Bz_fp_z,
-                             blocks[0].fp_to_sp);
+                             blocks[0].fp_to_sp, /*cons=*/true);
             else
                 for(int b=0;b<nblocks;b++)
                     mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
                                blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
-                               blocks[b].Tz_, blocks[b].fp_to_sp);
+                               blocks[b].Tz_, blocks[b].fp_to_sp, /*cons=*/true);
         }
         if(!sd_dead){
         { PHASE("sd/Riemann_Solver");
@@ -2593,12 +2632,12 @@ struct Mesh : public PhysicsModule {
             //Advance_mhd; this call site was still the per-block loop.
             if(rk_batched())
                 mhd_B_to_U_b(pv.U_sp, pv.Bx_fp_x, pv.By_fp_y, pv.Bz_fp_z,
-                             blocks[0].fp_to_sp);
+                             blocks[0].fp_to_sp, /*cons=*/true);
             else
                 for(int b=0;b<nblocks;b++)
                     mhd_B_to_U(blocks[b].U_sp, blocks[b].Bx_fp_x, blocks[b].By_fp_y,
                                blocks[b].Bz_fp_z, blocks[b].Tx_, blocks[b].Ty_,
-                               blocks[b].Tz_, blocks[b].fp_to_sp);
+                               blocks[b].Tz_, blocks[b].fp_to_sp, /*cons=*/true);
         }
         return TaskStatus::complete;
     }
@@ -3396,10 +3435,18 @@ struct Mesh : public PhysicsModule {
         //block's neighbours, so the ghosts the snapshots carry have to describe
         //this state and not the last stage's. Free for p >= 1, whose matrix
         //prolongation reads the element only.
-        if(Xd[0].p == 0){
+        if(Xd[0].p == 0 || is_mhd){
             STAGE("amr/pre_exchange");
-            for(int dim=0; dim<3; dim++)
-                if(cfg.active[dim]) Exchange_sd_field(&Block::U_sp, dim);
+            if(Xd[0].p == 0)
+                for(int dim=0; dim<3; dim++)
+                    if(cfg.active[dim]) Exchange_sd_field(&Block::U_sp, dim);
+            //The face-B prolongation reads the coarse block's transverse
+            //neighbours (prolongate_shared_face_B_const, now limited-linear), so
+            //its ghosts have to describe THIS state -- the same reason U_sp is
+            //exchanged above. The snapshot copies ghosts, so it has to happen
+            //before the capture.
+            if constexpr (is_mhd)
+                if(forest.max_level()>0) Exchange_face_B_mhd();
         }
         std::vector<BlockSnap> snap(nblocks);
         { STAGE("amr/snapshot");
