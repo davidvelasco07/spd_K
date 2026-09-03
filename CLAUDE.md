@@ -152,6 +152,21 @@ fraction) and 4 (|B| Löhner) still take the per-block path. Mirrors are for set
 - **Update kernels write ACTIVE elements only** (`sd_for_active_cells`). Advancing
   the ring integrates values nothing ever wrote; it was 21% of the loop in 2D, 30%
   in 3D, 47% at 16x16x4.
+- **SD sub-cells are NOT equally spaced, so never `imshow` an SD field.** The FV
+  sub-cells of an element are the control volumes of the solution points.
+  Measured widths within ONE element: `[0.0070, 0.0242, 0.0242, 0.0070]` at p=3
+  (3.4x ratio) and an 8.0x span at p=7. `imshow` gives every cell the same pixel
+  width, so it stretches the element-edge cells by that factor and squeezes the
+  interior ones -- the SDFB panels came out faceted and mottled, worst at p=7,
+  and it read as a defect in the solution. Average onto regular control volumes
+  first (`mdz21_diagnostics.to_regular`, an exact area-weighted rebin: identity
+  on the source faces, rows summing to 1, integral preserved to 1.4e-16) and draw
+  with `pcolormesh` on `regular_faces`. This is the cell-average analogue of the
+  Python spd's `interpolate_to_regular_mesh`, which Lagrange-interpolates the
+  solution POINTS to regular sub-cell midpoints and plots on `regular_faces`.
+  `pcolormesh` on the true `centers` is nearly right (it honours the spacing but
+  puts edges at midpoints between centres); `imshow` is simply wrong. Scalar
+  diagnostics were never affected -- they integrate with `grid.widths()`.
 - **Goldens compare the active region** (`golden_active`). Ghost content at output
   time is a post-update leftover, is not part of the solution, and is not portable
   across backends: it is the entire content of the field-loop "GPU/CPU divergence"
@@ -191,10 +206,153 @@ Instrument-specific traps, all real:
   refills that slot); and on a single-block mesh `TaskPoison` never executes at
   all, so the obvious config to try tests nothing. `SPD_POISON_ACTIVE=1` is the
   control that works (aborts).
+- **An unknown check name in `run_tests.py` used to print a PASS for a check that
+  never ran.** The `if/elif` dispatch chain had no final `else`, so an
+  unrecognised name fell through with `ok, msg` still holding the PREVIOUS
+  check's values and printed them a second time under the new name. Adding
+  `"mass"` and `"finite"` (neither is a dispatched name; `check_finite` already
+  runs unconditionally) made the suite print each real check TWICE, all green.
+  A typo in any config would have manufactured a gate that cannot fail. Now an
+  unknown name is a hard FAIL that lists the valid ones.
+- **`mass_strict` and `divb` are ABSOLUTE gates, so they are only calibrated for
+  the problem they were written against.** Both now take a per-config override
+  (`mass_limit`, `divb_limit`, matching `cf_limit`). Raise one ONLY with the
+  control measured and written into the config:
+  - `divb`: the 3D blast has B0 = 28.2 and a sub-cell dx of 0.031, so its
+    2.1e-11 is 2.3e-14 RELATIVE -- the same CT quality the 2D configs show at
+    1e-11 absolute.
+  - `mass_strict`: gradfree boundaries extrapolate and do not conserve. The
+    identical IC run with PERIODIC walls drifts 4.7e-15 while the outflow
+    version drifts 1.3e-10, which localises the leak to the boundary rather
+    than the scheme. Run that control before touching the number.
 - A pack view that nobody assigned is a silent empty view. `fv_pack_view` aborts
   on a name missing from the pack, not on a `pv` field you forgot — writing
   through it segfaults (`pv.troubles` for MHD was assigned past the `return` that
   ends the MHD branch).
+
+## 7b. With the cascade live, cell values are NOT reproducible across backends
+
+The MOOD detector is a THRESHOLD. A round-off difference flips one cell's
+troubled flag, and a flipped flag changes that cell's scheme by O(1) -- so
+round-off does not stay round-off. Measured on the 3D blast (MDZ21 6.4,
+beta ~ 2.5e-4, 32^3 DoF, CPU vs A100, active region only):
+
+| configuration | worst rel CPU-GPU diff |
+|---|---|
+| t = 0 (the IC itself) | 2.6e-14 |
+| cascade live, after 12 steps | **2.1e-01** |
+| cascade live, after 24 steps | 1.2e-01 |
+| pinned `mood_force_level=1` (MUSCL, no decisions) | **2.8e-14** |
+| volume-integrated E_B, cascade live | 4.1e-06 |
+| total mass, cascade live | 1.1e-10 (both) |
+
+**Pinning the cascade is how you tell flag chaos from a backend bug.** The
+pinned lane agreeing to 2.8e-14 is what proved the 21% spread was NOT a GPU
+defect -- and this codebase has had real ones (see
+`.cursor/rules/kokkos-no-uvm.mdc` and the mirror push-without-pull class), so
+the question is not rhetorical. Do that A/B before concluding either way.
+
+Consequences: do not put a golden on a cascade-live config that must run on more
+than one backend; compare INTEGRALS (they survive at 1e-6) not cells; and read
+any pointwise cross-backend difference as a flag-flip count until pinning says
+otherwise. `mood_force_level >= 0` also makes `mood/detect` read 0.000 s and
+returns from `mood_detect` immediately (rule 2) -- that is the same switch.
+
+## 7c. The energy correction works, but ONLY at a stage boundary
+
+spd_K replaces a state's B rows with the CT field in three places without moving
+the total energy, so `p = (g-1)(E - Ekin - B^2/2)` is then read off a B that E was
+never built from: `mhd_B_to_U` (the END OF A STAGE), `mhd_set_candidate_B` and
+`mhd_face_B_to_fp` (both MID-UPDATE). At beta ~ 1 that is noise; on MDZ21 6.4
+(beta ~ 2.5e-4) the thermal energy is 0.06% of the magnetic and the residual
+swamps it -- 15% of the domain ends on the RAMSES smallp, carrying AMBIENT
+density and field.
+
+`mhd/energy_fix` is a BITMASK over those sites (1 SD, 2 FV, 4 fp; 0 = off,
+bit-identical). 96^3 DoF, UCT-HLLD, five COMPLETED runs at the same output:
+
+| mask | site | floored | steps |
+|---|---|---|---|
+| 0 | none | 19.94% | 488 |
+| **1** | **SD `B_to_U`, end of stage** | **0.02%** | 469 |
+| 2 | FV `set_candidate_B`, mid-update | 23.20% | 482 |
+| 4 | fp `face_B_to_fp`, mid-update | 19.95% | 487 |
+| 7 | all three | 0.00% | 474 |
+
+**Use mask 1.** At a stage boundary the cell-centred B is discarded garbage and
+swapping it wholesale is the intended operation. Mid-update it is a working
+value, and "correcting" around it ADDS an inconsistency -- the FV site alone is
+worse than doing nothing.
+
+**THE SIGN IS THE WHOLE THING.** Keeping the recovered pressure fixed across the
+swap needs `E <- E + (Bf^2 - Bc^2)/2`, i.e. strip the OLD magnetic energy before
+the swap and add the NEW one after. The first implementation here had it
+backwards (`+ (Bc^2 - Bf^2)/2`), which DOUBLES the mismatch: the stage-boundary
+site then made the floors worse, 19.94% -> 25.52%, and this rule previously
+recorded the correction as a measured FAILURE. Derive the sign from "the recovered
+p must not move", not from the paper's formula as remembered.
+
+**A second process failure worth not repeating.** The first production check
+reported a 35% improvement that did not exist: it compared
+`output_indices(d)[-1]` of both runs while one had not finished -- output 7 of
+the fix against output 10 of the baseline -- and the floored fraction grows
+monotonically with time. `run_tests.py`/`mdz21_report.py` refuse incomplete runs
+for exactly this reason; the ad-hoc script bypassed that gate. **Any ad-hoc
+comparison must check for the `evolution:` line, not just take the last dump.**
+
+## 7d. The first-order tier is PAD-driven, not detector noise
+
+SDFB can finish WORSE than the scheme it falls back to: on RR22 KH under
+UCT-HLL, SDFB4 reaches <B_p^2> = 1.0004 against plain MUSCL's 1.1290 -- no
+growth at all. That is only possible because the cascade goes PAST MUSCL to
+first order: 3.68% of cells at level 2 against 4.95% at level 1, i.e. nearly
+half of all demotions go the whole way.
+
+The obvious diagnosis -- a twitchy NAD flagging smooth flow -- is WRONG, and
+`mhd/mood_pad_first_order` was built to test it: it lets only a PAD failure
+(negative rho/p, non-finite) reach first order, while a NAD flag alone stops at
+MUSCL. MEASURED, it is a NO-OP on both the current sheet and KH -- identical
+energy and identical level-1/level-2 fractions to every digit. **Every level-2
+demotion there is already PAD-driven**: the MUSCL candidate is physically
+inadmissible in those cells, and NAD never gets a say. (The switch is not dead
+code -- it does move the balsara blast, which has NAD-driven level-2 cells.)
+
+`mhd/mood_max_level` caps the cascade (1 = stop at MUSCL). The result is
+problem-dependent, which is the tell that first order is load-bearing:
+
+| | current sheet (exact = 1) | KH under UCT-HLL (MUSCL = 1.1290) |
+|---|---|---|
+| allow first order | **0.9527** / 0.4651 | 1.0004 / 1.0010 |
+| cap at MUSCL | 0.5535 / 0.2240 | **2.4268** / **1.6391** |
+
+Capping HELPS on KH and HURTS on the current sheet. Denying those cells the
+tier they need makes them get FLOORED instead, which is less destructive to a KH
+instability than donor cell but far worse on an under-resolved current sheet.
+
+So the lever is not the detector. Either loosen the tolerance (1e-3 gives
+0.9991/0.9993 on the sheet and 5.40/5.76 on KH -- better than any max_level at
+the default), or make the level-1 candidate itself positivity-preserving so it
+stops failing PAD.
+
+**A domain-averaged demotion rate is the wrong statistic.** Under UCT-HLL at
+t = 10, SDFB4 demotes 7.04% of the domain but 27.37% INSIDE the shear layer -- a
+3.9x enrichment, 6.3x at p=7. An earlier version of this file ruled the cascade
+out on the strength of a 0.01-0.12 mean level. Ask where it fires.
+
+## 7e. Output cadence must never drive the timestep
+
+`driver.hpp` and `hydro_ader.hpp` used to do `dt = t_output - t` unconditionally,
+so an `output/dt` SMALLER than the timestep set dt = output/dt EVERY step: the
+run then takes t_end/output_dt steps and writes a dump on each one. Measured the
+expensive way -- `output/dt=1e-9 tlim=1.0` wrote **740 GB**, twice, filling the
+apollo filesystem and breaking an unrelated build (`nvcc fatal: Could not open
+output file '/tmp/...'`). Both drivers now (a) anchor the schedule to multiples
+of dt_output rather than to the time reached, and (b) warn and write every step
+instead of shrinking dt.
+
+`time/nlim = 0` reads as "zero steps" and was NOT: the cap is `cfg.nlim > 0`, so
+0 fell through as unlimited. That is half of how the above happened. It is now a
+hard error pointing at -1.
 
 ## 8. Coarse-fine EMF: restrict along the edge, inject across it
 
@@ -244,9 +402,63 @@ two things at once -- the wrong matrix (`amr_RF` where the reference uses
   the src md5 at launch.
 - `nvcc` is not on `PATH` over non-interactive ssh: `export PATH=/usr/local/cuda/bin:$PATH`,
   or cmake fails with a bogus `string sub-command REPLACE` error from Kokkos.
+- **The full working apollo configure line** (the default toolchain does not
+  work, in two separate ways, and both errors point somewhere unhelpful):
+
+  ```
+  export PATH=/usr/local/cuda/bin:$PATH
+  cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++ \
+        -DCMAKE_CXX_FLAGS=-I/opt/sns/mpich-3.3/include \
+        -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON -DKokkos_ENABLE_CUDA_LAMBDA=ON
+  ```
+
+  The default `g++` is 8.5 and Kokkos rejects it with "CMake wants to use
+  -std=c++2a which is not supported by NVCC", which reads like an nvcc problem
+  and is a host-compiler one. `find_package(MPI)` then fails its compile check
+  against gcc-toolset-12, but `spd_k.hpp` only needs `mpi.h` (every MPI CALL is
+  behind `#ifdef MPI`), so the include path alone is enough -- do not chase the
+  MPI detection. Nodes are A100 (AMPERE80); the `h200` partition would need a
+  separate HOPPER90 build.
+- Apollo has SLURM (`-p apollo --gres=gpu:1`, 8 GPUs/node, 7-day limit) AND two
+  idle A100s on the login node. Use the queue for anything long; the login GPUs
+  are for probes and short runs.
 - Incremental builds go stale on `structs.hpp`/`define.hpp`: delete the objects
   (`rm -f build/CMakeFiles/spd_K.dir/src/*.o`), not the `.dir`.
 - Dumps go to `$SPD_OUTPUT_DIR`, defaulting to `<cwd>/output/`.
+
+## 9b. CFL limits depend on p AND on time/cfl_type, and only an exact solution proves one
+
+`time/cfl` defaults to 0.4, which is the p=3 limit **under the default
+`cfl_type=sum`**. Both halves of that sentence matter. Measured on the
+unperturbed Harris current sheet (`problem=current_sheet`, `problem/p1=0`), which
+is an EXACT stationary solution, so any motion is the scheme going unstable
+(64 DoF in y, t=0.5, round-off ~6e-13):
+
+| cfl | p=3 min | p=3 sum | p=7 min | p=7 sum |
+|---|---|---|---|---|
+| 0.50 | 2.6e-01 | 6.3e-13 | collapse | 1.3e-01 |
+| 0.40 | 1.3e-02 | 6.3e-13 | collapse | 3.0e-14 |
+| 0.30 | 6.3e-13 | 6.3e-13 | collapse | 2.5e-14 |
+| 0.25 | 6.3e-13 | 6.3e-13 | 1.3e-01 | 3.0e-14 |
+| 0.20 | 6.3e-13 | 6.4e-13 | 1.9e-14 | 4.0e-14 |
+
+p=3 needs <= 0.30 under `min` and holds 0.5 under `sum`; p=7 needs <= 0.20 under
+`min` and <= 0.40 under `sum`.
+
+**Use a problem whose exact answer you know.** An earlier probe ran Orszag-Tang
+and asked "did dt collapse?", and reported p=7 stable at 0.30 under `min`. That
+is wrong by a factor of 1.5: the run was quietly unstable long before the guard
+fired. On the equilibrium the same configuration shows 1e-01 of spurious
+velocity where the answer is exactly zero. A stability limit measured by
+absence-of-catastrophe is not measured.
+
+**And say which cfl_type a limit was measured under.** `min` gives a ~1.79x
+larger dt than `sum` at the same nominal cfl (measured on the figure-22 KH lane),
+so a limit quoted without the convention is off by that factor. This bit the
+MDZ21 decks: they were written with `cfl_type=min, cfl=0.4`, which is past the
+p=3 limit, and the current-sheet equilibrium grew 1.3e-02 of velocity out of
+nothing until the convention was fixed.
 
 ## 10. Kokkos policy
 

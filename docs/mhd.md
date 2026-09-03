@@ -15,28 +15,59 @@ while the divergence-free magnetic field lives on the cell faces and is evolved
 by CT from edge electromotive forces. Edge points are classified by how many
 element interfaces they lie on:
 
-| Edge point | Discontinuous normals | Edge EMF (`rsolver = hlld`) |
+### Two knobs: the face solver and the electromotive force
+
+`mhd/rsolver` picks the **face** Riemann solver — `llf` (default), `hll`, or
+`hlld` — and `mhd/emf` picks how the **edge/corner** electromotive force is
+built:
+
+| `mhd/emf` | SD edges | MOOD demoted corners |
 |---|---|---|
-| Interior to an element | none | polynomial `E = v×B` from `mhd_compute_E` |
-| Mid-face element interface | one | **1D UCT** (face HLLD weights along that normal) |
-| 4-element corner | two | **2D UCT** (MDZ composition from both face families) |
+| `2sweep` (default) | two sequential 1-D edge Riemann sweeps (`v_index` 3 then 4) | four-state LLF bound (`mhd_four_state_E`) |
+| `uct` | one UCT composition per edge family (`mhd_uct_edge_E`, MDZ21 eq. 33) | `mhd_uct_corner_E` |
 
-With `mhd/rsolver = llf` the high-order SD edges stay on the legacy two
-sequential 1-D edge sweeps (`llf_E`, `v_index` 3 then 4).
+Under `emf = uct` the face solve also emits the five MDZ coefficients
+`(aL, dL, dR, vt1, vt2)` on the face flux-point lattice, and the edge EMF is
+composed from the two adjacent face fans at once instead of upwinding one
+direction after the other. The UCT *flavour* therefore follows `mhd/rsolver`:
+`hll` gives **UCT-HLL** (MDZ21 eq. 28/32) and `hlld` gives **UCT-HLLD**
+(eq. 44/45). It is refused under `llf`, which is a single-speed bound with no
+fan to read the coefficients off.
 
-`mhd/rsolver = hlld` selects HLLD for SD face fluxes and for the MOOD FV face
-fluxes. SD face HLLD overwrites the normal `B` with the CT face field (never
-reconstructed) and stores UCT coefficients `(aL,dL,dR,vt1,vt2)` on the face
-flux-point lattice. The high-order SD edge EMF then uses the same AthenaK /
-MDZ UCT formula as the MOOD demoted corners (Mignone & Del Zanna 2021 /
-Berta+2024, sign-flipped to the spd `E = v×B` convention): for each edge
-point, discontinuous axes take L/R neighbour states from the pre-Riemann edge
-array plus `(a,d)` interpolated from the adjacent face HLLD solves; continuous
-axes collapse to the local `mhd_compute_E` state with `a = 1/2`, `d = 0`. No
-second HLLD sweep is applied at SD edges when `rsolver = hlld`. With
-`rsolver = llf` the MOOD low-order corner E stays the four-state LLF bound.
-Forced-MUSCL and full SD+FB Orszag–Tang at `p=3`, `N=32²` with HLLD+UCT both
-run cleanly to `t=1`.
+`SPD_EMF_TRACE=1` prints which EMF path each call actually takes. Use it: this
+tree shipped `mhd/rsolver = hlld` while **both** UCT kernels had zero call sites
+and an earlier version of this section described them as live. What ran was
+HLLD faces plus a second HLLD *edge* sweep — the direction-by-direction
+upwinding that UCT exists to replace.
+
+**Current limits of `emf = uct`**, both measured:
+
+- **Single block only.** The face coefficients are not haloed, so a ghost
+  element's outer face is never written and the edge composition reads it; the
+  answer then depends on the block decomposition (2.3e-04 on Orszag-Tang at
+  16² by t=0.03, against exactly 0 for `2sweep`). `main.cpp` refuses a
+  meshblock/AMR run rather than emit a layout-dependent number.
+Both the SD edges and the demoted corners conserve mass to round-off. Measured
+on Orszag-Tang 16² to t=0.15 against a 1e-12 limit (two-sweep reference
+1.708e-14):
+
+| lane | UCT-HLLD | UCT-HLL |
+|---|---|---|
+| level 0 (SD) | 1.733e-14 | 1.720e-14 |
+| level 1 (MUSCL, `job/scheme=plm`) | 1.708e-14 | 1.708e-14 |
+| level 2 (first order) | 1.683e-14 | 1.683e-14 |
+| cascade (live) | 1.720e-14 | 1.720e-14 |
+| pure SD (`job/fallback=false`) | 8.036e-15 | 8.036e-15 |
+
+Getting there needed two halos that the corner composition reads and nothing
+filled: `mood_halo_face_B` (the face fields' TRANSVERSE ghosts — it existed with
+zero callers) and a second `apply_E_boundaries` after the composition, because
+UCT cannot reproduce a periodic ghost value on its own the way the symmetric
+two-sweep solver can. `SPD_MASS_DBG=1` prints the mass across each stage commit
+plus a periodicity residual for every array in the chain
+`cascade → E1z/E2z → E0z → Bx_old/By_old → F0x/F0y`; the first nonzero entry is
+the source. `SPD_UCT_CORNER_OFF=1` builds demoted corners with the four-state
+bound instead, as an A/B.
 
 Time integration is SSP-RK (`rk1`–`rk3`); ADER MHD is not ported yet. The
 module supports 3D and **true 2D** (`mesh/nx3 = 1`, x-y plane; matching the
