@@ -3,10 +3,25 @@
 # 2025 (ApJ 988, 134; arXiv:2506.11181) section 8.2 / figure 11.
 #
 # Domain [-0.5,0.5] x [0,1.5]; spd_K is origin-anchored so that is [0,1] x [0,1.5]
-# with the nozzle at cx = 0.5. Ambient rho = 0.14, p = 1, v = 0; the nozzle
-# (|x - cx| < 0.05) injects rho = 1.4 at vy = 800. Outflow boundaries; the nozzle
-# state is re-imposed at the lower boundary each step (mhd_ic_jet_inflow).
+# with the nozzle at cx = 0.5. Ambient rho = 0.14 (= 0.1*gamma), p = 1, v = 0;
+# the nozzle (|x - cx| < 0.05) injects rho = 1.4 (= gamma) at vy = 800.
 # t = 0.002, 400 x 600 zones, and the paper uses a sixth-order scheme.
+#
+# BOUNDARIES, as Wu & Shu (2018) specify them and section 8.2 defers to: the
+# fixed inflow state on {y = 0, |x| < 0.05}, and OUTFLOW everywhere else --
+# including the rest of the base. x2_bc = inflow is exactly that pair.
+# Two things about that face had to be got right, and both are measured on the
+# ambient control (this deck with problem/d1=d0 and problem/v2=0, which makes
+# the quiescent ambient an exact stationary solution):
+#   - it must NOT be a reflecting wall outside the nozzle. B is NORMAL to this
+#     base, and a conducting wall flips the normal field: the control's dt
+#     collapsed to 1e-6 of dt0.
+#   - the inlet's normal field must be PINNED (mhd_pin_bc_emf_fv). Left free it
+#     is advanced from an extrapolated EMF and destroyed -- B_y on the base row
+#     went 141.42 -> 1308, |B|^2 to 2.17e+06 at y = 0 against the paper's
+#     1.9e+05 in the bow shock, and the over-pressured base pushed material
+#     back in at a mean v_y of 435. With the pin: 0.98, and |B|^2 peaks in the
+#     bow shock where it belongs.
 #
 # FIELD NORMALISATION, as for the blast: the paper's "Ba = 20000" is the
 # magnetic-pressure normalisation, not the field itself. beta_a = 2 p / B^2 = 1e-4

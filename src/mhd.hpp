@@ -48,6 +48,7 @@ extern void mhd_face_B_to_fp(SD_Solution U_fp, SD_Solution B_fp, int dim);
 extern void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
                            Matrix sp_to_fp, int edim);
 extern void mhd_zero_wall_emf(SD_Solution E, int wall);
+extern void mhd_pin_bc_emf_fv(FV_Solution E, int wall);
 extern double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz);
 
 // CT coupling kernels (mhd.cpp): edge EMF from fluid velocity + face B
@@ -853,6 +854,31 @@ struct MHD_ader : public PhysicsModule {
             mhd_assign_edge_E(E0y,E1y,E2y,cascade,_y_);
         }
         mhd_assign_edge_E(E0z,E1z,E2z,cascade,_z_);
+        //Boundary EMF condition on the assembled FV-lattice edge E, before
+        //mood_ct_update applies the curl. Reflecting walls and prescribed
+        //inlets both need their normal face field held fixed; see
+        //mhd_pin_bc_emf_fv. No-op on periodic/outflow, so this does not move
+        //any existing configuration.
+        //
+        //standalone_ ONLY, and that guard is load-bearing rather than lazy:
+        //mhd_pin_bc_emf_fv pins the first/last node of the array it is handed,
+        //which is the DOMAIN boundary only when the block IS the domain. Under
+        //Mesh it would pin an interior block's internal edge. Doing it there
+        //needs the per-block "touches the domain boundary" flags, the way the
+        //cf/ corrections take their transactions off xtfi_.
+        //
+        //Consequence, stated rather than hidden: a MULTIBLOCK job/scheme=plm
+        //run against a reflecting wall still has no FV boundary EMF condition.
+        //x2_bc=inflow is standalone-and-jet-only (hard error otherwise, see
+        //the BC_fp_y init above), so the inlet half is fully covered.
+        if(standalone_){
+            mhd_pin_bc_emf_fv(E0z,_x_);
+            mhd_pin_bc_emf_fv(E0z,_y_);
+            if(cfg.active[_z_]){
+                mhd_pin_bc_emf_fv(E0x,_y_); mhd_pin_bc_emf_fv(E0x,_z_);
+                mhd_pin_bc_emf_fv(E0y,_z_); mhd_pin_bc_emf_fv(E0y,_x_);
+            }
+        }
     }
     // Candidate CT face-B update from the assembled edge E: resets the FV-face
     // copy from the stage face field, applies the curl (writes the copy in

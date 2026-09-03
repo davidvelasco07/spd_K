@@ -45,6 +45,15 @@ void indices(int* N_id, int* n_id, int k, int j, int i, int kk, int jj, int ii, 
     n_id[_z_] = dim == _z_ ? ll : kk;
 }
 
+//SPD_JET_BASE_WALL=1 restores the reflecting-wall fallback outside the nozzle
+//for an _inflow_ face. It is a REFERENCE, kept so the choice of default can be
+//re-measured in one binary; it is broken (see the _inflow_ branch) and must not
+//be a production setting.
+static inline bool jet_base_wall(){
+    static const bool v = getenv("SPD_JET_BASE_WALL") != nullptr;
+    return v;
+}
+
 void boundaries(
     CommHelper comm,
     Boundaries BC,
@@ -60,6 +69,7 @@ void boundaries(
     int nvar  = BC.nvar;
     const bool mhd = BC.mhd;
     int type = BC.type;
+    const bool wall_off_nozzle = jet_base_wall();
     int N = BC.N;
     int n = BC.n;
     int dim = BC.dim;
@@ -103,18 +113,57 @@ void boundaries(
             if(BC.InflowL(t_id,0,k,j,i,kk,jj,ii) >= 0.0){
                 BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) =
                     BC.InflowL(t_id,var,k,j,i,kk,jj,ii);
-            } else {
-                //Outside the nozzle the low face is a WALL, not an exit. A jet
-                //emerges from a nozzle in a solid surface, and an open base lets
-                //the bow shock's pressure drive material back IN: measured with
-                //a plain outflow there, the mean v_y on the bottom row outside
-                //the nozzle reached 727 INTO the domain against an injected 800,
-                //and the solution became a broad fan rather than a collimated
-                //beam. Reflecting is both the physical boundary and the stable
-                //one -- the no-reentry clamp on an outflow collapsed dt 400x.
+            } else if(wall_off_nozzle){
+                //REFERENCE ONLY, and MEASURED BROKEN -- see the outflow branch
+                //below. Kept behind SPD_JET_BASE_WALL=1 as the A/B against
+                //which the default was chosen.
                 double sgn = (var == 1+dim || (mhd && var == 5+dim)) ? -1.0 : 1.0;
                 indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
                 BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = sgn*U.Vector(INDICES);
+            } else {
+                //Outside the nozzle the low face is OUTFLOW: the plain
+                //zeroth-order copy, exactly as define.hpp documents.
+                //
+                //It was briefly a reflecting WALL, on the reasoning that a jet
+                //emerges from a nozzle in a solid surface. That is wrong here,
+                //and not marginally: _reflective_ flips the NORMAL magnetic row
+                //(5+dim), which is only the conducting-wall condition when
+                //B.n = 0 on that wall. This jet's field is NORMAL to its base
+                //with |B_y| = 141.42, so the flip puts a jump of 2*141.42 in the
+                //normal field straight into the y-face Riemann problem -- a
+                //div-B violation by construction, and HLLD is not well posed on
+                //one.
+                //
+                //MEASURED on the AMBIENT CONTROL (the same deck with
+                //problem/d1=d0 and problem/v2=0, so the quiescent ambient is an
+                //EXACT stationary solution and any motion is boundary error),
+                //100x150 DoF, PLM+RK2:
+                //   wall outside the nozzle : dt COLLAPSED to 9.8e-07 of dt0 at
+                //                             step 1404; max|v| 9.5e+03
+                //   outflow outside nozzle  : 384 steps, max|v| = 2.8e-10
+                //   whole base clamped      : 384 steps, max|v| = 1.5e-03
+                //The wall's failure is an exponential instability seeded at
+                //round-off: max|v| grows ~10x per 1.2e-4 of time from 2e-10,
+                //always on the BOTTOM ROW and in the wall region (x ~ 0.9, far
+                //from the nozzle at x ~ 0.5), with tangential B_x generated in
+                //lockstep. Round-off in, 1e4 out.
+                //
+                //Outflow is also what the problem SPECIFIES: Wu & Shu (2018),
+                //whom Balsara et al. 2025 section 8.2 defers to for the setup,
+                //prescribe the fixed jet state on {y = 0, |x| < 0.05} "while
+                //the other boundary conditions are outflow".
+                //
+                //The earlier verdict that a plain outflow base "sucks material
+                //in" (mean v_y ~ 727 inward outside the nozzle) was REAL -- it
+                //reproduces here at 435 -- but its cause is not the fluid
+                //boundary. It was the inlet's normal FIELD being advanced from
+                //an extrapolated EMF, which drove |B|^2 at the base to 2.17e+06
+                //and over-pressured it. Pinning the inlet EMF
+                //(mhd_pin_bc_emf_fv) takes that same number to 0.98 with the
+                //base still a plain outflow. Fix the field condition, not the
+                //fluid one.
+                indices(Nid,nid,k,j,i,kk,jj,ii,  1,  0,dim);
+                BC.BoundaryL(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
             }
             indices(Nid,nid,k,j,i,kk,jj,ii,N-2,n-1,dim);
             BC.BoundaryR(t_id,var,k,j,i,kk,jj,ii) = U.Vector(INDICES);
@@ -416,6 +465,7 @@ void boundaries(
     int Ny = BC.Ny-(a_dim==_y_)*(alignment-shift);
     int Nz = BC.Nz-(a_dim==_z_)*(alignment-shift);
     int type = BC.type;
+    const bool wall_off_nozzle = jet_base_wall();
     int N = BC.N;
     //Runtime halo width: nGH_rt is the one source of truth for how many ghost
     //layers exist, and BC.Nx/Ny/Nz were sized from it. Reading the compile-time
@@ -452,11 +502,17 @@ void boundaries(
             //outflow elsewhere on the low side, outflow on the high side.
             if(BC.InflowL(0,k,j,i) >= 0.0){
                 BC.BoundaryL(var,k,j,i) = BC.InflowL(var,k,j,i);
-            } else {
-                //Wall outside the nozzle; see the SD branch.
+            } else if(wall_off_nozzle){
+                //Reference only, measured broken; see the SD branch.
                 double sgn = (var == 1+dim) ? -1.0 : 1.0;
                 fv_indices(Nid,k,j,i,2*ngh-1-l,dim);
                 BC.BoundaryL(var,k,j,i) = sgn*U.Vector(FV_INDICES);
+            } else {
+                //Outflow outside the nozzle; see the SD branch for why a
+                //reflecting wall is wrong when B.n != 0 on that wall, and for
+                //the ambient-control numbers that decided it.
+                fv_indices(Nid,k,j,i,    ngh+l+shift,dim);
+                BC.BoundaryL(var,k,j,i) = U.Vector(FV_INDICES);
             }
             fv_indices(Nid,k,j,i,N-2*ngh+l-shift,dim);
             BC.BoundaryR(var,k,j,i) = U.Vector(FV_INDICES);

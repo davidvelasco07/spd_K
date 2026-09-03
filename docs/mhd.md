@@ -104,11 +104,48 @@ divergence-free to machine precision. Two problems ship with the module:
 |---|---|
 | `orszag_tang` | Orszag-Tang vortex (Gaussian units: `rho = 25/36π`, `P = 5/12π`, `B0 = 1/√4π`), domain `[0,1]²` |
 | `field_loop` | Gardiner & Stone weak field loop (`A0 = 1e-3`, `R = 0.3`) advected by `v = (2,1,0)` |
+| `mhd_jet` | Mach-800 magnetized jet, Balsara (2012) with the field of Wu & Shu (2018). Quiescent ambient `rho = 0.1*gamma`, `p = 1`, `B = (0,sqrt(20000),0)`; the nozzle `|x-cx| < radius` on the y-min face injects `rho = gamma` at `v_y = 800`. Needs `x2_bc = inflow`, which is "prescribed state on the nozzle, outflow everywhere else on that face" -- see *Boundaries that carry a field* |
 
 ```bash
 ./build/spd_K -i inputs/orszag_tang.athinput
 ./build/spd_K -i inputs/field_loop.athinput
 ```
+
+## Boundaries that carry a field
+
+A boundary condition for MHD is two conditions, and getting the fluid one right
+is not enough: with constrained transport the NORMAL face field on a boundary is
+advanced by the CT curl like any other, so unless something says otherwise it is
+driven by an EMF extrapolated out of the interior. Two rules, both measured on
+the Mach-800 jet (`problem = mhd_jet`, `inputs/balsara/jet_wushu.athinput`).
+
+**A reflecting wall is only valid where `B.n = 0` on that wall.** `_reflective_`
+flips the normal magnetic row, which is the perfectly conducting condition and
+gives `B.n = 0` by antisymmetry. Apply it to a face the field passes THROUGH and
+it puts a jump of `2|B.n|` into that face's Riemann problem -- a div-B violation
+by construction, and HLLD is not well posed on one. The jet's field is normal to
+its base with `|B_y| = 141.42`; closing the base as a wall made the quiescent
+ambient -- an exact stationary solution -- go exponentially unstable from
+round-off, `max|v|` growing 10x per 1.2e-4 of time on the bottom row until dt
+collapsed to 1e-6 of `dt0`. Gated by `mhd_jet_base_wall_sensitive_2d`.
+
+**A prescribed inlet must pin its normal field.** A Dirichlet inlet prescribes
+the whole state, `B` included, so the tangential EMF along that face is fixed by
+the prescribed state (`mhd_pin_bc_emf_fv`, and `mhd_zero_wall_emf` on the SD
+lattice). Left free, the jet's inlet field was destroyed: `B_y` on the base row
+went from 141.42 to 1308, `|B|^2` peaked at 2.17e+06 ON the inlet row against
+the paper's 1.9e+05 in the bow shock, and the resulting magnetic pressure of
+1.1e+06 -- above the jet's own ram pressure of 9.0e+05 -- pushed material back
+into the domain at a mean `v_y` of 435. That last number is what a plain
+outflow base "sucking material in" actually was; the fix is the field condition,
+not the fluid one. With the pin the same number is 0.98 and `|B|^2` peaks in the
+bow shock. Gated by `mhd_jet_inlet_field_2d`.
+
+Both are `SPD_NO_BC_EMF_PIN=1` away from their unpinned reference. Note the FV
+half was a real gap rather than a refinement: the MOOD cascade assembles its EMF
+on the FV node lattice, and `job/scheme=plm` or `vl2` sets `cfg.fv_only` and
+never touches the SD edge arrays at all -- so that lane previously had NO
+boundary EMF condition of any kind, on walls as well as inlets.
 
 ## MOOD cascade fallback
 

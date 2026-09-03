@@ -565,6 +565,105 @@ CONFIGS = {
         "field": "W_cv_N8p3_2_0.dat",
         "t_end": 0.002,
     },
+    # ------------------------------------------------------------------
+    # Balsara et al. 2025 section 8.2 / Wu & Shu (2018) Mach-800 magnetized
+    # jet. Four configs: two gates and the negative control each one needs.
+    #
+    # There was NO jet configuration in this suite, which is why a test that
+    # had never once worked went unnoticed through several rounds of MHD work.
+    # Both gates are cheap (a few seconds) because they are pinned to MUSCL:
+    # mhd/mood_force_level=1. That is deliberate -- the SD cascade at
+    # beta = 1e-4 carries its own 1e-02 of error on the quiescent ambient
+    # (measured: 1.15e-02 SD vs 1.40e-10 MUSCL, and pure outflow is worse
+    # still at 3.58e-02), so an SD lane would drown the boundary signal these
+    # gates are for. The SD error is a real and separate issue; see
+    # CLAUDE.md 7c on reading pressure off a swapped B at beta << 1.
+    "mhd_jet_base_equilibrium_2d": {
+        # The jet deck with the injection turned OFF (problem/d1 = d0 and
+        # problem/v2 = 0), so the nozzle prescribes the ambient state and the
+        # quiescent ambient is an EXACT stationary solution: every bit of
+        # velocity is boundary error, with no physics to hide behind.
+        #
+        # This gates the CHOICE of what the base does outside the nozzle.
+        # Wu & Shu specify outflow there; a reflecting wall is catastrophic
+        # because B is NORMAL to this base (see the paired control).
+        "input": "inputs/balsara/jet_wushu.athinput",
+        "overrides": ["problem/d1=0.14", "problem/v2=0.0",
+                      "mesh/nx1=8", "mesh/nx2=12",
+                      "mhd/mood_force_level=1",
+                      "time/tlim=0.004", "output/dt=0.002"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["mass_strict", "divb", "static_equilibrium"],
+        "equil_tol": 1e-8,          # measured 1.40e-10
+        # divb is an ABSOLUTE gate and the default 1e-11 is calibrated for
+        # B0 ~ 1 (CLAUDE.md rule 7). This problem has B0 = 141.42 and a
+        # sub-cell dx of 0.03125, so divB scales as B0/dx: the measured
+        # 5.14e-10 is 1.14e-13 RELATIVE, against the 3.0e-13 the existing
+        # 2D configs encode at 1e-11 with B0 ~ 1, dx ~ 0.03. The CT is
+        # BETTER here than in those, not worse -- only the units differ.
+        # 3.0e-13 * B0/dx = 1.36e-09, rounded to 2e-09 (3.9x headroom).
+        "divb_limit": 2e-9,         # measured 5.14e-10
+        "field": "W_cv_N8p3_2_0.dat",
+        "t_end": 0.004,
+    },
+    "mhd_jet_base_wall_sensitive_2d": {
+        # Negative control for mhd_jet_base_equilibrium_2d. The same exact
+        # equilibrium with the base closed as a reflecting wall, which flips
+        # the NORMAL magnetic row -- the conducting-wall condition, valid only
+        # where B.n = 0. Here B.n = 141.42 on that face, so the flip puts a
+        # jump of 2*141.42 in the normal field into the y-face Riemann problem.
+        # The exact solution must then fall apart: measured max |v| = 2.16e+00
+        # against 1.40e-10, and at 100x150 DoF dt collapses to 1e-6 of dt0.
+        # If this goes GREEN the paired gate is measuring nothing.
+        "input": "inputs/balsara/jet_wushu.athinput",
+        "overrides": ["problem/d1=0.14", "problem/v2=0.0",
+                      "mesh/nx1=8", "mesh/nx2=12",
+                      "mhd/mood_force_level=1", "mesh/x2_bc=reflective",
+                      "time/tlim=0.004", "output/dt=0.002"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["equilibrium_sensitive"],
+        "equil_floor": 1e-3,        # measured 2.16e+00
+        "field": "W_cv_N8p3_2_0.dat",
+        "t_end": 0.004,
+    },
+    "mhd_jet_inlet_field_2d": {
+        # The REAL jet, run to the paper's t = 0.002 at 48x72 DoF. Gates the
+        # inlet EMF pin, which the equilibrium config above cannot see: on a
+        # quiescent base the prescribed E_z is zero anyway, so pinning it
+        # changes nothing there (measured 7.3e-11 pinned vs 1.4e-10 free).
+        # It only bites once there is flow.
+        "input": "inputs/balsara/jet_wushu.athinput",
+        "overrides": ["mesh/nx1=12", "mesh/nx2=18",
+                      "mhd/mood_force_level=1", "output/dt=0.001"],
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["divb", "inlet_field"],
+        # Same B0/dx rescaling as mhd_jet_base_equilibrium_2d, with
+        # dx = 0.02083 here: the measured 9.30e-10 is 1.37e-13 RELATIVE.
+        "divb_limit": 3e-9,         # measured 9.30e-10
+        "inlet_b2_limit": 5e5,      # measured 4.72e+04, at y-row frac 0.806
+        "field": "W_cv_N12p3_2_0.dat",
+        "t_end": 0.002,
+    },
+    "mhd_jet_inlet_unpinned_sensitive_2d": {
+        # Negative control for mhd_jet_inlet_field_2d: the identical run with
+        # SPD_NO_BC_EMF_PIN=1. The inlet field must then be destroyed --
+        # measured max |B|^2 = 1.28e+06 ON the inlet row, against 4.72e+04 at
+        # the bow shock with the pin, and the base re-entry that follows takes
+        # the mean v_y outside the nozzle from 2.44 to 283.77.
+        "input": "inputs/balsara/jet_wushu.athinput",
+        "overrides": ["mesh/nx1=12", "mesh/nx2=18",
+                      "mhd/mood_force_level=1", "output/dt=0.001"],
+        "env": {"SPD_NO_BC_EMF_PIN": "1"},
+        "ndim": 2,
+        "nvar": 8,
+        "checks": ["inlet_field_sensitive"],
+        "inlet_b2_floor": 3e5,      # measured 1.28e+06
+        "field": "W_cv_N12p3_2_0.dat",
+        "t_end": 0.002,
+    },
     "mhd_current_sheet_equilibrium_2d": {
         # MDZ21 section 6.2 with the perturbation OFF (problem/p1=0), so the
         # Harris sheet is an EXACT stationary solution and any motion is error.
@@ -1287,6 +1386,70 @@ def check_static_equilibrium(outdir, cfg, tol):
                          f"(limit {tol:.1e}; exact answer is 0)")
 
 
+def check_inlet_field(outdir, cfg, limit):
+    """Where does |B|^2 peak, and how big is it?
+
+    On the Mach-800 jet the answer is a physics statement: the field is
+    compressed at the BOW SHOCK, and the inlet plane at y = 0 -- where the state
+    is prescribed -- must keep the uniform field it was given. Balsara et al.
+    2025 figure 11c shows exactly that: |B|^2 peaks around 1.9e+05 in a thin arc
+    along the bow shock, and the base stays at its initial 2.0e+04.
+
+    spd_K used to fail this badly, and invisibly: the inlet's normal face field
+    is advanced by the CT curl like any other, so with no boundary EMF condition
+    it is driven by an EMF extrapolated out of the interior. B_y on the base row
+    went from 141.42 to 1308, |B|^2 peaked at 2.17e+06 ON the inlet row, and the
+    resulting magnetic pressure of 1.1e+06 -- above the jet's own ram pressure
+    of 9.0e+05 -- pushed material back into the domain at a mean v_y of 435.
+    That was read, for a while, as a reason to close the base with a reflecting
+    wall, which is far worse (see mhd_jet_base_wall_sensitive_2d).
+
+    So this checks BOTH the magnitude and the LOCATION. The location is the
+    robust half: a peak on the inlet row is wrong at any resolution, whereas the
+    magnitude of a shock peak depends on how well the shock is resolved.
+    """
+    grid = spdk_io.Grid(outdir)
+    idx = spdk_io.output_indices(outdir)
+    if len(idx) < 2:
+        return False, f"only {len(idx)} outputs; nothing to compare"
+    worst, row, ny = 0.0, None, None
+    for i in idx:
+        B2 = sum(spdk_io.load_sd(grid, i, c) ** 2 for c in (5, 6, 7))
+        m = float(B2.max())
+        if m > worst:
+            worst, row = m, int(np.unravel_index(B2.argmax(), B2.shape)[1])
+        ny = B2.shape[1]
+    frac = row / ny
+    at_inlet = frac < 0.05
+    msg = (f"max |B|^2 = {worst:.3e} at y-row {row}/{ny} (frac {frac:.3f}); "
+           f"limit {limit:.1e}, and the peak must NOT be on the inlet row")
+    return (worst < limit and not at_inlet), msg
+
+
+def check_inlet_field_sensitive(outdir, cfg, floor):
+    """Negative control for check_inlet_field, kept on purpose.
+
+    Same jet with SPD_NO_BC_EMF_PIN=1, i.e. the inlet EMF left free. The inlet
+    field MUST then be destroyed: this requires |B|^2 to exceed `floor` AND to
+    peak on the inlet row. If this config goes green, the paired gate is no
+    longer measuring the boundary EMF condition -- for instance because the pin
+    was made unconditional and the switch stopped reaching it.
+    """
+    grid = spdk_io.Grid(outdir)
+    worst, row, ny = 0.0, None, None
+    for i in spdk_io.output_indices(outdir):
+        B2 = sum(spdk_io.load_sd(grid, i, c) ** 2 for c in (5, 6, 7))
+        m = float(B2.max())
+        if m > worst:
+            worst, row = m, int(np.unravel_index(B2.argmax(), B2.shape)[1])
+        ny = B2.shape[1]
+    frac = row / ny
+    return (worst > floor and frac < 0.05), (
+        f"unpinned inlet -> max |B|^2 = {worst:.3e} at y-row frac {frac:.3f} "
+        f"(must exceed {floor:.1e} AND sit on the inlet row, else the paired "
+        f"gate is vacuous)")
+
+
 def check_golden_differs(outdir, cfg, floor):
     """The anti-dead-code gate for the UCT electromotive force.
 
@@ -1432,6 +1595,12 @@ def main():
             elif chk == "equilibrium_sensitive":
                 ok, msg = check_equilibrium_sensitive(outdir, cfg,
                                                       cfg.get("equil_floor", 1e-6))
+            elif chk == "inlet_field":
+                ok, msg = check_inlet_field(outdir, cfg,
+                                            cfg.get("inlet_b2_limit", 5e5))
+            elif chk == "inlet_field_sensitive":
+                ok, msg = check_inlet_field_sensitive(outdir, cfg,
+                                            cfg.get("inlet_b2_floor", 3e5))
             elif chk == "static_equilibrium":
                 ok, msg = check_static_equilibrium(outdir, cfg,
                                                    cfg.get("equil_tol", 1e-10))
@@ -1450,7 +1619,7 @@ def main():
                                   f"analytic, mass_strict, mixed_levels, divb, "
                                   f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
                                   f"golden, golden_active, golden_differs, "
-                                  f"equilibrium_sensitive, static_equilibrium)")
+                                  f"equilibrium_sensitive, static_equilibrium, inlet_field, inlet_field_sensitive)")
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")
             failures += 0 if ok else 1
 

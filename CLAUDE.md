@@ -382,6 +382,81 @@ reusing it was wrong ("640 differing entries at max|diff| = 1.0") was measuring
 two things at once -- the wrong matrix (`amr_RF` where the reference uses
 `restrict_mat_for` -> `amr_RF_fp`), and the ghost ring (see rule 6).
 
+## 8b. A boundary that carries a field needs TWO conditions, and the FV lattice needs its own
+
+With CT the NORMAL face field on a boundary is advanced by the curl like any
+interior face, so unless something pins it, it is driven by an EMF extrapolated
+out of the interior. Getting the FLUID condition right is not enough. Both of
+these were measured on the Mach-800 jet (Balsara 2025 8.2), which had never once
+run, and both were invisible because **there was no jet config in the suite**.
+
+**`_reflective_` is only valid where `B.n = 0` on that wall.** It flips the
+normal magnetic row, which is what makes `B.n = 0` by antisymmetry -- so on a
+face the field passes THROUGH it imposes a jump of `2|B.n|` in the normal field,
+straight into that face's Riemann problem. That is a div-B violation by
+construction. The jet's base carries `|B_y| = 141.42` normal to it; closing it as
+a wall destroyed an EXACT stationary solution (the quiescent ambient), growing
+`max|v|` 10x per 1.2e-4 of time from round-off on the bottom row until dt
+collapsed to 1e-6 of `dt0`. This is the trap in "a jet emerges from a nozzle in
+a solid surface": true, and irrelevant, because the field does not know that.
+
+**A prescribed inlet must pin its normal field too.** A Dirichlet inlet
+prescribes the whole state, `B` included. Left free, the jet inlet's `B_y` went
+141.42 -> 1308 on the base row, `|B|^2` peaked at 2.17e+06 ON the inlet row
+against the paper's 1.9e+05 in the bow shock, and the resulting magnetic
+pressure of 1.1e+06 -- ABOVE the jet's own ram pressure of 9.0e+05 -- pushed
+material back in at a mean `v_y` of 435. **That is what "a plain outflow base
+sucks material in" actually was.** An earlier round read that 435 as an argument
+for closing the base and reached for the wall above, which is far worse. The
+re-entry was downstream of a field error: fix the field condition and the same
+number is 0.98 with the base still a plain outflow, which is also what Wu & Shu
+(2018) specify. **When a boundary misbehaves in MHD, check what it is doing to
+B before you change what it does to the fluid.**
+
+**And the two lattices are separate.** `mhd_zero_wall_emf` pinned the SD edge
+arrays only; its own comment flagged the FV lattice as a latent gap. The MOOD
+cascade assembles its EMF there (`E0z` from `E1z/E2z`), and `job/scheme=plm|vl2`
+sets `cfg.fv_only` and never touches the SD edge arrays at all -- so that lane
+had NO boundary EMF condition of any kind. `mhd_pin_bc_emf_fv` closes it, for
+inlets and walls alike.
+
+Be precise about which half that mattered for, because only one of them was
+live. For INLETS it was not latent at all: the jet pathology above was measured
+in the plm lane, i.e. entirely on the FV lattice. For WALLS it is STILL latent
+-- `mhd_current_sheet_equilibrium_2d` is the only reflecting-wall config and it
+runs the SD lane, so the FV wall pin does not move it: 6.31e-13 with the pin
+against 6.26e-13 without, both round-off. The FV wall pin is therefore closed
+but UNGATED, and will stay that way until some config runs `plm`/`vl2` against
+a reflecting wall.
+
+`SPD_NO_BC_EMF_PIN=1` is the A/B for both halves. It is a no-op on every
+periodic/outflow face: `inputs/balsara/blast_smoke_p3_fb.athinput` is
+bit-identical across it, 9 dumps per side (counted -- a comparison over zero
+files reports IDENTICAL, rule 2).
+
+The FV pin is `standalone_` only, and that is a real restriction, not an
+oversight: it pins the first/last node of the array it is given, which is the
+domain boundary only when the block IS the domain, so under `Mesh` it would pin
+an interior block's internal edge. Doing it there needs per-block
+touches-the-boundary flags off `xtfi_`, like the cf/ corrections. So a
+MULTIBLOCK `plm` run against a reflecting wall still has no FV boundary EMF
+condition. `x2_bc=inflow` is standalone-and-jet-only (hard error otherwise), so
+the inlet half is fully covered.
+
+Gates, with the negative control each one needs (rule 7):
+`mhd_jet_base_equilibrium_2d` / `mhd_jet_base_wall_sensitive_2d` for the wall,
+`mhd_jet_inlet_field_2d` / `mhd_jet_inlet_unpinned_sensitive_2d` for the pin.
+The equilibrium config CANNOT gate the pin -- on a quiescent base the prescribed
+E_z is zero anyway, so pinning it changes nothing (7.3e-11 pinned vs 1.4e-10
+free). It needs the real jet, i.e. a config where something actually flows.
+
+Both gates are pinned to MUSCL (`mhd/mood_force_level=1`) ON PURPOSE: the SD
+cascade at beta = 1e-4 carries its own 1.15e-02 of spurious velocity on the
+quiescent ambient (MUSCL: 1.40e-10; and pure outflow is worse still at
+3.58e-02), which would drown the boundary signal. **That SD error is real and
+unexplained** -- it is not the boundary, since the inflow face is the BEST of the
+three there.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

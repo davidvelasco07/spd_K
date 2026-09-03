@@ -1439,8 +1439,58 @@ void mhd_uct_edge_E_t_b(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2, Matri
 // stationary solution -- so this is latent rather than measured. It needs the
 // same treatment on E0*/E1*/E2* before a wall test that actually shocks at the
 // boundary (the paper's KH develops rolls mid-domain, not at y = +-1).
+//SPD_NO_BC_EMF_PIN=1 turns both of these off, as the A/B reference. They are
+//no-ops on every periodic/outflow/gradfree boundary, so the switch only moves a
+//run that actually has a reflecting wall or a prescribed inlet.
+static inline bool no_bc_emf_pin(){
+    static const bool v = getenv("SPD_NO_BC_EMF_PIN") != nullptr;
+    return v;
+}
+
+//Which sides of `wall` need their tangential EMF pinned, given that direction's
+//boundary condition. Returns 0 for neither, 1 for the low side only, 2 for both.
+//
+//  _reflective_ : BOTH sides. B.n = 0 on a perfectly conducting wall, and the
+//                 wall's own normal face field must not be advanced at all.
+//  _inflow_     : the LOW side only -- that is the face the prescribed state
+//                 lives on (the high side is plain outflow, see boundary.cpp).
+//                 A Dirichlet inlet prescribes the WHOLE state, B included, so
+//                 its normal face field must be held at the prescribed value.
+//                 With CT that is a statement about the EMF: in 2D
+//                 dB_y/dt = dE_z/dx along the face, so a face-wide E_z = 0
+//                 freezes B_y on the inlet plane.
+//
+//                 For the Mach-800 jet the prescribed E_z is exactly zero on
+//                 both parts of the base -- inside the nozzle the injected state
+//                 has v_x = B_x = 0, and outside it the ambient is at rest -- so
+//                 pinning zero IS pinning the prescribed value, not an extra
+//                 constraint. It does not impede outflow: the FLUID boundary
+//                 outside the nozzle stays a plain copy.
+//
+//WHY (measured). Without this the inlet's normal field is advanced from an EMF
+//extrapolated out of the interior, and on the jet it is destroyed: B_y on the
+//base row, 141.42 everywhere at t = 0, reads 1308 / 639 / 332 / -180 across the
+//face at t = 0.002, with |B_x| up to 881 where it should be 0. |B|^2 peaks at
+//2.17e+06 AT y = 0 against the paper's 1.9e+05 in the bow shock. The base then
+//carries a magnetic pressure of 1.1e+06 -- larger than the jet's own ram
+//pressure of 9.0e+05 -- so it pushes material back into the domain at a mean
+//v_y of 435, which is the "outflow base sucks material in" fan. The re-entry is
+//DOWNSTREAM of the field error, not an argument for closing the base: a
+//reflecting base is far worse (see boundary.cpp).
+KOKKOS_INLINE_FUNCTION
+int bc_emf_pin_sides(int type){
+    if(type == _reflective_) return 2;
+    if(type == _inflow_)     return 1;
+    return 0;
+}
+
+//SD edge-point form. Pins the first/last flux point of the first/last ACTIVE
+//element along `wall`.
 void mhd_zero_wall_emf(SD_Solution E, int wall){
-    if(cfg.bc[wall] != _reflective_) return;
+    if(no_bc_emf_pin()) return;
+    const int sides = bc_emf_pin_sides(cfg.bc[wall]);
+    if(sides == 0) return;
+    const bool hi = (sides == 2);
     const int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz;
     const int px=E.nx, py=E.ny, pz=E.nz;
     const int NG = (wall==_x_?NGHx:(wall==_y_?NGHy:NGHz));
@@ -1451,9 +1501,41 @@ void mhd_zero_wall_emf(SD_Solution E, int wall){
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         const int e = (wall==_x_?i:(wall==_y_?j:k));
         const int q = (wall==_x_?ii:(wall==_y_?jj:kk));
-        if((e==eLo && q==pLo) || (e==eHi && q==pHi))
+        if((e==eLo && q==pLo) || (hi && e==eHi && q==pHi))
             E.Vector(0,0,k,j,i,kk,jj,ii) = 0.0;
     }, "mhd_zero_wall_emf");
+}
+
+//FV-lattice form, and the same condition. This is the gap the SD version's
+//comment used to flag as latent: the MOOD cascade assembles its EMF on the FV
+//node lattice (E0z from E1z/E2z) and NOTHING pinned it there, so a
+//job/scheme=plm or vl2 run -- which sets cfg.fv_only and never touches the SD
+//edge arrays at all -- had no boundary EMF condition whatsoever. That is the
+//lane the jet pathology above was measured in, so for INLETS the gap was live,
+//not latent.
+//
+//For WALLS it is still latent, and the A/B says so: the only reflecting-wall
+//config in the suite (mhd_current_sheet_equilibrium_2d) runs the SD lane, where
+//mhd_zero_wall_emf already applied, and pinning the FV lattice moves it from
+//6.26e-13 to 6.31e-13 -- both round-off. So the wall half of this is closed but
+//UNGATED until some config runs plm/vl2 against a reflecting wall.
+//
+//fv_for_faces spans node indices [nGH, N-nGH] in each active direction, so the
+//physical low/high boundary nodes of `wall` are exactly nGH and N-nGH.
+void mhd_pin_bc_emf_fv(FV_Solution E, int wall){
+    if(no_bc_emf_pin()) return;
+    const int sides = bc_emf_pin_sides(cfg.bc[wall]);
+    if(sides == 0) return;
+    const bool hi = (sides == 2);
+    const int Nx=E.Nx, Ny=E.Ny, Nz=E.Nz;
+    const int NG = (wall==_x_?nGHx:(wall==_y_?nGHy:nGHz));
+    const int NN = (wall==_x_?Nx:(wall==_y_?Ny:Nz));
+    const int nLo = NG, nHi = NN-NG;
+    fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
+        const int n = (wall==_x_?i:(wall==_y_?j:k));
+        if(n==nLo || (hi && n==nHi))
+            E.Vector(0,k,j,i) = 0.0;
+    }, "mhd_pin_bc_emf_fv");
 }
 
 void mhd_uct_edge_E(SD_Solution E, SD_Solution UCT1, SD_Solution UCT2,
