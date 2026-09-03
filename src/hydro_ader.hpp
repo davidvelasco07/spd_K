@@ -318,6 +318,14 @@ struct Hydro_ader : public PhysicsModule{
 
         dt=Dt;
         double t_output=dt_output;
+        //See src/driver.hpp for the full reasoning: an output interval finer
+        //than the timestep must NOT be honoured by shrinking the timestep, or
+        //the run takes t_end/dt_output steps and writes a dump on every one.
+        const bool sub_cycle = (dt_output > 0.0 && dt_output < dt);
+        if(sub_cycle && Master)
+            cout<<"WARNING: output/dt = "<<dt_output<<" is smaller than the "
+                <<"timestep "<<dt<<"; writing every step instead. The timestep "
+                <<"is NOT reduced to match."<<endl;
 
         while(t<t_end){
             if(cfg.integrator==_integrator_rk_)
@@ -344,10 +352,12 @@ struct Hydro_ader : public PhysicsModule{
             //Outputs
             if(Master) cout<<".";
             if(t>=t_output){
-                t_output=t+dt_output;
+                //Anchor to multiples of dt_output rather than to the time
+                //reached, so the cadence cannot drift by a step per output.
+                do { t_output+=dt_output; } while(t_output<=t);
                 Write_outputs();
             }
-            if(t+dt>t_output){
+            if(!sub_cycle && t+dt>t_output){
                 dt=t_output-t;
             }
         }

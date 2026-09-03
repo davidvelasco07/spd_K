@@ -108,6 +108,14 @@ class Driver {
     //step count that stops scaling with tlim.
     const bool dt_trace = getenv("SPD_DT_TRACE") != nullptr;
     const double dt0 = pmod->dt;
+    //An output interval finer than the timestep cannot be honoured by writing
+    //more often -- there is nothing in between two steps. Say so once and then
+    //write every step, rather than shrinking dt to match (see below).
+    const bool sub_cycle = (dt_output > 0.0 && dt_output < dt0);
+    if (sub_cycle && Master)
+      std::cout << "WARNING: output/dt = " << dt_output << " is smaller than the"
+                << " timestep " << dt0 << "; writing every step instead."
+                << " The timestep is NOT reduced to match." << std::endl;
 
     // Time only the evolution loop; subtract time spent writing outputs.
     Kokkos::fence();
@@ -152,13 +160,24 @@ class Driver {
       if (Master) std::cout << ".";
       if (cfg.outputs) {
         if (pmod->t >= t_output) {
-          t_output = pmod->t + dt_output;
+          //Anchor the schedule to multiples of dt_output rather than to the
+          //time we happened to reach: `t_output = t + dt_output` lets the
+          //cadence drift by up to one timestep per output.
+          do { t_output += dt_output; } while (t_output <= pmod->t);
           Kokkos::fence();
           Kokkos::Timer io_timer;
           pmod->WriteOutputs();
           t_io += io_timer.seconds();
         }
-        if (pmod->t + pmod->dt > t_output)
+        //Land exactly on the next output time -- but ONLY as a truncation of a
+        //CFL-chosen step, never as a way to make the step smaller than the
+        //scheme asked for. Without the `sub_cycle` guard an output/dt below the
+        //timestep sets dt = dt_output EVERY step: the run then takes
+        //t_end/dt_output steps and writes a dump on each one. Measured the
+        //expensive way -- `output/dt=1e-9 tlim=1.0` wrote 740 GB and filled the
+        //filesystem, which then broke an unrelated build (nvcc could not open a
+        //temporary). The cadence must never drive the timestep.
+        if (!sub_cycle && pmod->t + pmod->dt > t_output)
           pmod->dt = t_output - pmod->t;
       }
     }
