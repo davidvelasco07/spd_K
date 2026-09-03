@@ -61,15 +61,33 @@ def _load(outdir, i=None):
 
 
 def complete(outdir):
-    """Did the run finish? An ad-hoc comparison must check this, not just take
-    the last dump: the floored/pathology fractions grow monotonically with time,
-    and comparing output 7 of one run against output 10 of another once
-    manufactured a 35% improvement that did not exist (CLAUDE.md 7c)."""
+    """Did the run reach t_end? An ad-hoc comparison must check this, not just
+    take the last dump: the pathology metrics grow monotonically with time, and
+    comparing output 7 of one run against output 10 of another once manufactured
+    a 35% improvement that did not exist (CLAUDE.md 7c).
+
+    The `evolution:` line is NOT sufficient on its own. driver.hpp prints it for
+    an ABORTED run too -- the dt-collapse guard breaks the loop and the timing
+    line is still emitted -- so a collapsed run reads as "finished" if you only
+    grep for that. Measured: the unpinned jet at 400x600 DoF prints
+    `evolution: 145020 steps` and an ERROR, having reached t = 0.00048 of 0.002.
+    Returns False for such a run, with the reason available in `reason()`."""
     log = os.path.join(outdir, "run.log")
     if not os.path.exists(log):
         return None
-    return re.search(r"^evolution: \d+ steps", open(log, errors="replace").read(),
-                     re.M) is not None
+    txt = open(log, errors="replace").read()
+    if not re.search(r"^evolution: \d+ steps", txt, re.M):
+        return False
+    return not re.search(r"^ERROR: dt collapsed", txt, re.M)
+
+
+def reason(outdir):
+    """Why a run stopped, for a caption. Empty string if it finished cleanly."""
+    log = os.path.join(outdir, "run.log")
+    if not os.path.exists(log):
+        return "no run.log"
+    m = re.search(r"^ERROR: (.+?)(?:;|$)", open(log, errors="replace").read(), re.M)
+    return m.group(1) if m else ""
 
 
 def probe(outdir):
@@ -84,13 +102,15 @@ def probe(outdir):
     row = int(np.unravel_index(d["B2"].argmax(), d["B2"].shape)[0])
     rec = dict(
         outdir=outdir, output=d["i"], complete=complete(outdir),
+        stopped=reason(outdir),
         base_vy=float(d["vy"][0][off].mean()),
         base_By_drift=float(np.abs(d["By"][0] - B0).max() / B0),
         b2_max=float(d["B2"].max()), b2_max_y=float(d["yf"][row]),
         rho_max=float(d["rho"].max()), p_max=float(d["p"].max()),
         v_max=float(np.sqrt(d["vx"] ** 2 + d["vy"] ** 2).max()),
     )
-    print(f"=== {outdir}  (output {rec['output']}, complete={rec['complete']}) ===")
+    print(f"=== {outdir}  (output {rec['output']}, reached t_end={rec['complete']}"
+          + (f", stopped: {rec['stopped']}" if rec['stopped'] else "") + ") ===")
     print(f"  base row v_y outside nozzle = {rec['base_vy']:9.3f}   "
           f"(exact answer ~0; 435 was the unpinned-inlet pathology)")
     print(f"  base row max|By-B0|/B0      = {rec['base_By_drift']:9.3e}")
