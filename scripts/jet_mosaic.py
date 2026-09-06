@@ -159,7 +159,10 @@ if __name__ == "__main__":
         ("Balsara et al. 2025\nfig. 11  (6th order)", paper_fields(pdir)),
         ("spd_K  MUSCL+RK2\nHLLD / UCT",              spdk_fields(f"{S}/muscl400")),
         ("spd_K  SDFB4 (p=3)\nHLLD / UCT",            spdk_fields(f"{S}/paper_sdfb4")),
-        ("AthenaK  PLM + FOFC\nHLLD / UCT-HLLD",      athenak_fields(f"{S}/akp_plm_fofc")),
-        ("AthenaK  WENO-Z + FOFC\nHLLD / UCT-HLLD",   athenak_fields(f"{S}/akp_wenoz_fofc")),
+        # AthenaK, inlet EMF unpinned vs pinned. WENO-Z is absent on purpose: it
+        # completes UNPINNED (3828 cycles, with a wrecked base) and COLLAPSES
+        # pinned (dt -> 5e-23 at t = 1.02e-03). See the commit message.
+        ("AthenaK PLM+FOFC\ninlet UNPINNED",  athenak_fields(f"{S}/akp_plm_fofc")),
+        ("AthenaK PLM+FOFC\ninlet PINNED",    athenak_fields(f"{S}/akpin_plm")),
     ]
     mosaic(rows, out, pdir)
