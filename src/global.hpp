@@ -193,8 +193,14 @@ struct RunConfig {
     //a threshold calibrated at one resolution must be rescaled for another.
     //Too small a value tags the whole domain once vorticity has spread (0.01
     //leaves a Kelvin-Helmholtz mesh 97% refined at the finest level by t=0.9).
-    double amr_refine_threshold = 0.1;
-    double amr_derefine_threshold = 0.05;
+    //Resolved in main.cpp once the criterion is known (the -1 here is never
+    //used): pressure 0.03/0.0075, lohner 0.5/0.0125, shear 0.1/0.05. Until 2026-09 pressure and lohner ignored
+    //the input and used those numbers hard-coded (refine_threshold 0.03,
+    //0.1 and 0.3 gave md5-identical block maps on the Sod lane), so the
+    //defaults are the old constants and every deck that never set them is
+    //bit-identical.
+    double amr_refine_threshold = -1.0;
+    double amr_derefine_threshold = -1.0;
     //Cut on the filtered |B| Löhner indicator, which is dimensionless and O(1)
     //at an under-resolved feature.
     double amr_bfield_threshold = 0.8;

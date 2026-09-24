@@ -378,19 +378,17 @@ double trouble_fraction(MHD_ader& blk){ return trouble_fraction_impl(blk); }
 //differ only in HOW the score is computed, never in where the cut sits, so the
 //thresholds live here and both callers use them: a threshold duplicated between
 //the two would make an A/B mismatch look like an arithmetic difference.
-static bool refine_from_score(int criterion, double s){
-    switch(criterion){
-        case 1:  return s > 0.03;
-        case 3:  return s > cfg.amr_refine_threshold;
-        default: return s > 0.5;
-    }
+//Every threshold criterion reads amr/refine_threshold and
+//amr/derefine_threshold; main.cpp fills in the criterion's own pair when the
+//deck sets neither (pressure 0.03/0.0075, lohner 0.5/0.0125, shear 0.1/0.05).
+//Pressure and lohner used to hard-code those numbers here and silently ignore
+//the input -- three different refine_threshold values gave md5-identical block
+//maps on the Sod lane, which is how it was found.
+static bool refine_from_score(int, double s){
+    return s > cfg.amr_refine_threshold;
 }
-static bool derefine_from_score(int criterion, double s){
-    switch(criterion){
-        case 1:  return s < 0.015*0.5;
-        case 3:  return s < cfg.amr_derefine_threshold;
-        default: return s < 0.05*0.25;
-    }
+static bool derefine_from_score(int, double s){
+    return s < cfg.amr_derefine_threshold;
 }
 //One block's score, on the host, with the per-block device->host copy each of
 //these functions opens with. This is the reference path (SPD_NO_SCORE_BATCH=1).

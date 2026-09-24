@@ -359,10 +359,18 @@ int main(int argc, char** argv){
         else if(crit=="shear") cfg.amr_criterion = 3;
         else if(crit=="bfield") cfg.amr_criterion = 4;
         else cfg.amr_criterion = 0;
-        cfg.amr_refine_threshold =
-            pin.GetOrAddReal("amr","refine_threshold",cfg.amr_refine_threshold);
-        cfg.amr_derefine_threshold =
-            pin.GetOrAddReal("amr","derefine_threshold",cfg.amr_derefine_threshold);
+        //Per-criterion defaults (see global.hpp): a deck that sets neither gets
+        //the pair the criterion was calibrated with, and parameters.txt records
+        //the resolved pair rather than a sentinel. The trouble criterion (2) is
+        //a fixed 0.01 fraction and does not read these.
+        {
+            const double rdef = cfg.amr_criterion==1 ? 0.03
+                              : cfg.amr_criterion==3 ? 0.1 : 0.5;
+            const double ddef = cfg.amr_criterion==1 ? 0.015*0.5
+                              : cfg.amr_criterion==3 ? 0.05 : 0.05*0.25;
+            cfg.amr_refine_threshold   = pin.GetOrAddReal("amr","refine_threshold",rdef);
+            cfg.amr_derefine_threshold = pin.GetOrAddReal("amr","derefine_threshold",ddef);
+        }
         cfg.amr_bfield_threshold =
             pin.GetOrAddReal("amr","bfield_threshold",cfg.amr_bfield_threshold);
         //Drive the initial refinement to convergence before the first step
