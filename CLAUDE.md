@@ -224,6 +224,23 @@ double-Mach problem, neither by the periodic suite:
   and leaks mass, 8e-12 on the p=0 dynamic pulse against 3e-15, because two
   fine blocks meeting at a coarse block face then see different profiles of
   the same coarse row.
+- **The fill reads TWO ghost rows of the coarse block, and both must be
+  current.** The transverse row is the restriction of the fine block on the
+  ADJACENT face; a per-direction sweep (x: same, finer, coarser, bc; then y)
+  restricts the y face only after the x fill has read it. The one fine cell
+  at a coarse block's corner is filled from both directions, the two values
+  differed by that one stage, the corner pass copied one into the diagonal
+  block while the other block kept its own, and the same-level face between
+  them computed two different fluxes at its end row -- nothing symmetrizes a
+  same-level face. +6.4e-10 of mass per run on the 2D MUSCL blast, every
+  digit in that row (`SPD_FV_FLUX_CHECK=1`), visible ONLY with derefinement
+  live (a derefined coarse corner inside non-uniform flow): derefine off
+  -3e-16, injection -7e-16, 1D tubes 1e-16. Fixed in `41e7fef`: `Exchange_fv_field` restricts every
+  direction once BEFORE the sweep when the fill is on; `SPD_NO_FV_PRERESTRICT=1`
+  is the leaking reference. Localised with `SPD_STEP_MASS=1` (mass after
+  every step) and the flux check; a leak that needs two switches ON at once
+  is bisected by turning each off alone, then asking what only their
+  combination touches.
 - A refined block's `dimension::L` is the BLOCK length, not the box length
   (0.125 for a level-1 block of 4 elements on a unit box). Anything that needs
   the domain size on the block path reads `g_bc_box`.
