@@ -2,6 +2,8 @@
 #define MESH_HPP_
 
 #include <algorithm>
+#include <set>
+#include <tuple>
 #include <chrono>
 #include <array>
 #include <cmath>
@@ -3666,6 +3668,18 @@ struct Mesh : public PhysicsModule {
             to_derefine.swap(keep);
         }
         const size_t n_deref = to_derefine.size();
+        //SPD_SYM_CHECK=1: list what this regrid will do, by logical key, so an
+        //asymmetric outcome can be traced to the tag, the filter or the apply.
+        {
+            static const bool sym_dbg = getenv("SPD_SYM_CHECK") != nullptr;
+            if(sym_dbg && Master && (n_ref || n_deref_tagged)){
+                std::cout<<std::endl<<"[symcheck] step "<<this->n_step<<" tags: refine";
+                for(int ib : to_refine){ const MeshBlock& b=forest.blocks[ib]; std::cout<<" L"<<b.level<<"("<<b.logical[0]<<","<<b.logical[1]<<")"; }
+                std::cout<<" | derefine(allowed "<<n_deref<<" of "<<n_deref_tagged<<")";
+                for(auto& g : to_derefine){ const MeshBlock& b=forest.blocks[g[0]]; std::cout<<" L"<<b.level<<"("<<b.logical[0]/2<<","<<b.logical[1]/2<<")"; }
+                std::cout<<std::endl;
+            }
+        }
         if(to_refine.empty() && to_derefine.empty()) return;
 
         double m_before = mass_dbg ? total_mass() : 0.0;
@@ -3729,6 +3743,30 @@ struct Mesh : public PhysicsModule {
         fv_ghosts_stale_ = true;   //new/reused slots: refresh ghosts before the first fill
         if constexpr (is_mhd) report_divb("after exchange");
         for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
+        //SPD_SYM_CHECK=1 (debug, 2D): after every regrid, count the leaves whose
+        //x<->y transpose is not a leaf of the same level, so a transient
+        //asymmetric mesh between two outputs (a threshold flip that a later
+        //regrid undoes) is seen where the dumps cannot see it. Host-side, over
+        //the block geometry only.
+        {
+            static const bool sym_dbg = getenv("SPD_SYM_CHECK") != nullptr;
+            if(sym_dbg && Master && !cfg.active[_z_]){
+                std::set<std::tuple<long,long,long,long,int>> leaves;
+                auto key = [](double a){ return (long)std::llround(a*1e9); };
+                for(int ib=0; ib<nblocks; ib++){
+                    const MeshBlock& b = forest.blocks[ib];
+                    leaves.insert({key(b.lim[0][0]),key(b.lim[1][0]),key(b.lim[0][1]),key(b.lim[1][1]),b.level});
+                }
+                int bad = 0;
+                for(const auto& t : leaves)
+                    if(!leaves.count({std::get<1>(t),std::get<0>(t),std::get<3>(t),std::get<2>(t),std::get<4>(t)})) bad++;
+                std::cout<<std::endl<<"[symcheck] step "<<this->n_step<<" t "<<std::setprecision(6)<<this->t
+                         <<" nblocks "<<nblocks<<" transpose-mismatched leaves "<<bad
+                         <<" (ref "<<n_ref<<" deref "<<n_deref<<"; blocks after refine "<<nb_ref
+                         <<" after derefine "<<nb_deref<<" after balance "<<nb_bal
+                         <<", derefine_refused "<<forest.derefine_refused<<")"<<std::endl;
+            }
+        }
         if(mass_dbg && Master){
             double m_after = total_mass();
             //nblocks through each stage: a derefine that balance immediately

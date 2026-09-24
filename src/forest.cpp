@@ -440,19 +440,48 @@ bool BlockForest::derefine_allowed(const std::vector<int> &ibs) const {
     return true;
 }
 
+//Every group is resolved and tested against the forest as it stands NOW, after
+//the refine pass and before any derefinement, and only then applied. The
+//previous loop tested each group just before applying it, but derefine_allowed
+//reads the neighbour tables, which derefine_block_mutate invalidates (block
+//indices shift) and which this function rebuilds only at the end -- so every
+//group after the first was judged on stale indices and refused or admitted at
+//random. Measured on the Liska-Wendroff implosion (512^2 finest, density
+//Lohner): at step 2220 two transpose-partner groups were tagged and allowed,
+//the first was applied, the second refused, and the mesh lost its diagonal
+//symmetry for good (3e-4 by t = 0.5, identical on CPU and GPU, which is what
+//said it was not round-off). Testing all groups first is also the right rule:
+//a neighbouring group that derefines in the same pass only gets coarser and
+//cannot create the two-level jump the test guards against.
+//SPD_OLD_DEREFINE_APPLY=1 restores the sequential loop (the A/B).
 void BlockForest::derefine_blocks_keys(
         const std::vector<std::vector<BlockKey>> &key_groups){
     derefine_refused = 0;
     int n_sib = 1;
     for(int d=0; d<3; d++) if(active[d]) n_sib *= 2;
-    for(const auto &kg : key_groups){
+    static const bool old_apply = getenv("SPD_OLD_DEREFINE_APPLY") != nullptr;
+    auto resolve = [&](const std::vector<BlockKey> &kg, std::vector<int> &ibs){
         std::map<BlockKey,int> id_map;
         for(int ib=0; ib<(int)blocks.size(); ib++) id_map[block_key(ib)] = ib;
-        std::vector<int> ibs;
+        ibs.clear();
         for(const BlockKey &k : kg){
             auto it = id_map.find(k);
             if(it != id_map.end()) ibs.push_back(it->second);
         }
+    };
+    if(old_apply){
+        for(const auto &kg : key_groups){
+            std::vector<int> ibs; resolve(kg, ibs);
+            if((int)ibs.size() != n_sib) continue;
+            if(!derefine_allowed(ibs)){ derefine_refused++; continue; }
+            derefine_block_mutate(ibs);
+        }
+        rebuild_neighbors();
+        return;
+    }
+    std::vector<std::vector<BlockKey>> apply;
+    for(const auto &kg : key_groups){
+        std::vector<int> ibs; resolve(kg, ibs);
         //Groups are tagged against the mesh as it stood before this adapt, and
         //the refine pass runs first: a sibling can have been refined away in the
         //meantime. A partly present group is no longer a derefinable set, so drop
@@ -461,6 +490,11 @@ void BlockForest::derefine_blocks_keys(
         //Last line of defence: a caller that skipped the filter still cannot
         //push the forest into a state balance has to repair.
         if(!derefine_allowed(ibs)){ derefine_refused++; continue; }
+        apply.push_back(kg);
+    }
+    for(const auto &kg : apply){
+        std::vector<int> ibs; resolve(kg, ibs);
+        if((int)ibs.size() != n_sib) continue;   //cannot happen: derefinement removes no sibling of another group
         derefine_block_mutate(ibs);
     }
     rebuild_neighbors();

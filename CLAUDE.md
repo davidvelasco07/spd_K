@@ -52,7 +52,8 @@ bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 `SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
 limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
 sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL`
-(the per-direction sweep instead of the symmetric fill order, rule 6b). Then md5 the dumps of both paths -- and the block
+(the per-direction sweep instead of the symmetric fill order, rule 6b),
+`SPD_OLD_DEREFINE_APPLY` (the stale-index derefine loop, rule 7a3). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -357,6 +358,28 @@ in ONE step (dt = box/c_ambient > tlim) with a clean log. R = 0.025 fixed it;
 the gate `hydro_sedov_amr_2d` pins that. Before any AMR sweep whose feature is
 smaller than a root cell, check the t = 0 dump of the COARSEST root for the
 feature (max p, or the leaf count after initial refinement), not the finest.
+
+## 7a3. Identical on CPU and GPU means deterministic, not round-off; instrument the regrid
+
+The Liska-Wendroff implosion (512^2, density Lohner, symmetric fill) lost its
+diagonal symmetry at 2e-5 by t = 0.12 with block maps that were symmetric at
+every output. Threshold flips from round-off were the obvious story and would
+have been WRONG: the CPU and the A100 produced the same 5.9e-5 at the same
+step, which round-off cannot do. `SPD_SYM_CHECK=1` (a transpose-mismatch count
+of the leaf set after EVERY regrid, plus the tagged groups and the per-stage
+block counts) found it in one run: step 2220, two transpose-partner groups
+tagged and allowed, `derefine_blocks_keys` applied the first and REFUSED the
+second -- its admissibility test read neighbour tables that the first merge
+had invalidated and that the loop rebuilt only at the end. Fixed by judging
+every group on the post-refine forest and then applying all of them
+(`SPD_OLD_DEREFINE_APPLY=1` is the old loop). Every AMR lane with more than one
+derefinement per regrid could have been hit; on the seven A/B lanes only the
+one with a refusal moved, bit-identical elsewhere.
+
+Two lessons. A symmetry test needs an instrument at the REGRID cadence, not
+the output cadence: the mesh was symmetric at every dump and asymmetric in
+between. And before calling anything "round-off", run it on a second backend:
+the same digits on both is a deterministic defect.
 
 ## 7b. With the cascade live, cell values are NOT reproducible across backends
 
