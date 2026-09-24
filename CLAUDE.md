@@ -318,6 +318,17 @@ not connected.** The same A/B in the other direction (deck sets nothing -> must
 be bit-identical to the old binary) is what made the fix safe: 0 of 4 files
 differ on three decks.
 
+## 7a2. A pointwise IC can be invisible to a coarse root, and then nothing refines
+
+The Sedov deposit is evaluated at cell centres / solution points. On a 32^2
+root the four central cell centres sit 0.022 from the box centre, so a deposit
+of radius 0.02 lands in NO cell: the root is a uniform state, the pressure
+criterion tags nothing, `initial_refine` never triggers, and the run finishes
+in ONE step (dt = box/c_ambient > tlim) with a clean log. R = 0.025 fixed it;
+the gate `hydro_sedov_amr_2d` pins that. Before any AMR sweep whose feature is
+smaller than a root cell, check the t = 0 dump of the COARSEST root for the
+feature (max p, or the leaf count after initial refinement), not the finest.
+
 ## 7b. With the cascade live, cell values are NOT reproducible across backends
 
 The MOOD detector is a THRESHOLD. A round-off difference flips one cell's
