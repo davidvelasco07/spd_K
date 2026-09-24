@@ -1313,47 +1313,58 @@ struct Mesh : public PhysicsModule {
     //All relations for one direction of an FV field, as batched gathers over
     //the same transaction tables the flux points use. Physical boundaries stay
     //a per-block call: there are few of them and they need no neighbour.
+    //Pass order same -> finer -> coarser -> physical over both sides, as in
+    //forest_exchange_fv: the limited-linear coarse->fine fill (`linear`, state
+    //fields only) reads the coarse block's interface ghost that the finer pass
+    //writes. With injection the order is immaterial.
     void gather_all_fv(FV_Solution& P, FV_Solution Block::*member, int dim,
-                       bool take_max){
+                       bool take_max, bool linear=false){
         const int ngh = nGH_rt[dim];
-        for(int side=0; side<2; side++){
+        for(int side=0; side<2; side++)
             gather_fv_same(P, xt_[dim][side].recv, xt_[dim][side].send,
                            xt_[dim][side].n, dim, side, ngh);
-            gather_fv_coarser(P, xtco_[dim][side].recv, xtco_[dim][side].send,
-                              xtco_[dim][side].sub, xtco_[dim][side].n, dim, side, ngh);
+        for(int side=0; side<2; side++)
             gather_fv_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
                             xtfi_[dim][side].sub, xtfi_[dim][side].n, dim, side,
                             ngh, take_max);
+        for(int side=0; side<2; side++)
+            gather_fv_coarser(P, xtco_[dim][side].recv, xtco_[dim][side].send,
+                              xtco_[dim][side].sub, xtco_[dim][side].n, dim, side, ngh,
+                              linear);
+        for(int side=0; side<2; side++)
             for(int ib : forest.face_groups[dim][side].bc_ib)
                 apply_domain_bc_fv(blocks[ib].*member, dim, side, ngh);
-        }
     }
 
     //SPD_EXCHANGE_CHECK=1 runs both FV implementations from the same pre-state
     //and reports where they disagree, exactly as Exchange_fp does. The forest
     //path is the reference.
     void Exchange_fv_check(FV_Solution& P, FV_Solution Block::*member, int dim,
-                           bool take_max){
+                           bool take_max, bool linear=false){
         FV_Vector pre("fvchk_pre", P.Vector.layout());
         FV_Vector packed("fvchk_pk", P.Vector.layout());
         Kokkos::deep_copy(pre, P.Vector);
-        gather_all_fv(P, member, dim, take_max);
+        gather_all_fv(P, member, dim, take_max, linear);
         Kokkos::deep_copy(packed, P.Vector);
         Kokkos::deep_copy(P.Vector, pre);
         if(take_max) forest_exchange_fv_max(forest, blocks, member, dim);
-        else         forest_exchange_fv(forest, blocks, member, dim);
+        else         forest_exchange_fv(forest, blocks, member, dim, linear);
         report_fv_diff(P, packed, dim);
     }
 
-    void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr){
+    //`linear` = this is a STATE field (U_old / U_new / U_old_fv): its
+    //coarse->fine ghosts take the limited-linear fill. Flags, blend factors and
+    //the cascade index keep injection (a reconstructed flag is not a flag).
+    void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr,
+                           bool linear=false){
         //SPD_NEW_XCHG routes the FV halo through the transaction tables. It
         //needs the whole-pack view, so a field without one still takes the
         //forest path.
         if(new_xchg() && packed){
             for(int dim=0; dim<3; dim++){
                 if(!cfg.active[dim]) continue;
-                if(exchange_check()) Exchange_fv_check(*packed, member, dim, false);
-                else                 gather_all_fv(*packed, member, dim, false);
+                if(exchange_check()) Exchange_fv_check(*packed, member, dim, false, linear);
+                else                 gather_all_fv(*packed, member, dim, false, linear);
             }
             //Corner pass: after every direction, refill each transverse ghost
             //corner from the same-level neighbour that owns it. Batched, or it
@@ -1372,7 +1383,7 @@ struct Mesh : public PhysicsModule {
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
             if(forest.max_level()>0 || no_pack()){
-                forest_exchange_fv(forest, blocks, member, dim);
+                forest_exchange_fv(forest, blocks, member, dim, linear);
             } else if(packed){
                 block_boundary_fv_b(*packed,nbrL_[dim],nbrR_[dim],
                                     typL_[dim],typR_[dim],dim);
@@ -1743,8 +1754,8 @@ struct Mesh : public PhysicsModule {
         { STAGE("mood/begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
             { STAGE("mood/flux_update"); FV_flux_update_batched(ader); }
-            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
-            { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old,true); }
+            { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new,true); }
             { STAGE("mood/detect"); FV_detect_batched(); }
             if(!cfg.fv_only){ STAGE("xchg/Exchange_flagged");
                                  Exchange_fv_field(&Block::flagged,&pv.flagged); }
@@ -1773,7 +1784,7 @@ struct Mesh : public PhysicsModule {
         { STAGE("mood/begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
             { STAGE("mood/flux_update"); FV_flux_update_batched(ader); }
-            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old); }
+            { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old,true); }
             { STAGE("mood/cascade_levels");
               compute_primitives(pv.U_old, pv.W_old);
               cascade_levels_pack(ader); }
@@ -1789,7 +1800,7 @@ struct Mesh : public PhysicsModule {
                   FV_candidate_batched(ader); }
                 //SED limits against a two-cell stencil of the candidate, so
                 //each revision needs its own U_new halo.
-                { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new); }
+                { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new,true); }
                 int demoted = 0;
                 { STAGE("mood/detect");
                   compute_primitives(pv.U_new, pv.W_new);
@@ -2314,7 +2325,7 @@ struct Mesh : public PhysicsModule {
         //Pack view supplied so this takes the batched transaction-table gather
         //instead of the per-block forest path -- 10.6% of the fenced advance.
         { PHASE("xchg/Exchange_U_fv");
-          Exchange_fv_field(&Block::U_old_fv, mhd_batched() ? &pv.U_old_fv : nullptr); }
+          Exchange_fv_field(&Block::U_old_fv, mhd_batched() ? &pv.U_old_fv : nullptr, true); }
         { PHASE("mood/after_U_halo");
           if(mhd_batched(2)) MOOD_after_U_halo_batched();
           else for(int b=0;b<nblocks;b++) blocks[b].mood_after_U_halo(); }

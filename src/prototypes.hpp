@@ -127,7 +127,7 @@ extern void apply_domain_bc_fv(FV_Solution, int, int, int);
 extern void gather_fp_same(SD_Solution, IntVector, IntVector, int, int, int);
 extern void gather_fv_same(FV_Solution, IntVector, IntVector, int, int, int, int);
 extern void gather_fv_coarser(FV_Solution, IntVector, IntVector, IntVector,
-                              int, int, int, int);
+                              int, int, int, int, bool linear=false);
 extern void gather_fv_finer(FV_Solution, IntVector, IntVector, IntVector,
                             int, int, int, int, bool);
 //Conservative flux correction off the same fine->coarse table. The SD/fp one

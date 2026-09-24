@@ -109,6 +109,33 @@ problem = sine_wave
 | `min_rho` | `1e-10` | PAD density floor for MHD trouble detection |
 | `min_P` | `1e-10` | PAD gas-pressure floor for MHD trouble detection. Raising it toward the problem's pressure scale flags degenerating low-β cells before the primitive floors have to carry them |
 
+### `<amr>` and `<refinementN>`
+
+Block-based refinement on the `<meshblock>` forest. Requires `fallback/style=cascade`
+and an RK integrator (`time/integrator=rk2|rk3`); ADER is refused on a mixed-level mesh.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_level` | 0 | refinement levels above the root (0 = uniform) |
+| `adapt_interval` | 0 | regrid every N steps (0 = never; static patches only) |
+| `criterion` | `lohner` | `lohner` (density second derivative), `pressure` (relative gradient), `shear` (velocity shear, Stone+2020 eq. 27), `trouble` (fraction of demoted cells > 0.01), `bfield` (MHD) |
+| `refine_threshold` / `derefine_threshold` | per criterion | threshold pair with hysteresis (`pressure`, `shear`) |
+| `refine_frac` / `derefine_frac` | per criterion | ranking fractions (`lohner`) |
+| `initial_refine` | false | iterate tag -> refine -> re-evaluate the IC before step 1 until no block is added (Athena++ `Mesh::Initialize`); use with threshold criteria |
+| `prolong_dmp` | false | discrete maximum principle on prolongation (measured harmful, off) |
+
+Static patches: `<refinement1>` .. `<refinementN>` blocks with `level` and `x1min/x1max/x2min/x2max/x3min/x3max`.
+
+Runtime A/B switches (environment variables, all default off = the batched or reconstructed path):
+
+| Variable | Restores |
+|---|---|
+| `SPD_NO_FV_GHOST_LIN=1` | injection of coarse cell values into a fine block's control-volume ghost cells (the limited-linear fill is the default; measured 2.7x / 1.8x lower AMR-vs-uniform rms on the fig-21 MUSCL lane at 1024^2 / 2048^2, no change at p=3) |
+| `SPD_NO_PACK=1`, `SPD_OLD_XCHG=1` | per-block exchange paths |
+| `SPD_NO_SCORE_BATCH=1` | host reference of the refinement scores |
+| `SPD_NO_DEREFINE=1` | keeps every refinement (diagnostic) |
+| `SPD_ADAPT_MASS=1` | brackets every regrid with the conserved mass |
+
 ### `<problem>`
 
 Selects the initial condition and supplies runtime parameters; see

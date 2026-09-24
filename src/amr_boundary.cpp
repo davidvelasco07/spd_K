@@ -774,7 +774,134 @@ static void fv_sub_bits(int sub, int dim, int& bx, int& by, int& bz){
     }
 }
 
-//Coarse -> fine ghost injection.
+//Coarse -> fine ghost fill: limited-linear reconstruction (default) or
+//injection (SPD_NO_FV_GHOST_LIN=1, the A/B reference).
+//
+//Injection copies the coarse cell value into every fine ghost cell it covers,
+//which is first order at every coarse-fine face at every stage. At p = 0 the
+//CV lattice is the only lattice, so MUSCL then reconstructs its slopes next to
+//every level jump from piecewise-constant data; athenak fills the same ghosts
+//with a minmod-limited linear profile (ProlongCC). Measured on the fig-22 KH
+//lane before this change: AMR-vs-uniform rms 0.84% / max 15% for spd_K
+//against 0.10% / 1.8% for athenak on the same mesh, with a block-shaped
+//imprint at 1e-3 across the whole domain.
+//
+//The reconstruction is athenak's, written on the true sub-cell positions: the
+//fine ghost value is the coarse cell value plus, per active direction, the
+//minmod of the two one-sided slopes of the coarse cell times the offset of the
+//fine cell centre from the coarse cell centre. Positions come from the
+//reference flux points (amr_x_fp), so at p = 0 this is exactly
+//    u_f = u_c -+ 1/4 minmod(u_c - u_{c-1}, u_{c+1} - u_c)
+//and at p >= 1 the same profile evaluated at the (non-uniformly spaced) fine
+//centres. The coarse cell a fine ghost reads is still chosen by the index
+//pairing injection used (two fine cells per coarse cell), so at p >= 1 the
+//offset can exceed half a coarse cell: that is a linear extrapolation of the
+//coarse cell's limited profile, not a change of which cell is read.
+//
+//The normal-direction slope of the coarse cell next to the interface reads the
+//coarse block's own ghost cell there, i.e. the restriction of this fine block.
+//That is why the fine->coarse pass runs BEFORE the coarse->fine pass in every
+//driver below; with injection the order is immaterial (that pass reads
+//interior cells only), which is what keeps the reference path bit-identical.
+//
+//Per-block and batched kernels share fv_lin_ghost, so the two exchange paths
+//stay bitwise identical with the reconstruction on.
+static bool fv_ghost_lin_env(){
+    static const bool v = getenv("SPD_NO_FV_GHOST_LIN") == nullptr;
+    return v;
+}
+
+struct FvLinCtx {
+    int nsp;                 //sub-cells per element, p+1
+    int NGx, NGy, NGz;       //ghost elements per direction
+    int gx, gy, gz;          //ghost cells per direction
+    int Nx, Ny, Nz;          //extents of the (shared) state arrays
+    int actx, acty, actz;
+    Vector xfp;              //reference flux points, p+2 of them
+};
+
+static FvLinCtx make_fv_lin_ctx(const FV_Solution& U){
+    FvLinCtx c;
+    c.xfp = amr_x_fp;
+    c.nsp = (int)amr_x_fp.extent(0) - 1;
+    c.NGx = NGH_rt[_x_]; c.NGy = NGH_rt[_y_]; c.NGz = NGH_rt[_z_];
+    c.gx = nGH_rt[_x_];  c.gy = nGH_rt[_y_];  c.gz = nGH_rt[_z_];
+    c.Nx = U.Nx; c.Ny = U.Ny; c.Nz = U.Nz;
+    c.actx = cfg.active[_x_]; c.acty = cfg.active[_y_]; c.actz = cfg.active[_z_];
+    return c;
+}
+
+//Read one variable of one FV array; the same struct serves a block's own view
+//(v = var) and a pack slice (v = block offset + var).
+struct FvGet {
+    FV_Vector V; int v;
+    KOKKOS_INLINE_FUNCTION double operator()(int k, int j, int i) const { return V(v,k,j,i); }
+};
+
+KOKKOS_INLINE_FUNCTION double fv_minmod(double a, double b){
+    if(a*b <= 0.0) return 0.0;
+    return (fabs(a) < fabs(b)) ? a : b;
+}
+
+//Centre of FV cell c along one direction, in element units from the block's
+//first active element face. FV cell c is sub-cell c + idL of the SD lattice
+//(structs.hpp: idL = NG*nsp - g), which may be negative or past the active
+//range for ghost cells; floor-divide so the element index is right there too.
+KOKKOS_INLINE_FUNCTION double fv_ref_pos(int c, int nsp, int NG, int g, const Vector& xfp){
+    const int s = c + NG*nsp - g;
+    const int e = (s >= 0) ? s/nsp : -((-s + nsp - 1)/nsp);
+    const int m = s - e*nsp;
+    return (double)(e - NG) + 0.5*(xfp(m) + xfp(m+1));
+}
+
+//Limited-linear value for fine ghost cell (fx,fy,fz) read from coarse cell
+//(cx,cy,cz), whose index along `dim` is interior and whose transverse indices
+//were clamped by the caller. (bx,by,bz) is the coarse half this fine block
+//covers in each transverse direction.
+KOKKOS_INLINE_FUNCTION
+double fv_lin_ghost(const FvLinCtx& c, const FvGet& get, int dim, int side,
+                    int fx, int fy, int fz, int cx, int cy, int cz,
+                    int bx, int by, int bz){
+    const double u = get(cz,cy,cx);
+    double v = u;
+    for(int d=0; d<3; d++){
+        const int act = (d==_x_ ? c.actx : (d==_y_ ? c.acty : c.actz));
+        if(!act) continue;
+        const int g  = (d==_x_ ? c.gx  : (d==_y_ ? c.gy  : c.gz));
+        const int NG = (d==_x_ ? c.NGx : (d==_y_ ? c.NGy : c.NGz));
+        const int N  = (d==_x_ ? c.Nx  : (d==_y_ ? c.Ny  : c.Nz));
+        const int Ne = (N - 2*g)/c.nsp;
+        const int fi = (d==_x_ ? fx : (d==_y_ ? fy : fz));
+        const int ci = (d==_x_ ? cx : (d==_y_ ? cy : cz));
+        double Xf, Xc, Xm, Xp;
+        if(d==dim){
+            //Both positions relative to the shared face, in coarse units.
+            Xf = 0.5*fv_ref_pos(fi, c.nsp, NG, g, c.xfp);
+            Xc = fv_ref_pos(ci,   c.nsp, NG, g, c.xfp);
+            Xm = fv_ref_pos(ci-1, c.nsp, NG, g, c.xfp);
+            Xp = fv_ref_pos(ci+1, c.nsp, NG, g, c.xfp);
+            if(side==0){ Xc -= Ne; Xm -= Ne; Xp -= Ne; }
+            else       { Xf -= 0.5*Ne; }
+        }else{
+            //Transverse: skip where the caller clamped the coarse index (a
+            //corner outside the coarse block, refilled by the same-level pass)
+            //or where a slope neighbour would fall outside the array.
+            const int b  = (d==_x_ ? bx : (d==_y_ ? by : bz));
+            const int uc = g + fv_fdiv2(b*(N-2*g) + (fi-g));
+            if(uc != ci || ci-1 < 0 || ci+1 > N-1) continue;
+            Xf = 0.5*((double)(b*Ne) + fv_ref_pos(fi, c.nsp, NG, g, c.xfp));
+            Xc = fv_ref_pos(ci,   c.nsp, NG, g, c.xfp);
+            Xm = fv_ref_pos(ci-1, c.nsp, NG, g, c.xfp);
+            Xp = fv_ref_pos(ci+1, c.nsp, NG, g, c.xfp);
+        }
+        const double um = (d==_x_ ? get(cz,cy,cx-1) : (d==_y_ ? get(cz,cy-1,cx) : get(cz-1,cy,cx)));
+        const double up = (d==_x_ ? get(cz,cy,cx+1) : (d==_y_ ? get(cz,cy+1,cx) : get(cz+1,cy,cx)));
+        v += fv_minmod((u-um)/(Xc-Xm), (up-u)/(Xp-Xc)) * (Xf - Xc);
+    }
+    return v;
+}
+
+//Coarse -> fine ghost fill (per-block path).
 //
 //The fine block's cells are half as wide as its coarse neighbour's and it
 //covers only one half of that neighbour in each transverse direction, so both
@@ -786,7 +913,9 @@ static void fv_sub_bits(int sub, int dim, int& bx, int& by, int& bz){
 //The transverse ghost corners are filled from this one neighbour as a
 //fallback; forest_exchange_fv_same overwrites every corner a same-level
 //neighbour actually owns.
-static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int side, int sub){
+static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int side, int sub,
+                              bool linear=false){
+    const FvLinCtx ctx = linear ? make_fv_lin_ctx(coarse) : FvLinCtx{};
     int ngh = nGH_rt[dim];
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int Nc = (dim==_x_ ? coarse.Nx : (dim==_y_ ? coarse.Ny : coarse.Nz));
@@ -815,6 +944,10 @@ static void fv_inject_coarser(FV_Solution U, FV_Solution coarse, int dim, int si
         fv_indices(Nidc,ck,cj,ci,cl,dim);
         double v = coarse.Vector(var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
         fv_indices(Nid,k,j,i,(side==0?l:N-ngh+l),dim);
+        if(linear)
+            v = fv_lin_ghost(ctx, FvGet{coarse.Vector,var}, dim, side,
+                             Nid[_x_],Nid[_y_],Nid[_z_], Nidc[_x_],Nidc[_y_],Nidc[_z_],
+                             bx,by,bz);
         U.Vector(FV_INDICES) = v;
         }
     });
@@ -923,25 +1056,34 @@ void forest_exchange_fv_same(BlockForest& forest, std::vector<Block>& blocks,
     }
 }
 
+//Pass order is same -> finer -> coarser -> physical, over BOTH sides at each
+//step: the limited-linear coarse->fine fill reads the coarse block's own
+//interface ghost, which the finer pass of the other side writes. With
+//injection every pass reads interior cells only, so the order does not change
+//the reference path.
 template<typename Block>
 void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
-                        FV_Solution Block::*member, int dim){
+                        FV_Solution Block::*member, int dim, bool linear){
     if(!cfg.active[dim]) return;
     int nb = forest.Nblocks();
+    const bool lin = linear && fv_ghost_lin_env();
+    bool uniform = false;
     for(int side=0; side<2; side++){
         const auto& sj = forest.same_jb[dim][side];
         if(!sj.empty()){
             for(int ib=0; ib<nb; ib++)
                 fv_copy_slab(blocks[ib].*member, blocks[sj[ib]].*member, dim, side, nGH_rt[dim]);
+            uniform = true;
             continue;
         }
         const FaceGroups& g = forest.face_groups[dim][side];
         for(size_t k=0; k<g.same_ib.size(); k++)
             fv_copy_slab(blocks[g.same_ib[k]].*member, blocks[g.same_jb[k]].*member,
                          dim, side, nGH_rt[dim]);
-        for(size_t k=0; k<g.co_ib.size(); k++)
-            fv_inject_coarser(blocks[g.co_ib[k]].*member, blocks[g.co_jb[k]].*member,
-                              dim, side, g.co_sub[k]);
+    }
+    if(uniform) return;
+    for(int side=0; side<2; side++){
+        const FaceGroups& g = forest.face_groups[dim][side];
         for(size_t k=0; k<g.fi_ib.size(); k++){
             FV_Solution &U = blocks[g.fi_ib[k]].*member;
             FV_Solution &f0 = blocks[g.fi_jb[k][0]].*member;
@@ -952,6 +1094,15 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
             if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
             fv_restrict_finer(U, f0, f1, f2, f3, nf, dim, side);
         }
+    }
+    for(int side=0; side<2; side++){
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.co_ib.size(); k++)
+            fv_inject_coarser(blocks[g.co_ib[k]].*member, blocks[g.co_jb[k]].*member,
+                              dim, side, g.co_sub[k], lin);
+    }
+    for(int side=0; side<2; side++){
+        const FaceGroups& g = forest.face_groups[dim][side];
         //Physical boundaries, as gather_all_fp does for the flux points.
         for(int ib : g.bc_ib)
             apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim]);
@@ -1222,9 +1373,9 @@ template void correct_coarse_fine_fv_flux<MHD_ader>(BlockForest&, std::vector<MH
 template void correct_coarse_fine_fv_emf<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&, int);
 template void correct_coarse_fine_fv_emf<MHD_ader>(BlockForest&, std::vector<MHD_ader>&, int);
 template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
-                                             FV_Solution Hydro_ader::*, int);
+                                             FV_Solution Hydro_ader::*, int, bool);
 template void forest_exchange_fv<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
-                                           FV_Solution MHD_ader::*, int);
+                                           FV_Solution MHD_ader::*, int, bool);
 template void forest_exchange_fv_same<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
                                                   FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_same<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
@@ -1574,8 +1725,10 @@ void gather_fv_same(FV_Solution U, IntVector recv, IntVector send,
 //written exactly once (those corners are a fallback that the same-level pass
 //overwrites wherever a same-level neighbour owns them).
 void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector subv,
-                       int ntr, int dim, int side, int ngh){
+                       int ntr, int dim, int side, int ngh, bool linear){
     if(ntr <= 0) return;
+    const bool lin = linear && fv_ghost_lin_env();
+    const FvLinCtx ctx = lin ? make_fv_lin_ctx(U) : FvLinCtx{};
     const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     const int nvar = U.n_var;
     const int Nx = (dim==_x_ ? ngh : U.Nx);
@@ -1601,9 +1754,14 @@ void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector 
         int Nid[3], Nidc[3];
         fv_indices(Nidc,ck,cj,ci,cl,dim);
         fv_indices(Nid,k,j,i,(side==0?l:N-ngh+l),dim);
-        for(int var=0; var<nvar; var++)
-            U.Vector(rb+var,Nid[_z_],Nid[_y_],Nid[_x_]) =
-            U.Vector(sb+var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
+        for(int var=0; var<nvar; var++){
+            double v = U.Vector(sb+var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
+            if(lin)
+                v = fv_lin_ghost(ctx, FvGet{U.Vector,sb+var}, dim, side,
+                                 Nid[_x_],Nid[_y_],Nid[_z_], Nidc[_x_],Nidc[_y_],Nidc[_z_],
+                                 bx,by,bz);
+            U.Vector(rb+var,Nid[_z_],Nid[_y_],Nid[_x_]) = v;
+        }
     }, "gather_fv_coarser");
 }
 

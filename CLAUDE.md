@@ -49,7 +49,8 @@ Keep the per-block path and gate the batched one behind a switch:
 bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 8192 the pinned-level dead-work skip, 16384 sync/face_B; default 32767), `SPD_NO_MHD_BATCH`,
 `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
-`SPD_OLD_XCHG`, `SPD_NO_PACK`. Then md5 the dumps of both paths -- and the block
+`SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
+limited-linear coarse->fine CV ghost fill). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -185,6 +186,31 @@ fraction) and 4 (|B| Löhner) still take the per-block path. Mirrors are for set
   overwritten and every lane is bit-identical; with `SPD_NO_FV_EMF=1` they are not,
   and that lane's dumps move by 3%. Split ACTIVE from GHOST before concluding
   anything about an SD-array difference.
+
+## 6b. A fine block's CV-lattice ghosts are RECONSTRUCTED from the coarse neighbour, not injected
+
+`fv_inject_coarser`/`gather_fv_coarser` used to copy the coarse cell value into
+every fine ghost cell it covers: first order at every coarse-fine face, every
+stage. At p=0 the CV lattice is the only lattice, so MUSCL reconstructed its
+slopes next to every level jump from piecewise-constant data; AthenaK's
+`ProlongCC` uses a minmod-limited linear fill. That was most of the excess in the
+AMR-vs-uniform residual (fig-22 lane: rms 0.84% vs AthenaK's 0.10%). Now
+`fv_lin_ghost` (amr_boundary.cpp) evaluates the coarse cell's minmod-limited
+profile at the true fine sub-cell centres (`amr_x_fp`), for STATE fields only
+(flags, theta and the cascade index keep injection), and the finer pass runs
+before the coarser pass so the interface slope reads the freshly restricted
+coarse ghost. Measured, fig-21, initial refine, 16^2 blocks, A100 (rms / max):
+
+| lane | injection | limited linear |
+|---|---|---|
+| MUSCL 1024^2 | 0.0039 / 0.081 | **0.0014 / 0.031** |
+| MUSCL 2048^2 | 0.0041 / 0.086 | **0.0022 / 0.064** |
+| SDFB4 1024^2 | 0.0029 / 0.13 | 0.0030 / 0.18 (unchanged: the SD lattice is exact) |
+
+`SPD_NO_FV_GHOST_LIN=1` is the A/B and is bit-identical to the pre-change binary
+on both exchange paths. The far-field block pattern that remains (few 1e-4 to
+1e-3 in level-0/1 regions) is the coarse-vs-fine truncation difference and
+AthenaK shows it at the same amplitude; do not chase it as a defect.
 
 ## 7. Gates: never weaken one to make it green, and give it a negative control
 

@@ -169,7 +169,7 @@ template<typename Block>
 void symmetrize_same_level_fv_flux(BlockForest&, std::vector<Block>&, int dim);
 template<typename Block>
 void forest_exchange_fv(BlockForest&, std::vector<Block>&,
-                        FV_Solution Block::*, int dim);
+                        FV_Solution Block::*, int dim, bool linear=false);
 template<typename Block>
 void forest_exchange_fv_same(BlockForest&, std::vector<Block>&,
                              FV_Solution Block::*, int dim);
