@@ -920,7 +920,26 @@ bool fv_prerestrict_on(){
     return v;
 }
 
+//Symmetric ("Jacobi") order for the limited-linear coarse->fine fill
+//(Mesh::Exchange_fv_symmetric): every same-level, fine->coarse and physical
+//pass of EVERY direction runs first, the state is snapshotted, and every
+//coarse->fine fill of every direction then reads the snapshot, so the x and y
+//fills see identical data and the ghosts are invariant under x<->y. The
+//per-direction sweep (same, finer, coarser, bc for x, then for y) is not: the
+//x fill reads a coarse block's y row that the y same-level or wall pass has
+//not yet refreshed, and since 2:1 balance constrains faces and not corners, a
+//corner can span three levels, where the row a fill reads is itself a
+//coarse->fine product of the other direction. Measured on the 1024^2 Sedov
+//blast with mirror symmetry at 1e-13: x<->y asymmetry 1e-8 at 32^2-DoF
+//blocks, 3e-6 at 16^2, 9e-5 at 8^2. SPD_NO_FV_SYMFILL=1 restores the sweep
+//(bit-identical to the pre-change binary).
+bool fv_symfill_on(){
+    static const bool v = getenv("SPD_NO_FV_SYMFILL") == nullptr;
+    return v;
+}
+
 struct FvLinCtx {
+    bool symcorner = false;  //injection at the ghost-ring corners (fv_symfill_on)
     int tmode = 2;           //transverse slopes: 2 (default) from the coarse block's neighbours including its
                              //own transverse ghost rows, 1 interior rows only, 0 none. SPD_FV_GHOST_TMODE
                              //selects; 1 and 0 are diagnostics: they leak mass (8e-12 on the p=0 dynamic
@@ -937,6 +956,7 @@ struct FvLinCtx {
 static FvLinCtx make_fv_lin_ctx(const FV_Solution& U){
     FvLinCtx c;
     { static const int tm = getenv("SPD_FV_GHOST_TMODE") ? atoi(getenv("SPD_FV_GHOST_TMODE")) : 2; c.tmode = tm; }
+    c.symcorner = fv_symfill_on();
     c.xfp = amr_x_fp;
     c.nsp = (int)amr_x_fp.extent(0) - 1;
     c.NGx = NGH_rt[_x_]; c.NGy = NGH_rt[_y_]; c.NGz = NGH_rt[_z_];
@@ -979,6 +999,24 @@ double fv_lin_ghost(const FvLinCtx& c, const FvGet& get, int dim, int side,
                     int bx, int by, int bz){
     const double u = get(cz,cy,cx);
     double v = u;
+    //Symmetric fill (c.symcorner): a fine ghost cell that is ALSO a ghost in a
+    //transverse direction -- a corner of the ghost ring, geometrically inside
+    //the coarse block's diagonal neighbour D -- takes D's cell value with no
+    //slope. Both the x and the y coarse->fine pass write these cells, the x
+    //pass through C's transverse ghost row and the y pass through E's, and
+    //each pass has centred slopes only along its own direction, so with slopes
+    //the two values differ and the last writer wins: 6.7e-9 of x<->y asymmetry
+    //on the 1024^2 Sedov blast after the pass order was symmetrized. The two
+    //rows are copies of the same D cell, so injection makes them agree
+    //bitwise. The corner pass overwrites these cells from D itself whenever D
+    //is on the fine block's own level.
+    if(c.symcorner){
+        const int gxx = c.gx, gyy = c.gy, gzz = c.gz;
+        const bool corner = (dim!=_x_ && c.actx && (fx < gxx || fx > c.Nx-1-gxx))
+                         || (dim!=_y_ && c.acty && (fy < gyy || fy > c.Ny-1-gyy))
+                         || (dim!=_z_ && c.actz && (fz < gzz || fz > c.Nz-1-gzz));
+        if(corner) return u;
+    }
     for(int d=0; d<3; d++){
         const int act = (d==_x_ ? c.actx : (d==_y_ ? c.acty : c.actz));
         if(!act) continue;
@@ -1207,6 +1245,38 @@ void forest_exchange_fv_finer(BlockForest& forest, std::vector<Block>& blocks,
             if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
             fv_restrict_finer(U, f0, f1, f2, f3, nf, dim, side);
         }
+    }
+}
+
+//The coarser (coarse->fine) pass alone, both sides of one direction. `snap`,
+//when given, is the per-block snapshot the coarse neighbours are READ from
+//(Exchange_fv_symmetric); otherwise the live arrays, as in the sweep.
+template<typename Block>
+void forest_exchange_fv_coarser(BlockForest& forest, std::vector<Block>& blocks,
+                                FV_Solution Block::*member, int dim, bool linear,
+                                const std::vector<FV_Solution>* snap){
+    if(!cfg.active[dim]) return;
+    const bool lin = linear && fv_ghost_lin_env();
+    for(int side=0; side<2; side++){
+        if(!forest.same_jb[dim][side].empty()) continue;   //uniform: no level jumps
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.co_ib.size(); k++)
+            fv_inject_coarser(blocks[g.co_ib[k]].*member,
+                              snap ? (*snap)[g.co_jb[k]] : blocks[g.co_jb[k]].*member,
+                              dim, side, g.co_sub[k], lin);
+    }
+}
+
+//The physical-boundary pass alone, both sides of one direction.
+template<typename Block>
+void forest_exchange_fv_bc(BlockForest& forest, std::vector<Block>& blocks,
+                           FV_Solution Block::*member, int dim){
+    if(!cfg.active[dim]) return;
+    for(int side=0; side<2; side++){
+        if(!forest.same_jb[dim][side].empty()) continue;
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(int ib : g.bc_ib)
+            apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim], ib);
     }
 }
 
@@ -1525,6 +1595,16 @@ template void forest_exchange_fv_finer<Hydro_ader>(BlockForest&, std::vector<Hyd
                                                   FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_finer<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
                                                 FV_Solution MHD_ader::*, int);
+template void forest_exchange_fv_coarser<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                                    FV_Solution Hydro_ader::*, int, bool,
+                                                    const std::vector<FV_Solution>*);
+template void forest_exchange_fv_coarser<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                                  FV_Solution MHD_ader::*, int, bool,
+                                                  const std::vector<FV_Solution>*);
+template void forest_exchange_fv_bc<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                               FV_Solution Hydro_ader::*, int);
+template void forest_exchange_fv_bc<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                             FV_Solution MHD_ader::*, int);
 template void forest_exchange_fv_same<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
                                                   FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_same<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
@@ -1873,7 +1953,9 @@ void gather_fv_same(FV_Solution U, IntVector recv, IntVector send,
 //receiving face, so the whole ghost slab including the transverse corners is
 //written exactly once (those corners are a fallback that the same-level pass
 //overwrites wherever a same-level neighbour owns them).
-void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector subv,
+//`src` is the array the coarse cells are READ from: U.Vector itself in the
+//sweep, the snapshot in Exchange_fv_symmetric.
+void gather_fv_coarser(FV_Solution U, FV_Vector src, IntVector recv, IntVector send, IntVector subv,
                        int ntr, int dim, int side, int ngh, bool linear){
     if(ntr <= 0) return;
     const bool lin = linear && fv_ghost_lin_env();
@@ -1904,14 +1986,18 @@ void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector 
         fv_indices(Nidc,ck,cj,ci,cl,dim);
         fv_indices(Nid,k,j,i,(side==0?l:N-ngh+l),dim);
         for(int var=0; var<nvar; var++){
-            double v = U.Vector(sb+var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
+            double v = src(sb+var,Nidc[_z_],Nidc[_y_],Nidc[_x_]);
             if(lin)
-                v = fv_lin_ghost(ctx, FvGet{U.Vector,sb+var}, dim, side,
+                v = fv_lin_ghost(ctx, FvGet{src,sb+var}, dim, side,
                                  Nid[_x_],Nid[_y_],Nid[_z_], Nidc[_x_],Nidc[_y_],Nidc[_z_],
                                  bx,by,bz);
             U.Vector(rb+var,Nid[_z_],Nid[_y_],Nid[_x_]) = v;
         }
     }, "gather_fv_coarser");
+}
+void gather_fv_coarser(FV_Solution U, IntVector recv, IntVector send, IntVector subv,
+                       int ntr, int dim, int side, int ngh, bool linear){
+    gather_fv_coarser(U, U.Vector, recv, send, subv, ntr, dim, side, ngh, linear);
 }
 
 //FINER: the receiver is coarse and each fine neighbour supplies one quadrant of

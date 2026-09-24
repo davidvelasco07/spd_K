@@ -1384,12 +1384,91 @@ struct Mesh : public PhysicsModule {
     //coarse->fine pass consumes it.
     bool fv_ghosts_stale_ = true;
 
+    //The symmetric coarse->fine fill (fv_symfill_on, amr_boundary.cpp): the
+    //same-level, fine->coarse and physical passes of EVERY direction first,
+    //one snapshot of the state, then every coarse->fine fill of every direction
+    //reading the snapshot, then the physical and same-level corner passes
+    //again so that wall corners mirror the fresh fills and same-level corners
+    //come from their owners. The x and y fills see identical data, so the
+    //ghosts are invariant under x<->y, which the per-direction sweep of
+    //Exchange_fv_field is not. Both exchange paths run the same phases.
+    FV_Vector fv_snap_;
+    std::vector<FV_Solution> fv_snap_blocks_;
+    void Exchange_fv_symmetric(FV_Solution Block::*member, FV_Solution* packed, bool linear){
+        if(new_xchg() && packed){
+            FV_Solution& P = *packed;
+            auto same_pass = [&](){
+                for(int dim=0; dim<3; dim++){
+                    if(!cfg.active[dim]) continue;
+                    for(int side=0; side<2; side++)
+                        gather_fv_same(P, xt_[dim][side].recv, xt_[dim][side].send,
+                                       xt_[dim][side].n, dim, side, nGH_rt[dim]);
+                }};
+            auto bc_pass = [&](){
+                for(int dim=0; dim<3; dim++){
+                    if(!cfg.active[dim]) continue;
+                    for(int side=0; side<2; side++)
+                        for(int ib : forest.face_groups[dim][side].bc_ib)
+                            apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim], ib);
+                }};
+            same_pass();
+            for(int dim=0; dim<3; dim++){
+                if(!cfg.active[dim]) continue;
+                for(int side=0; side<2; side++)
+                    gather_fv_finer(P, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                                    xtfi_[dim][side].sub, xtfi_[dim][side].n, dim, side,
+                                    nGH_rt[dim], false);
+            }
+            bc_pass();
+            if(fv_snap_.extent(0)!=P.Vector.extent(0) || fv_snap_.extent(1)!=P.Vector.extent(1)
+               || fv_snap_.extent(2)!=P.Vector.extent(2) || fv_snap_.extent(3)!=P.Vector.extent(3))
+                fv_snap_ = FV_Vector(Kokkos::ViewAllocateWithoutInitializing("fv_snap"),
+                                     P.Vector.layout());
+            Kokkos::deep_copy(fv_snap_, P.Vector);
+            for(int dim=0; dim<3; dim++){
+                if(!cfg.active[dim]) continue;
+                for(int side=0; side<2; side++)
+                    gather_fv_coarser(P, fv_snap_, xtco_[dim][side].recv, xtco_[dim][side].send,
+                                      xtco_[dim][side].sub, xtco_[dim][side].n, dim, side,
+                                      nGH_rt[dim], linear);
+            }
+            bc_pass();
+            same_pass();
+            return;
+        }
+        //Per-block reference path (SPD_OLD_XCHG=1): the same phases over the
+        //forest, with a per-block snapshot.
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_same(forest, blocks, member, dim);
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_finer(forest, blocks, member, dim);
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_bc(forest, blocks, member, dim);
+        fv_snap_blocks_.resize(nblocks);
+        //Per-block host loop: the snapshot of the REFERENCE path only (rule 1).
+        for(int b=0; b<nblocks; b++){
+            const FV_Solution& S = blocks[b].*member;
+            FV_Solution& T = fv_snap_blocks_[b];
+            if(T.Vector.extent(0)!=S.Vector.extent(0) || T.Vector.extent(1)!=S.Vector.extent(1)
+               || T.Vector.extent(2)!=S.Vector.extent(2) || T.Vector.extent(3)!=S.Vector.extent(3)){
+                T = S;
+                T.Vector = FV_Vector(Kokkos::ViewAllocateWithoutInitializing("fv_snap_b"),
+                                     S.Vector.layout());
+            }
+            Kokkos::deep_copy(T.Vector, S.Vector);
+        }
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_coarser(forest, blocks, member, dim, linear, &fv_snap_blocks_);
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_bc(forest, blocks, member, dim);
+        for(int dim=0; dim<3; dim++) if(cfg.active[dim]) forest_exchange_fv_same(forest, blocks, member, dim);
+    }
+
     void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr,
                            bool linear=false){
         g_bc_time = this->t;
         if(linear && fv_ghosts_stale_ && forest_route()){
             fv_ghosts_stale_ = false;
             Exchange_fv_field(member, packed, linear);
+        }
+        if(linear && fv_ghost_lin_on() && fv_symfill_on() && forest_route()){
+            Exchange_fv_symmetric(member, packed, linear);
+            return;
         }
         //Pre-restriction: the limited-linear fill reads the coarse block's
         //transverse ghost rows, and a per-direction sweep leaves the y row

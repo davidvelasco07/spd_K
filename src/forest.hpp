@@ -188,6 +188,14 @@ void forest_exchange_fv_same(BlockForest&, std::vector<Block>&,
 //the pre-restriction sweep it needs is on (SPD_NO_FV_PRERESTRICT unset).
 bool fv_ghost_lin_on();
 bool fv_prerestrict_on();
+bool fv_symfill_on();
+template<typename Block>
+void forest_exchange_fv_coarser(BlockForest&, std::vector<Block>&,
+                                FV_Solution Block::*, int dim, bool linear,
+                                const std::vector<FV_Solution>* snap);
+template<typename Block>
+void forest_exchange_fv_bc(BlockForest&, std::vector<Block>&,
+                           FV_Solution Block::*, int dim);
 template<typename Block>
 void forest_exchange_fv_max(BlockForest&, std::vector<Block>&,
                             FV_Solution Block::*, int dim);

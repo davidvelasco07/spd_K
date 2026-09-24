@@ -51,7 +51,8 @@ bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
 `SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
 limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
-sweep order that left a transverse ghost row stale, rule 6b). Then md5 the dumps of both paths -- and the block
+sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL`
+(the per-direction sweep instead of the symmetric fill order, rule 6b). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -242,6 +243,29 @@ double-Mach problem, neither by the periodic suite:
   every step) and the flux check; a leak that needs two switches ON at once
   is bisected by turning each off alone, then asking what only their
   combination touches.
+- **The fill order is symmetric now (Jacobi, not Gauss-Seidel).** The
+  per-direction sweep let the x fill read a coarse block's y rows before the
+  y same-level/wall passes refreshed them, and -- since 2:1 balance constrains
+  faces, not corners, so a corner can span three levels -- rows that were
+  themselves the y fill. Measured on the 1024^2 Sedov blast with mirror
+  symmetry at 1e-13: x<->y asymmetry 1e-8 (32^2-DoF blocks), 3e-6 (16^2),
+  9e-5 (8^2). `Mesh::Exchange_fv_symmetric` now runs every same, finer and
+  bc pass of every direction, snapshots the state, runs every coarse->fine
+  fill of every direction off the snapshot, then bc and the same-level corner
+  pass again. That alone took the 1024^2 MUSCL lane from 2.8e-6 to 6.7e-9,
+  and the rest was the ghost-ring CORNERS: both the x and the y fill write a
+  fine block's corner ghosts (through the coarse block's transverse ghost row
+  and through the y-neighbour's), each with centred slopes along its own
+  direction only, so the two values differed and the last writer won. Those
+  cells are now INJECTED (the two rows are copies of the same diagonal cell,
+  so the passes agree bitwise; the corner pass still overwrites them from a
+  same-level diagonal owner): 6.7e-9 -> 3.4e-13, i.e. round-off. SDFB4 lanes
+  went 1.2e-6 -> 5.7e-14 (Sedov) and 2e-10 -> 7e-14 (implosion, walls +
+  AMR); mass unchanged at 1e-15; `SPD_NO_FV_SYMFILL=1` is the sweep,
+  bit-identical to the pre-change binary, and packed vs per-block agree
+  bitwise on 7 lanes. Do not put a Gauss-Seidel dependency between
+  directions back into the exchange, and do not give a corner ghost a slope
+  that only one direction can compute.
 - A refined block's `dimension::L` is the BLOCK length, not the box length
   (0.125 for a level-1 block of 4 elements on a unit box). Anything that needs
   the domain size on the block path reads `g_bc_box`.
