@@ -423,6 +423,25 @@ CONFIGS = {
         "field": "W_cv_N64p3_1_0.dat",
         "t_end": 0.038,
     },
+    "hydro_sedov_amr_2d": {
+        # 2D Sedov-Taylor point explosion with the energy given as problem/p0
+        # (E = 1 in R = 0.025, ambient p1 = 1e-3; r_s(0.05) = 0.258 for gamma =
+        # 5/3), two levels of dynamic AMR above a 32^2 root at p = 0. The deposit
+        # radius must exceed the coarsest root's half-diagonal cell distance
+        # (0.022 here) or no root cell sees it and the run is a uniform state
+        # that finishes in one step -- which is exactly what R = 0.02 did.
+        "input": "inputs/sedov.athinput",
+        "overrides": ["mesh/p=0", "job/scheme=vl2", "time/integrator=rk1",
+                      "mesh/nx1=32", "mesh/nx2=32", "meshblock/nx1=8", "meshblock/nx2=8",
+                      "amr/max_level=2", "amr/adapt_interval=20", "amr/criterion=pressure",
+                      "amr/refine_threshold=0.03", "amr/derefine_threshold=0.0075",
+                      "amr/initial_refine=true", "problem/p0=1", "problem/p1=1e-3",
+                      "problem/radius=0.025", "time/tlim=0.05", "output/dt=0.025"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N128p0_2_0.dat",
+        "t_end": 0.05,
+    },
     "hydro_wc_blast_1d_amr": {
         # The same with three levels of dynamic AMR above a 16-element root.
         # The density is uniform at t=0, so the Lohner density indicator cannot

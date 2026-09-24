@@ -40,14 +40,23 @@ KOKKOS_INLINE_FUNCTION
 double sedov_blast(int var, double x, double y, double z, double gm,
                    bool az, ProblemParams pp){
     //Note: set gamma=5./3.
+    //problem/p0 > 0 is the TOTAL energy E deposited in the radius (per unit
+    //length in 2D), so the similarity solution's scale is (E t^2/rho)^(1/4)
+    //in 2D and (E t^2/rho)^(1/5) in 3D; problem/p1 > 0 is the ambient
+    //pressure. With both unset the deposit is the historical p = gamma-1
+    //inside R over an ambient 1e-6, i.e. E = (gamma-1)/(gamma-1) * vol(R) =
+    //pi R^2 in 2D, which the existing decks and goldens rely on.
     double r,R=pp.radius;
     r=sqrt(pow(x-0.5,2.0) + pow(y-0.5,2.0) + (az ? pow(z-0.5,2.0) : 0.0));
+    const double pamb = pp.p1 > 0.0 ? pp.p1 : 1E-6;
+    const double vol  = az ? 4.0*M_PI*R*R*R/3.0 : M_PI*R*R;
+    const double pin  = pp.p0 > 0.0 ? pamb + (gm-1)*pp.p0/vol : 1E-6+(gm-1);
     if(var==0) return pp.d0;
     else if(var==_p_){
         if(r<R)
-            return 1E-6+(gm-1);
+            return pin;
         else
-            return 1E-6;
+            return pamb;
     }
     else
         return 0;
