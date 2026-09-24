@@ -282,6 +282,24 @@ Instrument-specific traps, all real:
   through it segfaults (`pv.troubles` for MHD was assigned past the `return` that
   ends the MHD branch).
 
+## 7a. A parameter nobody reads: prove the input moves the output before calibrating
+
+`amr/refine_threshold` and `amr/derefine_threshold` were read by the shear
+criterion ONLY; pressure and Lohner hard-coded 0.03/0.0075 and 0.5/0.0125 in
+`refine_from_score` and ignored the deck. The tell was cheap and was missed for
+weeks: Sod MUSCL AMR with `refine_threshold` 0.03, 0.1, 0.3 and unset gave
+md5-identical block maps. Every calibration made on those numbers before
+`4c6af95` was a no-op, and every threshold quoted for those runs was wrong
+(the Apollo DMR `*p` lanes ran 0.03/0.0075 whatever their log says).
+
+Now every threshold criterion reads the pair, the compiled values are the
+per-criterion defaults resolved in `main.cpp`, and `parameters.txt` records the
+resolved pair, not a sentinel. **Before calibrating anything, run the deck at
+two values of the knob and md5 the block maps: identical maps mean the knob is
+not connected.** The same A/B in the other direction (deck sets nothing -> must
+be bit-identical to the old binary) is what made the fix safe: 0 of 4 files
+differ on three decks.
+
 ## 7b. With the cascade live, cell values are NOT reproducible across backends
 
 The MOOD detector is a THRESHOLD. A round-off difference flips one cell's
