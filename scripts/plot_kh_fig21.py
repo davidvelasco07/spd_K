@@ -70,6 +70,9 @@ def main():
 
     # Paper domain is [-0.5,0.5]^2; the code box is [0,1]^2.
     ext = [-0.5, 0.5, -0.5, 0.5]
+    # rms is the root mean square of the fractional difference, sqrt(mean(frac^2)),
+    # the quantity Tables 4/5 of Paper V and kh_stats.py quote; the label used to
+    # print frac.std(), which drops the mean.
     frac = (rho_a - rho_u) / rho_u
 
     fig, axes = plt.subplots(2, 2, figsize=(12.5, 11.6))
@@ -93,7 +96,7 @@ def main():
                            interpolation="nearest")
     axes[1, 0].set_title(
         f"|fractional difference| in $\\rho$ (AMR $-$ uniform)\n"
-        f"max = {adiff.max():.3f}, rms = {frac.std():.4f}", fontsize=11)
+        f"max = {adiff.max():.3f}, rms = {np.sqrt((frac**2).mean()):.4f}", fontsize=11)
     plt.colorbar(im, ax=axes[1, 0], fraction=0.046,
                  label=r"$|\rho_{\rm AMR}-\rho_{\rm uni}|/\rho_{\rm uni}$")
 
@@ -127,7 +130,7 @@ def main():
     fig.tight_layout()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     fig.savefig(args.out, dpi=150)
-    print(f"wrote {args.out}: |frac| max {np.abs(frac).max():.4f}, rms {frac.std():.5f}")
+    print(f"wrote {args.out}: |frac| max {np.abs(frac).max():.4f}, rms {np.sqrt((frac**2).mean()):.5f}")
 
 
 if __name__ == "__main__":
