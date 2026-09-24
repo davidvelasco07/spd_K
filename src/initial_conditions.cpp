@@ -1,5 +1,6 @@
 #include "spd_k.hpp"
 #include "user_ic.hpp"
+#include "dmr.hpp"
 
 //All initial conditions return PRIMITIVE variables: var 0 = density,
 //_vx_/_vy_/_vz_ = velocities, _p_ = pressure. Runtime parameters come from
@@ -114,6 +115,26 @@ double kelvin_helmholtz(int var, double x, double y, double z, ProblemParams pp)
                 +exp(-pow(y-0.75,2)/(2*pp.sigma*pp.sigma)));
     else if(var==_p_)  return pp.p0;
     else return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double woodward_colella(int var, double x, double y, double z, ProblemParams pp){
+    //Woodward & Colella (1984) interacting blast waves on [0,1] along pp.dir:
+    //rho = 1 at rest, p = 1000 for s < 0.1, 0.01 for 0.1 <= s < 0.9 and 100
+    //beyond. Reflecting walls, gamma = 1.4, compare at t = 0.038 (Paper I
+    //sec 4.2.2). The states are the standard ones and are hardcoded, as for
+    //shu_osher.
+    double s = (pp.dir==_x_ ? x : (pp.dir==_y_ ? y : z));
+    if(var==0)        return 1.0;
+    else if(var==_p_) return s < 0.1 ? 1000.0 : (s < 0.9 ? 0.01 : 100.0);
+    else return 0;
+}
+
+KOKKOS_INLINE_FUNCTION
+double dmr(int var, double x, double y){
+    //Double Mach reflection at t = 0: post-shock state behind the line
+    //x = 1/6 + y/tan(60 deg), undisturbed gas ahead (dmr.hpp).
+    return dmr_prim(dmr_behind(x,y,0.0), var);
 }
 
 KOKKOS_INLINE_FUNCTION
@@ -244,6 +265,8 @@ double initial_condition(int problem, int var, double x, double y, double z,
         //Athena++ smooth-interface KH (Stone et al. 2020); see overload without pp
         case _ic_kelvin_helmholtz_: return kelvin_helmholtz(var,x,y);
         case _ic_implosion_:        return implosion(var,x,y,z,pp);
+        case _ic_woodward_colella_: return woodward_colella(var,x,y,z,pp);
+        case _ic_dmr_:              return dmr(var,x,y);
         case _ic_rti_:              return rti(var,x,y,gm,gy,pp);
         case _ic_ha_jet_:           return ha_jet(var,x,y,z,pp);
         case _ic_user_:             return user_ic(var,x,y,z,gm,ay,az,pp);

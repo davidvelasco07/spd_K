@@ -159,6 +159,11 @@ struct Mesh : public PhysicsModule {
             exit(1);
         }
         build_block_solvers();
+        //Boundary geometry/time for the block-path physical boundaries
+        //(apply_domain_bc_fp/fv read them); the first exchange runs before the
+        //first ComputeDt, which refreshes them every step.
+        g_bc_time = this->t;
+        g_bc_geom[_x_] = &Xd; g_bc_geom[_y_] = &Yd; g_bc_geom[_z_] = &Zd;
         initial_refine();
 
         n_ader = blocks[0].n_ader;
@@ -763,6 +768,21 @@ struct Mesh : public PhysicsModule {
     //SPD_NO_PACK=1 routes a uniform forest through the per-block forest
     //exchange instead of the batched packed kernel. The two must agree
     //exactly; setting it isolates whether a discrepancy lives in the pack.
+    //A run with a reflecting wall or the double-Mach boundary takes the
+    //forest/table exchange even on a uniform mesh: the uniform fast-path
+    //kernels (block_boundary_*, neighbors_uniform) know periodic and gradfree
+    //only, while the forest labels every non-periodic face NEIGH_BC and fills
+    //it through apply_domain_bc_fp/fv, which implement all four.
+    static bool wall_bc(){
+        static const bool v = [](){
+            for(int d=0; d<3; d++)
+                if(cfg.active[d] && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_)) return true;
+            return false;
+        }();
+        return v;
+    }
+    bool forest_route() const { return forest.max_level()>0 || wall_bc(); }
+
     static bool no_pack(){
         static bool v = getenv("SPD_NO_PACK") != nullptr;
         return v;
@@ -1006,12 +1026,13 @@ struct Mesh : public PhysicsModule {
             //Physical boundaries: bc_ib is empty for periodic and when the
             //all-same fast path is in use, so this is a no-op there.
             for(int ib : forest.face_groups[dim][side].bc_ib)
-                apply_domain_bc_fp(block_fp_dbg(ib, dim), dim, side);
+                apply_domain_bc_fp(block_fp_dbg(ib, dim), dim, side, ib);
         }
     }
 
     void Exchange_fp(){
         if(nblocks<=1 && forest.max_level()==0) return;
+        g_bc_time = this->t;
         //SPD_EXCHANGE_CHECK=1 runs both exchange implementations from the
         //same pre-state and reports the first element where they disagree.
         //The forest path is verified bit-exact against a single block, so it
@@ -1333,7 +1354,7 @@ struct Mesh : public PhysicsModule {
                               linear);
         for(int side=0; side<2; side++)
             for(int ib : forest.face_groups[dim][side].bc_ib)
-                apply_domain_bc_fv(blocks[ib].*member, dim, side, ngh);
+                apply_domain_bc_fv(blocks[ib].*member, dim, side, ngh, ib);
     }
 
     //SPD_EXCHANGE_CHECK=1 runs both FV implementations from the same pre-state
@@ -1355,8 +1376,21 @@ struct Mesh : public PhysicsModule {
     //`linear` = this is a STATE field (U_old / U_new / U_old_fv): its
     //coarse->fine ghosts take the limited-linear fill. Flags, blend factors and
     //the cascade index keep injection (a reconstructed flag is not a flag).
+    //After a build or a regrid the transverse ghost rows of a reused pack
+    //slot hold another block's data, and the limited-linear coarse->fine fill
+    //reads a coarse block's transverse ghosts for its slope (see fv_lin_ghost).
+    //One extra full exchange of the first state field refreshes every ghost
+    //row through the same-level, finer and physical passes before any
+    //coarse->fine pass consumes it.
+    bool fv_ghosts_stale_ = true;
+
     void Exchange_fv_field(FV_Solution Block::*member, FV_Solution* packed=nullptr,
                            bool linear=false){
+        g_bc_time = this->t;
+        if(linear && fv_ghosts_stale_ && forest_route()){
+            fv_ghosts_stale_ = false;
+            Exchange_fv_field(member, packed, linear);
+        }
         //SPD_NEW_XCHG routes the FV halo through the transaction tables. It
         //needs the whole-pack view, so a field without one still takes the
         //forest path.
@@ -1369,7 +1403,7 @@ struct Mesh : public PhysicsModule {
             //Corner pass: after every direction, refill each transverse ghost
             //corner from the same-level neighbour that owns it. Batched, or it
             //undoes the saving -- per block this ran after every exchange.
-            if(forest.max_level()>0)
+            if(forest_route())
                 for(int dim=0; dim<3; dim++){
                     if(!cfg.active[dim]) continue;
                     const int ngh = nGH_rt[dim];
@@ -1382,7 +1416,7 @@ struct Mesh : public PhysicsModule {
         }
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
-            if(forest.max_level()>0 || no_pack()){
+            if(forest_route() || no_pack()){
                 forest_exchange_fv(forest, blocks, member, dim, linear);
             } else if(packed){
                 block_boundary_fv_b(*packed,nbrL_[dim],nbrR_[dim],
@@ -1395,7 +1429,7 @@ struct Mesh : public PhysicsModule {
                 }
             }
         }
-        if(forest.max_level()>0)
+        if(forest_route())
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim])
                     forest_exchange_fv_same(forest, blocks, member, dim);
@@ -1437,7 +1471,7 @@ struct Mesh : public PhysicsModule {
                 mirror_faces_b(P, xtfi_[dim][side].recv, xtfi_[dim][side].n, dim, side);
             }
             for(int ib : forest.face_groups[dim][side].bc_ib)
-                apply_domain_bc_fp(blocks[ib].*member, dim, side);
+                apply_domain_bc_fp(blocks[ib].*member, dim, side, ib);
         }
         //SPD_BREAK_SDGATHER=1 perturbs one entry, which validates the comparison
         //itself: unless this makes Exchange_sd_check report a difference, the check
@@ -1520,7 +1554,8 @@ struct Mesh : public PhysicsModule {
                            bool cf_prolong=true, SD_Solution* packed=nullptr){
         if(!cfg.active[dim]) return;
         if(nblocks<=1 && forest.max_level()==0) return;
-        if(forest.max_level()>0){
+        g_bc_time = this->t;
+        if(forest_route()){
             //A field with a whole-pack view goes through the tables; one without
             //still takes the per-block forest path.
             //SPD_NO_SD_GATHER=1 forces the per-block forest path for SD fields
@@ -1544,6 +1579,7 @@ struct Mesh : public PhysicsModule {
     }
 
     void Exchange_fv_field_max(FV_Solution Block::*member, FV_Solution* packed=nullptr){
+        g_bc_time = this->t;
         //The cascade halo runs once per revision, so this was the single
         //largest source of launches in an AMR cascade run (41% of them).
         if(new_xchg() && packed){
@@ -1552,7 +1588,7 @@ struct Mesh : public PhysicsModule {
                 if(exchange_check()) Exchange_fv_check(*packed, member, dim, true);
                 else                 gather_all_fv(*packed, member, dim, true);
             }
-            if(forest.max_level()>0)
+            if(forest_route())
                 for(int dim=0; dim<3; dim++){
                     if(!cfg.active[dim]) continue;
                     const int ngh = nGH_rt[dim];
@@ -1565,7 +1601,7 @@ struct Mesh : public PhysicsModule {
         }
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
-            if(forest.max_level()>0){
+            if(forest_route()){
                 forest_exchange_fv_max(forest, blocks, member, dim);
             } else {
                 for(int b=0; b<nblocks; b++){
@@ -1575,7 +1611,7 @@ struct Mesh : public PhysicsModule {
                 }
             }
         }
-        if(forest.max_level()>0)
+        if(forest_route())
             for(int dim=0; dim<3; dim++)
                 if(cfg.active[dim])
                     forest_exchange_fv_same(forest, blocks, member, dim);
@@ -2689,6 +2725,10 @@ struct Mesh : public PhysicsModule {
     double ComputeDt() override {
         Region r("ComputeDt");
         PHASE("rk/compute_dt");
+        //The boundary fill of the double-Mach problem needs the time of the
+        //state it closes and each block's coordinates (forest.hpp globals).
+        g_bc_time = this->t;
+        g_bc_geom[_x_] = &Xd; g_bc_geom[_y_] = &Yd; g_bc_geom[_z_] = &Zd;
         this->Dt = 1e300;
         bool diverged = false;
         if(rk_batched()){
@@ -3494,6 +3534,7 @@ struct Mesh : public PhysicsModule {
             if(forest.max_level()==0) Sync_face_B_mhd();
             else Exchange_face_B_mhd();
         }
+        fv_ghosts_stale_ = true;   //new/reused slots: refresh ghosts before the first fill
         if constexpr (is_mhd) report_divb("after exchange");
         for(int ib=0; ib<nblocks; ib++) finish_block_ic(ib);
         if(mass_dbg && Master){

@@ -1,0 +1,50 @@
+# Double Mach reflection (Woodward & Colella 1984): a Mach-10 shock in gamma=1.4
+# air meets a 30-degree ramp, posed on [0,4] x [0,1] with the ramp as the bottom
+# wall from x = 1/6 (Paper I sec 4.3.4; Athena++ sec 3.4.2). The `doublemach`
+# boundary type (src/dmr.hpp) prescribes the post-shock state on the left and
+# on the bottom for x < 1/6, a reflecting wall on the rest of the bottom, the
+# exact moving shock on the top, and outflow on the right. Block path only:
+# keep the <meshblock> block. Compare at t = 0.2; refine on the density Lohner
+# indicator. Cells are square when nx1 = 4 nx2.
+<job>
+system   = hydro
+fallback = true
+scheme   = sd
+
+<mesh>
+p     = 3
+nx1   = 128
+nx2   = 32
+nx3   = 1
+x1len = 4.0
+x2len = 1.0
+x1_bc = doublemach
+x2_bc = doublemach
+
+<meshblock>
+nx1 = 4
+nx2 = 4
+nx3 = 1
+
+<amr>
+max_level      = 2
+adapt_interval = 3
+criterion      = lohner
+initial_refine = true
+
+<time>
+tlim       = 0.2
+cfl        = 0.3
+integrator = rk3
+
+<output>
+dt   = 0.1
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = double_mach
+
+<fallback>
+style = cascade

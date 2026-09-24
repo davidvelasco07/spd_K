@@ -3,6 +3,7 @@
 #include "forest.hpp"
 #include <fstream>
 #include <regex>
+#include "dmr.hpp"
 
 int bc_id(const string &name){
     if(name == "periodic")   return _periodic_;
@@ -10,6 +11,7 @@ int bc_id(const string &name){
     if(name == "reflective") return _reflective_;
     if(name == "outflow")    return _outflow_;    //gradfree + no re-entry
     if(name == "inflow")     return _inflow_;
+    if(name == "doublemach") return _dmr_;      //Woodward & Colella DMR, blocks only
     cout<<"ERROR: unknown boundary type '"<<name<<"'"<<endl;
     exit(1);
 }
@@ -23,6 +25,8 @@ int problem_id(const string &name){
     if(name == "shu_osher")        return _ic_shu_osher_;
     if(name == "kelvin_helmholtz") return _ic_kelvin_helmholtz_;
     if(name == "implosion")        return _ic_implosion_;
+    if(name == "woodward_colella") return _ic_woodward_colella_;
+    if(name == "double_mach")      return _ic_dmr_;
     if(name == "rti")              return _ic_rti_;
     if(name == "orszag_tang")      return _ic_orszag_tang_;
     if(name == "field_loop")       return _ic_field_loop_;
@@ -73,6 +77,12 @@ void problem_defaults(int problem, ProblemParams &pp){
             break;
         case _ic_user_:             //free-form: defaults for the sample Gaussian pulse
             pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.5,0.1, 0};
+            break;
+        case _ic_woodward_colella_: //states hardcoded in the IC; dir = tube direction
+            pp = {0.0, 0.0,0.0,0.0, 1.0,0.0, 1000.0,0.01, 0.1,0.0, 0};
+            break;
+        case _ic_dmr_:              //states hardcoded in dmr.hpp
+            pp = {0.0, 0.0,0.0,0.0, 1.4,8.0, 1.0,116.5, DMR_XC,0.0, 0};
             break;
         case _ic_mhd_vortex_:      //amp=V, v1/v2 background, p0 base P, p1=|B|, sigma>0 -> Leidi kernel
             pp = {1.0, 1.0,1.0,0.0, 1.0,0.0, 1.0,1.0, 0.0,0.0, 0};
@@ -177,6 +187,7 @@ int main(int argc, char** argv){
         double boxlen_x = pin.GetOrAddReal("mesh","x1len",1.0);
         double boxlen_y = pin.GetOrAddReal("mesh","x2len",1.0);
         double boxlen_z = pin.GetOrAddReal("mesh","x3len",1.0);
+        g_bc_box[_x_] = boxlen_x; g_bc_box[_y_] = boxlen_y; g_bc_box[_z_] = boxlen_z;
 
         //Dimensionality is chosen at runtime: a direction with a single
         //element is inactive (no ghosts, no sweeps, no fluxes)
@@ -668,14 +679,19 @@ int main(int argc, char** argv){
             //4-block implosion, and the SD-only variant diverges outright).
             //Reflective walls remain available in single-block runs, which use
             //the boundary.cpp path instead.
+            //Physical boundaries on a block forest: periodic and gradfree for
+            //every system; reflecting walls and the double-Mach boundary for
+            //hydro only (apply_domain_bc_fp/fv). MHD walls under blocks would
+            //also need the face-B and EMF conditions of boundary.cpp/mhd.cpp,
+            //which the forest path does not have; keep refusing them.
             for(int d=0; d<3; d++){
                 if(!cfg.active[d]) continue;
                 if(cfg.bc[d]==_periodic_ || cfg.bc[d]==_gradfree_) continue;
+                if(system_name=="hydro" && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_)) continue;
                 if(Master)
-                    cout<<"ERROR: meshblocks/AMR support only periodic and gradfree "
-                        <<"boundaries, but x"<<(d+1)<<"_bc is neither. Reflective "
-                        <<"boundaries are implemented for single-block runs only "
-                        <<"(remove the <meshblock> block, or use periodic/gradfree)."<<endl;
+                    cout<<"ERROR: meshblocks/AMR support periodic and gradfree boundaries, "
+                        <<"plus reflective and doublemach for hydro, but x"<<(d+1)
+                        <<"_bc is none of those for system "<<system_name<<"."<<endl;
                 exit(1);
             }
             //Mixed-level AMR needs the MOOD cascade, not the fractional blend.
@@ -704,6 +720,14 @@ int main(int argc, char** argv){
                 exit(1);
             }
         }
+
+        if(!use_mesh)
+            for(int d=0; d<3; d++)
+                if(cfg.active[d] && cfg.bc[d]==_dmr_){
+                    if(Master) cout<<"ERROR: x"<<(d+1)<<"_bc=doublemach is implemented on the "
+                                   <<"block path only: add a <meshblock> block."<<endl;
+                    exit(1);
+                }
 
         if(Master){
             cout<<"system = "<<system_name<<", ndim = "<<cfg.ndim

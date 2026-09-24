@@ -126,11 +126,24 @@ and an RK integrator (`time/integrator=rk2|rk3`); ADER is refused on a mixed-lev
 
 Static patches: `<refinement1>` .. `<refinementN>` blocks with `level` and `x1min/x1max/x2min/x2max/x3min/x3max`.
 
+Physical boundaries on the block path: `periodic` and `gradfree` for every system;
+for hydro also `reflective` (walls, the mirror rule of the single-block path, verified
+to 1e-15 against a single block on the implosion) and `doublemach` (the Woodward &
+Colella double Mach reflection: post-shock inflow on the left and on the bottom for
+x < 1/6, a reflecting wall beyond, the exact moving shock on the top, outflow on the
+right; `src/dmr.hpp`; needs a `<meshblock>` block). MHD walls under blocks are still
+refused.
+
+New problems: `woodward_colella` (1D interacting blasts, `inputs/woodward_colella.athinput`;
+refine on `pressure`, the density is uniform at t=0) and `double_mach`
+(`inputs/dmr.athinput`, domain [0,4] x [0,1]).
+
 Runtime A/B switches (environment variables, all default off = the batched or reconstructed path):
 
 | Variable | Restores |
 |---|---|
 | `SPD_NO_FV_GHOST_LIN=1` | injection of coarse cell values into a fine block's control-volume ghost cells (the limited-linear fill is the default; measured 2.7x / 1.8x lower AMR-vs-uniform rms on the fig-21 MUSCL lane at 1024^2 / 2048^2, no change at p=3) |
+| `SPD_FV_GHOST_TMODE=0|1|2` | transverse slopes of that fill: 2 (default) from the coarse block's neighbours including its own transverse ghost rows; 1 interior rows only; 0 none. 1 and 0 are diagnostics: they leak mass (8e-12 on the p=0 dynamic pulse) |
 | `SPD_NO_PACK=1`, `SPD_OLD_XCHG=1` | per-block exchange paths |
 | `SPD_NO_SCORE_BATCH=1` | host reference of the refinement scores |
 | `SPD_NO_DEREFINE=1` | keeps every refinement (diagnostic) |

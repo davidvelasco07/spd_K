@@ -212,6 +212,32 @@ on both exchange paths. The far-field block pattern that remains (few 1e-4 to
 1e-3 in level-0/1 regions) is the coarse-vs-fine truncation difference and
 AthenaK shows it at the same amplitude; do not chase it as a defect.
 
+Two traps met while extending it to walls (2026-09-24), both caught by the
+double-Mach problem, neither by the periodic suite:
+- The fill's transverse slope reads the coarse block's own transverse ghost
+  rows. Right after a regrid those rows hold ANOTHER block's data (the packs
+  reuse their slots), and the first coarse->fine pass consumed it: a
+  rarefaction under the top wall wherever a refined block touched it, present
+  or absent with the output cadence. `Mesh::Exchange_fv_field` now runs one
+  extra full exchange after every rebuild (`fv_ghosts_stale_`). Do NOT fix it
+  by restricting the slope to interior rows: `SPD_FV_GHOST_TMODE=1` does that
+  and leaks mass, 8e-12 on the p=0 dynamic pulse against 3e-15, because two
+  fine blocks meeting at a coarse block face then see different profiles of
+  the same coarse row.
+- A refined block's `dimension::L` is the BLOCK length, not the box length
+  (0.125 for a level-1 block of 4 elements on a unit box). Anything that needs
+  the domain size on the block path reads `g_bc_box`.
+
+**Walls on the block path exist now (hydro only):** `reflective` and `doublemach`
+are filled by `apply_domain_bc_fp/fv`, and any run with one is routed through
+the forest/table exchange (`Mesh::forest_route()`), whose physical-boundary
+blocks are the only place walls are implemented. The gate is
+`hydro_implosion_muscl_mb_2d`: 4x4 blocks against the single block at 1e-12
+(measured 9.9e-16). The p=3 version carries no golden ON PURPOSE: with the
+cascade live, single-block and multiblock differ by threshold flips on this
+problem -- 166 cells by step 420 in 1D even with GRADFREE walls -- which is
+rule 7b, not a wall bug. A wall gate needs a lane without a detector.
+
 ## 7. Gates: never weaken one to make it green, and give it a negative control
 
 A gate that cannot fail is worth nothing. Each of these has a companion config

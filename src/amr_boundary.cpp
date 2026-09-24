@@ -1,6 +1,11 @@
 #include <map>
 #include <string>
 #include "spd_k.hpp"
+#include "dmr.hpp"
+
+double g_bc_time = 0.0;
+double g_bc_box[3] = {1.0, 1.0, 1.0};
+const std::vector<dimension>* g_bc_geom[3] = {nullptr, nullptr, nullptr};
 #include "forest.hpp"
 #include <type_traits>
 
@@ -169,7 +174,11 @@ static void copy_face_to_ghost(SD_Solution U, SD_Solution src, int dim, int side
     });
 }
 
-static void mirror_face_to_ghost(SD_Solution U, int dim, int side){
+//The ghost interface point takes the block's own interface value: as is for
+//gradfree (zeroth-order outflow), with the normal momentum sign-flipped for a
+//reflecting wall (the Riemann problem then sees (U, mirror U) and returns zero
+//mass and energy flux), which is boundary.cpp's rule for the single-block path.
+static void mirror_face_to_ghost(SD_Solution U, int dim, int side, bool reflect=false){
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
     int nader=U.n_ader, nvar=U.n_var;
@@ -187,45 +196,117 @@ static void mirror_face_to_ghost(SD_Solution U, int dim, int side){
             v = U.value(t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
             amr_indices(Nid,nid,k,j,i,kk,jj,ii,N-1,0,dim);
         }
+        if(reflect && var == 1+dim) v = -v;
         U.Vector(INDICES) = v;
         }}
     });
 }
 
-void apply_domain_bc_fp(SD_Solution U, int dim, int side){
-    if(cfg.bc[dim] != _gradfree_) return;
-    mirror_face_to_ghost(U, dim, side);
+//Double-Mach boundary on the flux-point lattice (dmr.hpp): left = post-shock
+//inflow, right = outflow copy, bottom = post-shock for x < 1/6 and reflecting
+//wall beyond, top = post-shock behind the exact moving shock and undisturbed
+//gas ahead of it. Geometry and time come from the globals in forest.hpp.
+static void dmr_face_to_ghost(SD_Solution U, int dim, int side, int ib){
+    const dimension& gx = (*g_bc_geom[_x_])[ib];
+    Matrix xc = gx.sd_centers;
+    //The domain height, not gy.L: a refined block's dimension carries the
+    //BLOCK length there (0.125 for a level-1 block of 4 elements on a unit
+    //box), which put the top boundary's shock at the wrong height and left an
+    //ambient ghost over post-shock gas -- a rarefaction under the top wall
+    //wherever a refined block touched it.
+    const double yL = g_bc_box[_y_], t = g_bc_time, gm = cfg.gamma;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader=U.n_ader, nvar=U.n_var;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
+    int px=U.nx, py=U.ny, pz=U.nz;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        //0 copy, 1 reflect, 2 post-shock, 3 undisturbed
+        int mode;
+        if(dim==_x_) mode = (side==0) ? 2 : 0;
+        else {
+            const double x = xc(i,ii);
+            if(side==0) mode = (x < DMR_XC) ? 2 : 1;
+            else        mode = dmr_behind(x, yL, t) ? 2 : 3;
+        }
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int Nid[3], nid[3];
+        double v;
+        if(side==0){
+            v = U.value(t_id,var,k,j,i,kk,jj,ii,1,0,dim);
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,0,n-1,dim);
+        } else {
+            v = U.value(t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,N-1,0,dim);
+        }
+        if(mode==1 && var == 1+dim) v = -v;
+        else if(mode==2) v = dmr_cons(true,  var, gm);
+        else if(mode==3) v = dmr_cons(false, var, gm);
+        U.Vector(INDICES) = v;
+        }}
+    });
+}
+
+void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
+    const int bc = cfg.bc[dim];
+    if(bc == _gradfree_)        mirror_face_to_ghost(U, dim, side, false);
+    else if(bc == _reflective_) mirror_face_to_ghost(U, dim, side, true);
+    else if(bc == _dmr_)        dmr_face_to_ghost(U, dim, side, ib);
 }
 
 //FV counterpart: fill a block's ghost slab at a physical domain boundary.
 //The gathers only ever write ghosts that have a neighbour, so without this
 //the ghost slab of a boundary block keeps whatever was last in it.
 //
-//Gradfree only, matching apply_domain_bc_fp. Reflective is NOT handled here
-//and must not be: the mesh path has no reflective support anywhere (the
-//uniform neighbour tables turn it into a periodic wrap), so a silent mirror
-//here would paper over half of a wrong answer. main.cpp rejects a
-//multiblock run with any other boundary type.
-//
-//Semantics match the single-block path in boundary.cpp: ghost cell l takes
-//the interior cell nGH+l on the low side, N-2*nGH+l on the high side.
-void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh){
-    if(cfg.bc[dim] != _gradfree_) return;
+//Semantics match the single-block path in boundary.cpp: gradfree copies the
+//nearest interior cell (ghost l <- nGH+l on the low side, N-2*nGH+l on the
+//high side); a reflecting wall mirrors the first ngh interior cells across the
+//wall (ghost l <- 2*nGH-1-l, N-nGH-1-l) with the normal momentum sign-flipped
+//-- state arrays only, a flag array (nvar = 1) is mirrored as is; the
+//double-Mach boundary prescribes the post-shock or undisturbed state where
+//dmr.hpp says so and copies flags there. The uniform-mesh fast path never
+//sees a wall: Mesh routes any run with one through the forest/table exchange,
+//whose physical-boundary blocks end up here.
+void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
+    const int bc = cfg.bc[dim];
+    if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_) return;
     const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     const int nvar = U.n_var;
     const int Nx = (dim==_x_ ? ngh : U.Nx);
     const int Ny = (dim==_y_ ? ngh : U.Ny);
     const int Nz = (dim==_z_ ? ngh : U.Nz);
+    const bool state = nvar > 1;
+    Vector xc; const double yL = g_bc_box[_y_];   //domain height (see dmr_face_to_ghost)
+    if(bc == _dmr_) xc = (*g_bc_geom[_x_])[ib].fv_centers;
+    const double t = g_bc_time, gm = cfg.gamma;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
-        const int sl = (side==0 ? ngh+l : N-2*ngh+l);  //nearest interior cell
-        const int dl = (side==0 ? l     : N-ngh+l);    //my ghost cell
+        //0 copy, 1 mirror, 2 post-shock, 3 undisturbed
+        int mode = 0;
+        if(bc == _reflective_) mode = 1;
+        else if(bc == _dmr_){
+            if(dim==_x_) mode = (side==0) ? 2 : 0;
+            else {
+                const double x = xc(i);
+                if(side==0) mode = (x < DMR_XC) ? 2 : 1;
+                else        mode = dmr_behind(x, yL, t) ? 2 : 3;
+            }
+            if(!state && mode >= 2) mode = 0;
+        }
+        const int sl = (mode==1) ? (side==0 ? 2*ngh-1-l : N-ngh-1-l)
+                                 : (side==0 ? ngh+l     : N-2*ngh+l);
+        const int dl = (side==0 ? l : N-ngh+l);    //my ghost cell
         int Nsrc[3], Ndst[3];
         fv_indices(Nsrc,k,j,i,sl,dim);
         fv_indices(Ndst,k,j,i,dl,dim);
-        for(int var=0; var<nvar; var++)
-            U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) =
-            U.Vector(var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
+        for(int var=0; var<nvar; var++){
+            double v = U.Vector(var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
+            if(mode==1 && var == 1+dim) v = -v;
+            else if(mode==2) v = dmr_cons(true,  var, gm);
+            else if(mode==3) v = dmr_cons(false, var, gm);
+            U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) = v;
+        }
     }, "apply_domain_bc_fv");
 }
 
@@ -281,7 +362,7 @@ void forest_exchange_fp(BlockForest& forest, std::vector<Block>& blocks, int dim
             copy_face_to_ghost(block_fp(blocks[g.same_ib[k]], dim),
                                block_fp(blocks[g.same_jb[k]], dim), dim, side);
         for(int ib : g.bc_ib)
-            apply_domain_bc_fp(block_fp(blocks[ib], dim), dim, side);
+            apply_domain_bc_fp(block_fp(blocks[ib], dim), dim, side, ib);
         for(size_t k=0; k<g.co_ib.size(); k++){
             SD_Solution& fine = block_fp(blocks[g.co_ib[k]], dim);
             SD_Solution& coarse = block_fp(blocks[g.co_jb[k]], dim);
@@ -328,7 +409,7 @@ void forest_exchange_sd(BlockForest& forest, std::vector<Block>& blocks,
             copy_face_to_ghost(blocks[g.same_ib[k]].*member,
                                blocks[g.same_jb[k]].*member, dim, side);
         for(int ib : g.bc_ib)
-            apply_domain_bc_fp(blocks[ib].*member, dim, side);
+            apply_domain_bc_fp(blocks[ib].*member, dim, side, ib);
         if(!cf_prolong){
             for(size_t k=0; k<g.co_ib.size(); k++)
                 mirror_face_to_ghost(blocks[g.co_ib[k]].*member, dim, side);
@@ -812,6 +893,11 @@ static bool fv_ghost_lin_env(){
 }
 
 struct FvLinCtx {
+    int tmode = 2;           //transverse slopes: 2 (default) from the coarse block's neighbours including its
+                             //own transverse ghost rows, 1 interior rows only, 0 none. SPD_FV_GHOST_TMODE
+                             //selects; 1 and 0 are diagnostics: they leak mass (8e-12 on the p=0 dynamic
+                             //pulse against round-off for 2) because two fine blocks meeting at a coarse
+                             //block face then see different profiles of the same coarse row.
     int nsp;                 //sub-cells per element, p+1
     int NGx, NGy, NGz;       //ghost elements per direction
     int gx, gy, gz;          //ghost cells per direction
@@ -822,6 +908,7 @@ struct FvLinCtx {
 
 static FvLinCtx make_fv_lin_ctx(const FV_Solution& U){
     FvLinCtx c;
+    { static const int tm = getenv("SPD_FV_GHOST_TMODE") ? atoi(getenv("SPD_FV_GHOST_TMODE")) : 2; c.tmode = tm; }
     c.xfp = amr_x_fp;
     c.nsp = (int)amr_x_fp.extent(0) - 1;
     c.NGx = NGH_rt[_x_]; c.NGy = NGH_rt[_y_]; c.NGz = NGH_rt[_z_];
@@ -885,10 +972,20 @@ double fv_lin_ghost(const FvLinCtx& c, const FvGet& get, int dim, int side,
         }else{
             //Transverse: skip where the caller clamped the coarse index (a
             //corner outside the coarse block, refilled by the same-level pass)
-            //or where a slope neighbour would fall outside the array.
+            //or where a slope neighbour falls outside the array. The slope of
+            //the coarse row next to a block face reads the coarse block's own
+            //transverse ghost row, filled by the other direction's pass -- one
+            //stage stale during evolution, which conserves mass to round-off,
+            //but STALE FROM ANOTHER BLOCK right after a regrid, because the
+            //packs reuse their slots: on the double-Mach problem that seeded a
+            //rarefaction under the top wall wherever a refined block touched
+            //it. Mesh::Exchange_fv_field runs a full extra exchange after every
+            //rebuild so that those rows are fresh before this pass reads them.
             const int b  = (d==_x_ ? bx : (d==_y_ ? by : bz));
             const int uc = g + fv_fdiv2(b*(N-2*g) + (fi-g));
-            if(uc != ci || ci-1 < 0 || ci+1 > N-1) continue;
+            if(c.tmode == 0 || uc != ci) continue;
+            if(c.tmode == 1 && (ci-1 < g || ci+1 > N-1-g)) continue;
+            if(c.tmode == 2 && (ci-1 < 0 || ci+1 > N-1)) continue;
             Xf = 0.5*((double)(b*Ne) + fv_ref_pos(fi, c.nsp, NG, g, c.xfp));
             Xc = fv_ref_pos(ci,   c.nsp, NG, g, c.xfp);
             Xm = fv_ref_pos(ci-1, c.nsp, NG, g, c.xfp);
@@ -1105,7 +1202,7 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
         const FaceGroups& g = forest.face_groups[dim][side];
         //Physical boundaries, as gather_all_fp does for the flux points.
         for(int ib : g.bc_ib)
-            apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim]);
+            apply_domain_bc_fv(blocks[ib].*member, dim, side, nGH_rt[dim], ib);
     }
 }
 

@@ -31,7 +31,15 @@ plus command-line overrides. Checks per configuration:
   hydro_amr_2level_2d : same with two refinement levels
   hydro_amr_muscl_2d : dynamic AMR at p=0; the only cover for the
                    limited-linear prolongation (p>=1 uses the amr_P matrix)
-  hydro_implosion_2d : reflective-wall implosion, mass conserved
+  hydro_implosion_2d : reflective-wall implosion, mass conserved; golden
+  hydro_implosion_mb_2d : the same in 4x4 blocks -- reflecting walls on the
+                   block path (apply_domain_bc_fp/fv); the stitched active
+                   region must match the single-block golden
+  hydro_implosion_amr_2d : the same with dynamic AMR (walls + level jumps)
+  hydro_wc_blast_1d_mb : Woodward-Colella interacting blasts in 8 blocks with
+                   walls, then with 3 levels of AMR; mass conserved to round-off
+  hydro_dmr_amr_2d : double Mach reflection, the `doublemach` boundary on the
+                   block path with dynamic AMR; finite and mixed-level
   mhd_*          : Orszag-Tang / field-loop MHD goldens + divB checks
   mhd_*_smr_2d   : true-2D MHD static refinement (mixed levels + divB)
   mhd_*_amr_2d   : true-2D MHD dynamic AMR (face-B transfer + mixed levels)
@@ -338,9 +346,114 @@ CONFIGS = {
         "input": "inputs/implosion.athinput",
         "overrides": ["time/tlim=0.1", "output/dt=0.05"],
         "ndim": 2,
+        "checks": ["mass_strict", "golden"],
+        "golden_name": "hydro_implosion",
+        "golden_rtol": 1e-6,
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_implosion_mb_2d": {
+        # Reflecting walls on the block path. The mesh path used to refuse any
+        # non-periodic, non-gradfree boundary (its uniform neighbour tables
+        # wrapped a wall around the domain: 56% error while conserving mass).
+        # Walls now go through the forest/table exchange, whose physical
+        # boundary blocks are filled by apply_domain_bc_fp/fv with the same
+        # mirror rule boundary.cpp uses, so 4x4 blocks must reproduce the
+        # single-block golden in the active region.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05",
+                      "meshblock/nx1=8", "meshblock/nx2=8"],
+        # No golden here: with the cascade live the single-block and the
+        # block path differ by threshold flips on this problem (166 cells by
+        # step 420 in 1D even with GRADFREE walls, i.e. it is not the wall),
+        # see CLAUDE.md 7b. The exact wall gate is the MUSCL pair below.
+        "ndim": 2,
         "checks": ["mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.1,
+    },
+    "hydro_implosion_muscl_2d": {
+        # Reference for the wall gate: MUSCL has no detector, so a single
+        # block and 4x4 blocks must agree to the last bit.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05", "mesh/p=0",
+                      "job/scheme=vl2", "time/integrator=rk1"],
+        "ndim": 2,
+        "checks": ["mass_strict", "golden"],
+        "field": "W_cv_N32p0_1_0.dat",
+        "t_end": 0.1,
+        "golden_name": "hydro_implosion_muscl",
+        "golden_rtol": 1e-12,
+    },
+    "hydro_implosion_muscl_mb_2d": {
+        # THE reflecting-wall gate on the block path: bit-identical to the
+        # single-block golden (rtol 1e-12) with walls on all four sides.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05", "mesh/p=0",
+                      "job/scheme=vl2", "time/integrator=rk1",
+                      "meshblock/nx1=8", "meshblock/nx2=8"],
+        "ndim": 2,
+        "checks": ["mass_strict", "golden_active"],
+        "field": "W_cv_N32p0_1_0.dat",
+        "t_end": 0.1,
+        "golden_name": "hydro_implosion_muscl",
+        "golden_rtol": 1e-12,
+    },
+    "hydro_implosion_amr_2d": {
+        # Walls plus level jumps: dynamic AMR on the implosion, cascade live.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05",
+                      "meshblock/nx1=8", "meshblock/nx2=8", "fallback/style=cascade",
+                      "time/integrator=rk3",
+                      "amr/max_level=1", "amr/adapt_interval=3", "amr/criterion=pressure",
+                      "amr/refine_threshold=0.1", "amr/derefine_threshold=0.025",
+                      "amr/initial_refine=true"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.1,
+    },
+    "hydro_wc_blast_1d_mb": {
+        # Woodward-Colella interacting blast waves: reflecting walls on a 1D
+        # forest of 8 blocks (the first wall test in 1D on the block path).
+        "input": "inputs/woodward_colella.athinput",
+        "overrides": [],
+        "ndim": 1,
+        "checks": ["mass_strict"],
+        "field": "W_cv_N64p3_1_0.dat",
+        "t_end": 0.038,
+    },
+    "hydro_wc_blast_1d_amr": {
+        # The same with three levels of dynamic AMR above a 16-element root.
+        # The density is uniform at t=0, so the Lohner density indicator cannot
+        # tag anything before the first step: refine on the pressure gradient.
+        "input": "inputs/woodward_colella.athinput",
+        "overrides": ["mesh/nx1=16", "meshblock/nx1=4", "amr/max_level=3",
+                      "amr/adapt_interval=3", "amr/criterion=pressure",
+                      "amr/refine_threshold=0.1", "amr/derefine_threshold=0.025",
+                      "amr/initial_refine=true"],
+        "ndim": 1,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N16p3_1_0.dat",
+        "t_end": 0.038,
+    },
+    "hydro_dmr_amr_2d": {
+        # Double Mach reflection with the `doublemach` boundary type on the
+        # block path (dmr.hpp: post-shock inflow left and on the bottom for
+        # x < 1/6, a reflecting wall beyond, the exact moving shock on top,
+        # outflow right) under dynamic AMR. Two things this has caught already:
+        # the top boundary evaluated the shock at the BLOCK height instead of
+        # the domain height on refined blocks (dimension::L is the block
+        # length there), and the first exchange after a regrid read another
+        # block's stale ghost rows through the limited-linear fill. Finite and
+        # mixed-level; no golden (cascade live, CLAUDE.md 7b).
+        "input": "inputs/dmr.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=8", "amr/max_level=1",
+                      "time/tlim=0.01", "output/dt=0.01"],
+        "ndim": 2,
+        "checks": ["mixed_levels"],
+        "field": "W_cv_N64p3_1_0.dat",
+        "t_end": 0.01,
     },
     "induction_fv_3d": {
         "input": "inputs/induction_loop.athinput",
@@ -1618,7 +1731,12 @@ def check_golden(outdir, cfg, regen, active_only=False):
         # is taken from the FILE SIZE rather than assumed equal to nc -- the
         # field-loop 3D lane is nx1=nx2=16 with nx3=4, and shape_for's cubic
         # assumption reshapes it to 18 in z and fails.
-        npx, npy, npz = n, (n if ndim >= 2 else 1), (n if ndim >= 3 else 1)
+        # Sub-cells per element come from the dump name (N32p0 -> p=0 -> 1),
+        # not from the module default n = p+1 at p=3: the MUSCL wall gate
+        # (hydro_implosion_muscl_mb_2d) is a p=0 active-region comparison.
+        mp = re.search(r"_N\d+p(\d+)_", cfg["field"])
+        nsp = int(mp.group(1)) + 1 if mp else n
+        npx, npy, npz = nsp, (nsp if ndim >= 2 else 1), (nsp if ndim >= 3 else 1)
         Nx = nc + 2 * NGH
         Ny = nc + 2 * NGH if ndim >= 2 else 1
         per_z = nvar * Ny * Nx * npz * npy * npx

@@ -122,8 +122,8 @@ extern void block_boundary_sd(SD_Solution, SD_Solution, SD_Solution, int, int, i
 extern void block_boundary_fv(FV_Solution, FV_Solution, FV_Solution, int, int, int);
 //Whole-pack ghost exchange: neighbour indices and side types come in as
 //per-block tables, so one launch replaces the per-block loop.
-extern void apply_domain_bc_fp(SD_Solution, int, int);
-extern void apply_domain_bc_fv(FV_Solution, int, int, int);
+extern void apply_domain_bc_fp(SD_Solution, int, int, int ib);
+extern void apply_domain_bc_fv(FV_Solution, int, int, int, int ib);
 extern void gather_fp_same(SD_Solution, IntVector, IntVector, int, int, int);
 extern void gather_fv_same(FV_Solution, IntVector, IntVector, int, int, int, int);
 extern void gather_fv_coarser(FV_Solution, IntVector, IntVector, IntVector,

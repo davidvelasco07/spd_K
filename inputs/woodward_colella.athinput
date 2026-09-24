@@ -1,0 +1,39 @@
+# 1D Woodward & Colella (1984) interacting blast waves: rho = 1 at rest,
+# p = 1000 for x < 0.1, 0.01 for 0.1 <= x < 0.9, 100 beyond; reflecting walls,
+# gamma = 1.4, compare at t = 0.038 (Paper I sec 4.2.2). The two blasts meet at
+# t ~ 0.028 and the contact/shock collision needs the finest level: refine on
+# the density Lohner indicator.
+<job>
+system   = hydro
+fallback = true
+scheme   = sd
+
+<mesh>
+p     = 3
+nx1   = 64
+nx2   = 1
+nx3   = 1
+x1_bc = reflective
+
+<meshblock>
+nx1 = 8
+nx2 = 1
+nx3 = 1
+
+<time>
+tlim       = 0.038
+cfl        = 0.3
+integrator = rk3
+
+<output>
+dt   = 0.038
+
+<hydro>
+gamma = 1.4
+
+<problem>
+problem = woodward_colella
+# dir = 0   # tube direction
+
+<fallback>
+style = cascade

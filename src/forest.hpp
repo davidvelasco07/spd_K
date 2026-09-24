@@ -9,6 +9,14 @@
 #include <algorithm>
 #include <stdexcept>
 
+//Read by apply_domain_bc_fp/fv for the boundary types that need geometry or
+//time (the double-Mach boundary): the per-block dimension objects of the mesh
+//(Mesh::Xd/Yd/Zd, whose addresses are stable) and the time of the state being
+//exchanged, set by Mesh::ComputeDt every step.
+extern double g_bc_time;
+extern double g_bc_box[3];      //domain lengths, set by main.cpp
+extern const std::vector<dimension>* g_bc_geom[3];
+
 //Neighbor relation tags (spd/amr/tree.py).
 enum NeighborRelation {
     NEIGH_SAME = 0,
