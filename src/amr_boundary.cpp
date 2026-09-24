@@ -891,6 +891,34 @@ static bool fv_ghost_lin_env(){
     static const bool v = getenv("SPD_NO_FV_GHOST_LIN") == nullptr;
     return v;
 }
+bool fv_ghost_lin_on(){ return fv_ghost_lin_env(); }
+
+//The coarse->fine fill reads the coarse block's ghost cells -- the normal one
+//(the restriction of this fine block) and, for the transverse slope of an
+//edge cell, the transverse ghost row (the restriction of the fine block on
+//the ADJACENT face). A per-direction sweep (same, finer, coarser, bc for x,
+//then for y) restricts the y face only AFTER the x-direction fill has read
+//it, so that row is one stage stale in the x fill and fresh in the y fill.
+//The one fine cell at a coarse block's corner is filled by BOTH -- as the
+//x-ghost of the fine block on the +x face and as the y-ghost of the fine
+//block on the +y face -- and the two values then differ. The corner pass
+//copies the x-fill into the diagonal fine block while the +y block keeps its
+//own y-fill, so the same-level face between those two computes two different
+//MUSCL-Hancock fluxes at its end row, and nothing symmetrizes it: measured on
+//the 2D MUSCL blast with dynamic AMR, +6.4e-10 of mass over the run, every
+//digit of it accounted for by that one row (SPD_FV_FLUX_CHECK=1), appearing
+//only once a derefined coarse block's corner sat inside non-uniform flow.
+//Mesh::Exchange_fv_field therefore runs the finer pass of EVERY direction
+//once before the per-direction sweep whenever the linear fill is on, so
+//every fill reads current restrictions. It duplicates the pass rather than
+//moving it: the sweep's last writer of every ghost cell is unchanged, which
+//is what keeps the injection lanes bit-identical (injection reads the same
+//ghost rows for a fine block's corner cells, but a later pass always
+//overwrites those). SPD_NO_FV_PRERESTRICT=1 is the A/B (the leaking order).
+bool fv_prerestrict_on(){
+    static const bool v = getenv("SPD_NO_FV_PRERESTRICT") == nullptr;
+    return v;
+}
 
 struct FvLinCtx {
     int tmode = 2;           //transverse slopes: 2 (default) from the coarse block's neighbours including its
@@ -974,13 +1002,18 @@ double fv_lin_ghost(const FvLinCtx& c, const FvGet& get, int dim, int side,
             //corner outside the coarse block, refilled by the same-level pass)
             //or where a slope neighbour falls outside the array. The slope of
             //the coarse row next to a block face reads the coarse block's own
-            //transverse ghost row, filled by the other direction's pass -- one
-            //stage stale during evolution, which conserves mass to round-off,
-            //but STALE FROM ANOTHER BLOCK right after a regrid, because the
-            //packs reuse their slots: on the double-Mach problem that seeded a
-            //rarefaction under the top wall wherever a refined block touched
-            //it. Mesh::Exchange_fv_field runs a full extra exchange after every
-            //rebuild so that those rows are fresh before this pass reads them.
+            //transverse ghost row, filled by the other direction's pass. That
+            //row has to be CURRENT: when it is the restriction of a fine
+            //block, the corner cell this fill produces is also produced by
+            //that fine block's own fill from the other direction, and the two
+            //feed one same-level face from its two sides (see
+            //fv_prerestrict_on: one stage stale, it leaked 6.4e-10 of mass).
+            //And it is STALE FROM ANOTHER BLOCK right after a regrid, because
+            //the packs reuse their slots: on the double-Mach problem that
+            //seeded a rarefaction under the top wall wherever a refined block
+            //touched it. Mesh::Exchange_fv_field runs a full extra exchange
+            //after every rebuild so that those rows are fresh before this
+            //pass reads them.
             const int b  = (d==_x_ ? bx : (d==_y_ ? by : bz));
             const int uc = g + fv_fdiv2(b*(N-2*g) + (fi-g));
             if(c.tmode == 0 || uc != ci) continue;
@@ -1153,11 +1186,38 @@ void forest_exchange_fv_same(BlockForest& forest, std::vector<Block>& blocks,
     }
 }
 
+//The finer (fine->coarse restriction) pass alone, both sides of one
+//direction. forest_exchange_fv runs it in sequence; Mesh::Exchange_fv_field
+//also runs it for every direction BEFORE the sweep when the linear fill is on
+//(see fv_prerestrict_on).
+template<typename Block>
+void forest_exchange_fv_finer(BlockForest& forest, std::vector<Block>& blocks,
+                              FV_Solution Block::*member, int dim){
+    if(!cfg.active[dim]) return;
+    for(int side=0; side<2; side++){
+        if(!forest.same_jb[dim][side].empty()) continue;   //uniform: no level jumps
+        const FaceGroups& g = forest.face_groups[dim][side];
+        for(size_t k=0; k<g.fi_ib.size(); k++){
+            FV_Solution &U = blocks[g.fi_ib[k]].*member;
+            FV_Solution &f0 = blocks[g.fi_jb[k][0]].*member;
+            FV_Solution f1=f0,f2=f0,f3=f0;
+            int nf = (int)g.fi_jb[k].size();
+            if(nf>1) f1 = blocks[g.fi_jb[k][1]].*member;
+            if(nf>2) f2 = blocks[g.fi_jb[k][2]].*member;
+            if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
+            fv_restrict_finer(U, f0, f1, f2, f3, nf, dim, side);
+        }
+    }
+}
+
 //Pass order is same -> finer -> coarser -> physical, over BOTH sides at each
 //step: the limited-linear coarse->fine fill reads the coarse block's own
-//interface ghost, which the finer pass of the other side writes. With
-//injection every pass reads interior cells only, so the order does not change
-//the reference path.
+//interface ghost, which the finer pass of the other side writes. Injection
+//reads interior cells for every ghost that survives the sweep (its reads of a
+//transverse ghost row serve only corner cells a later pass overwrites), so
+//the order does not change the reference path. The fill ALSO reads the
+//coarse block's TRANSVERSE ghost rows, which this per-direction sequence
+//cannot keep current on its own: see fv_prerestrict_on.
 template<typename Block>
 void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
                         FV_Solution Block::*member, int dim, bool linear){
@@ -1179,19 +1239,7 @@ void forest_exchange_fv(BlockForest& forest, std::vector<Block>& blocks,
                          dim, side, nGH_rt[dim]);
     }
     if(uniform) return;
-    for(int side=0; side<2; side++){
-        const FaceGroups& g = forest.face_groups[dim][side];
-        for(size_t k=0; k<g.fi_ib.size(); k++){
-            FV_Solution &U = blocks[g.fi_ib[k]].*member;
-            FV_Solution &f0 = blocks[g.fi_jb[k][0]].*member;
-            FV_Solution f1=f0,f2=f0,f3=f0;
-            int nf = (int)g.fi_jb[k].size();
-            if(nf>1) f1 = blocks[g.fi_jb[k][1]].*member;
-            if(nf>2) f2 = blocks[g.fi_jb[k][2]].*member;
-            if(nf>3) f3 = blocks[g.fi_jb[k][3]].*member;
-            fv_restrict_finer(U, f0, f1, f2, f3, nf, dim, side);
-        }
-    }
+    forest_exchange_fv_finer(forest, blocks, member, dim);
     for(int side=0; side<2; side++){
         const FaceGroups& g = forest.face_groups[dim][side];
         for(size_t k=0; k<g.co_ib.size(); k++)
@@ -1473,6 +1521,10 @@ template void forest_exchange_fv<Hydro_ader>(BlockForest&, std::vector<Hydro_ade
                                              FV_Solution Hydro_ader::*, int, bool);
 template void forest_exchange_fv<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
                                            FV_Solution MHD_ader::*, int, bool);
+template void forest_exchange_fv_finer<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
+                                                  FV_Solution Hydro_ader::*, int);
+template void forest_exchange_fv_finer<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,
+                                                FV_Solution MHD_ader::*, int);
 template void forest_exchange_fv_same<Hydro_ader>(BlockForest&, std::vector<Hydro_ader>&,
                                                   FV_Solution Hydro_ader::*, int);
 template void forest_exchange_fv_same<MHD_ader>(BlockForest&, std::vector<MHD_ader>&,

@@ -179,8 +179,15 @@ template<typename Block>
 void forest_exchange_fv(BlockForest&, std::vector<Block>&,
                         FV_Solution Block::*, int dim, bool linear=false);
 template<typename Block>
+void forest_exchange_fv_finer(BlockForest&, std::vector<Block>&,
+                              FV_Solution Block::*, int dim);
+template<typename Block>
 void forest_exchange_fv_same(BlockForest&, std::vector<Block>&,
                              FV_Solution Block::*, int dim);
+//The limited-linear coarse->fine fill is on (SPD_NO_FV_GHOST_LIN unset), and
+//the pre-restriction sweep it needs is on (SPD_NO_FV_PRERESTRICT unset).
+bool fv_ghost_lin_on();
+bool fv_prerestrict_on();
 template<typename Block>
 void forest_exchange_fv_max(BlockForest&, std::vector<Block>&,
                             FV_Solution Block::*, int dim);

@@ -1391,10 +1391,28 @@ struct Mesh : public PhysicsModule {
             fv_ghosts_stale_ = false;
             Exchange_fv_field(member, packed, linear);
         }
+        //Pre-restriction: the limited-linear fill reads the coarse block's
+        //transverse ghost rows, and a per-direction sweep leaves the y row
+        //one stage stale for the x fill. The one fine cell at a coarse
+        //block's corner is filled from both directions and the two must
+        //agree bitwise, or the same-level face they feed leaks (see
+        //fv_prerestrict_on in amr_boundary.cpp). Restrict every direction
+        //first; the sweep below then repeats it in place, so its last writer
+        //of every ghost cell is unchanged.
+        const bool prerestrict = linear && fv_ghost_lin_on() && fv_prerestrict_on()
+                                 && forest_route() && forest.max_level()>0;
         //SPD_NEW_XCHG routes the FV halo through the transaction tables. It
         //needs the whole-pack view, so a field without one still takes the
         //forest path.
         if(new_xchg() && packed){
+            if(prerestrict)
+                for(int dim=0; dim<3; dim++){
+                    if(!cfg.active[dim]) continue;
+                    for(int side=0; side<2; side++)
+                        gather_fv_finer(*packed, xtfi_[dim][side].recv, xtfi_[dim][side].send,
+                                        xtfi_[dim][side].sub, xtfi_[dim][side].n, dim, side,
+                                        nGH_rt[dim], false);
+                }
             for(int dim=0; dim<3; dim++){
                 if(!cfg.active[dim]) continue;
                 if(exchange_check()) Exchange_fv_check(*packed, member, dim, false, linear);
@@ -1414,6 +1432,9 @@ struct Mesh : public PhysicsModule {
                 }
             return;
         }
+        if(prerestrict)
+            for(int dim=0; dim<3; dim++)
+                if(cfg.active[dim]) forest_exchange_fv_finer(forest, blocks, member, dim);
         for(int dim=0; dim<3; dim++){
             if(!cfg.active[dim]) continue;
             if(forest_route() || no_pack()){
@@ -1786,6 +1807,89 @@ struct Mesh : public PhysicsModule {
             theta_from_flagged_b(pv.flagged, pv.theta);
     }
 
+    //SPD_FV_FLUX_CHECK=1 (debug, 2D hydro): after the coarse-fine correction
+    //and before the commit, sum the density-flux mismatch over every
+    //same-level face, (F_lo(ib) - F_hi(jb))*dA*dt -- exactly the mass the step
+    //moves through that face when nothing symmetrizes it -- and over every
+    //coarse-fine face against the restriction of the fine fluxes, and count
+    //block faces that belong to no group at all. The sum should reproduce the
+    //per-step mass drift (SPD_STEP_MASS=1) if a double-valued face is the leak.
+    void fv_flux_leak_check(){
+        static const bool on = getenv("SPD_FV_FLUX_CHECK") != nullptr;
+        if(!on || !is_hydro || cfg.active[_z_]) return;
+        GHOST_LOCALS;
+        const SD_Solution& S = pv.W_cv;
+        const int nx=S.nx, ny=S.ny;
+        const int Ncx=(S.Nx-2*NGHx)*nx, Ncy=(S.Ny-2*NGHy)*ny;
+        double same_leak=0, cf_leak=0, worst=0;
+        int wib=-1, wjb=-1, wdim=-1, wj=-1, orphan=0;
+        std::vector<Vector_h> fxh(nblocks), fyh(nblocks);
+        for(int b=0;b<nblocks;b++){
+            fxh[b] = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Xd[b].fv_faces);
+            fyh[b] = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Yd[b].fv_faces);
+        }
+        for(int dim=0; dim<2; dim++){
+            FV_Solution& C = fv_flux_pack(dim);
+            auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), C.Vector);
+            const int nvar = C.n_var;
+            const int lo = (dim==_x_?sghx:sghy);
+            const int hi = lo + (dim==_x_?Ncx:Ncy);
+            const int tlo = (dim==_x_?sghy:sghx);
+            const int Nt  = (dim==_x_?Ncy:Ncx);
+            auto F = [&](int b, int face, int t)->double{
+                return dim==_x_ ? h(b*nvar+0, 0, t, face) : h(b*nvar+0, 0, face, t);
+            };
+            auto dA = [&](int b, int t)->double{
+                return dim==_x_ ? (fyh[b](t+1)-fyh[b](t)) : (fxh[b](t+1)-fxh[b](t));
+            };
+            for(int side=0; side<2; side++){
+                const FaceGroups& g = forest.face_groups[dim][side];
+                const double sgn = (side==0 ? 1.0 : -1.0);
+                const int cface = (side==0 ? lo : hi), fface = (side==0 ? hi : lo);
+                //Same-level faces, each once (low side only).
+                if(side==0)
+                    for(size_t q=0; q<g.same_ib.size(); q++){
+                        const int ib=g.same_ib[q], jb=g.same_jb[q];
+                        for(int t=tlo; t<tlo+Nt; t++){
+                            const double d = (F(ib,lo,t)-F(jb,hi,t))*dA(ib,t)*this->dt;
+                            same_leak += d;
+                            if(fabs(d)>fabs(worst)){ worst=d; wib=ib; wjb=jb; wdim=dim; wj=t; }
+                        }
+                    }
+                //Coarse-fine faces: coarse flux*area against the fine sum.
+                for(size_t q=0; q<g.fi_ib.size(); q++){
+                    const int ib=g.fi_ib[q];
+                    for(size_t sub=0; sub<g.fi_jb[q].size(); sub++){
+                        const int jb=g.fi_jb[q][sub];
+                        for(int r=0; r<Nt/2; r++){
+                            const int tc = tlo + (int)sub*(Nt/2) + r;
+                            double fine = 0;
+                            for(int s2=0; s2<2; s2++){
+                                const int tf = tlo + 2*r + s2;
+                                fine += F(jb,fface,tf)*dA(jb,tf);
+                            }
+                            cf_leak += sgn*(F(ib,cface,tc)*dA(ib,tc) - fine)*this->dt;
+                        }
+                    }
+                }
+                //Orphans: a block face in no group.
+                for(int ib=0; ib<nblocks; ib++){
+                    bool found = std::find(g.same_ib.begin(),g.same_ib.end(),ib)!=g.same_ib.end()
+                              || std::find(g.co_ib.begin(),g.co_ib.end(),ib)!=g.co_ib.end()
+                              || std::find(g.fi_ib.begin(),g.fi_ib.end(),ib)!=g.fi_ib.end()
+                              || std::find(g.bc_ib.begin(),g.bc_ib.end(),ib)!=g.bc_ib.end();
+                    if(!found) orphan++;
+                }
+            }
+        }
+        if(Master)
+            std::cout<<"\n[fvchk] step "<<this->n_step<<" same_leak "<<std::setprecision(6)<<same_leak
+                     <<" cf_leak "<<cf_leak<<" orphan "<<orphan
+                     <<" worst "<<worst<<" at ib "<<wib<<" (L"<<(wib>=0?forest.blocks[wib].level:-1)
+                     <<") jb "<<wjb<<" (L"<<(wjb>=0?forest.blocks[wjb].level:-1)<<") dim "<<wdim
+                     <<" t "<<wj<<std::endl;
+    }
+
     void FV_Update_solution_hydro(){
         { STAGE("mood/begin"); FV_begin_batched(); }
         for(int ader=0;ader<n_ader;ader++){
@@ -1805,6 +1909,7 @@ struct Mesh : public PhysicsModule {
                     if(cfg.active[dim])
                         correct_cf_fv_flux_dim(dim);
             }
+            fv_flux_leak_check();
             { STAGE("mood/commit"); FV_commit_batched(ader); }
         }
         { STAGE("mood/end"); FV_end_batched(); }
@@ -2715,6 +2820,14 @@ struct Mesh : public PhysicsModule {
     }
 
     TaskStatus TaskAdapt(Driver* d, int stage){
+        //SPD_STEP_MASS=1 prints the conserved mass after EVERY step, before the
+        //regrid gate, so a leak can be placed at a step rather than at an output.
+        {
+            static const bool step_mass = getenv("SPD_STEP_MASS") != nullptr;
+            if(step_mass && Master)
+                std::cout<<"\n[mass] step "<<this->n_step<<" t "<<std::setprecision(17)
+                         <<this->t<<" M "<<total_mass()<<" nblocks "<<nblocks<<std::endl;
+        }
         if(cfg.adapt_interval<=0 || this->n_step%cfg.adapt_interval!=0)
             return TaskStatus::complete;
         PHASE("amr/adapt");
