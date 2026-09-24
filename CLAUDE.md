@@ -50,7 +50,8 @@ bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 8192 the pinned-level dead-work skip, 16384 sync/face_B; default 32767), `SPD_NO_MHD_BATCH`,
 `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
 `SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
-limited-linear coarse->fine CV ghost fill). Then md5 the dumps of both paths -- and the block
+limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
+sweep order that left a transverse ghost row stale, rule 6b). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
