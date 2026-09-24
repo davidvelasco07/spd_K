@@ -263,7 +263,12 @@ double-Mach problem, neither by the periodic suite:
   went 1.2e-6 -> 5.7e-14 (Sedov) and 2e-10 -> 7e-14 (implosion, walls +
   AMR); mass unchanged at 1e-15; `SPD_NO_FV_SYMFILL=1` is the sweep,
   bit-identical to the pre-change binary, and packed vs per-block agree
-  bitwise on 7 lanes. Do not put a Gauss-Seidel dependency between
+  bitwise on 7 lanes. **And the SD cascade amplified it to O(0.1):** on the
+  A100 the SDFB4 Sedov lanes (L=4, 32/16/8-DoF blocks) had max|rho - rho^T|
+  = 0.15 / 0.19 / 0.12 with the old order -- the fill's 1e-8 seeded threshold
+  flips (rule 7b) that the flow then grew -- and 2e-13 / 1e-13 / 5e-13 with
+  the symmetric one. A symmetry the cascade cannot hold is usually a seed in
+  the ghosts, not the cascade. Do not put a Gauss-Seidel dependency between
   directions back into the exchange, and do not give a corner ghost a slope
   that only one direction can compute.
 - A refined block's `dimension::L` is the BLOCK length, not the box length
