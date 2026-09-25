@@ -359,6 +359,31 @@ the gate `hydro_sedov_amr_2d` pins that. Before any AMR sweep whose feature is
 smaller than a root cell, check the t = 0 dump of the COARSEST root for the
 feature (max p, or the leaf count after initial refinement), not the finest.
 
+## 7a4. The Lohner score is an ELEMENT-lattice quantity: it changes meaning with p, and a 2-element block is blind to it
+
+`lohner_score` / `block_scores_b` take the undivided second difference between
+neighbouring ELEMENTS at the same sub-point and skip the block-edge elements
+(a ghost element's interior is dead storage, rule 6). Two consequences, both
+measured on the Liska-Wendroff implosion (512^2, t=2.5, 32^2-DoF blocks):
+
+- At p=0 an element is a cell and this is the textbook estimator. At p=3 the
+  difference is taken at 4x the cell spacing, so a smooth gradient scores up
+  to 16x higher and a discontinuity the same: 0.02 tags 6% of the MUSCL blocks
+  (39% of the jet blocks, 1% of the rest) and 55% of the SDFB4 blocks, jet and
+  rest alike; SDFB4 separates the jet only above 0.1. The SDFB4 sweep at the
+  MUSCL pair ended 89% refined. **A Lohner threshold is per-p; calibrate it on
+  the uniform field of the scheme you run** (SDFB4: 0.12/0.03 tags the same 6%).
+- A block with < 3 elements per side has no element with two interior
+  neighbours, scores exactly 0, and is never tagged: the four 8^2-DoF SDFB4
+  lanes (2 elements) ran to t=2.5 on their ROOT with a clean log. `main.cpp`
+  now refuses `amr/criterion=lohner` with < 3 elements per active side.
+
+A CV-lattice score is NOT the fix: the SD sub-cells are not equally spaced
+(rule 6), an undivided second difference on that lattice is of the order of
+the first difference for any smooth gradient, and the divided form with the
+true widths still tags 29% of the SDFB4 blocks (the cascade leaves cell-scale
+structure the element lattice averages over).
+
 ## 7a3. Identical on CPU and GPU means deterministic, not round-off; instrument the regrid
 
 The Liska-Wendroff implosion (512^2, density Lohner, symmetric fill) lost its

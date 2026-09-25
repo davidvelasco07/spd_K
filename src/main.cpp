@@ -677,6 +677,26 @@ int main(int argc, char** argv){
                 if(Master) cout<<"ERROR: meshblocks/AMR are not yet supported with MPI"<<endl;
                 exit(1);
             }
+            //The Lohner score is a second difference between neighbouring
+            //ELEMENTS at the same sub-point, and it skips the block-edge
+            //elements (a ghost element's interior is dead storage, rule 6), so
+            //a block with fewer than three elements along an active direction
+            //has no element to test and scores exactly 0 forever. Measured: the
+            //8^2-DoF SDFB4 implosion lanes (2 elements per side) ran to t=2.5
+            //on their root and reported a clean log. Refused rather than
+            //warned, for the same reason as rule 7a2: a criterion that cannot
+            //fire produces a uniform run that looks like an adaptive one.
+            if(cfg.amr_max_level>0 && cfg.amr_criterion==0){
+                const int nbmin = std::min(ax ? NBx : 3, std::min(ay ? NBy : 3, az ? NBz : 3));
+                if(nbmin<3){
+                    if(Master) cout<<"ERROR: amr/criterion=lohner needs at least 3 elements per "
+                        "block side in every active direction (meshblock/nx* = "<<NBx<<","<<NBy<<","<<NBz
+                        <<"): the score is a second difference between neighbouring elements "
+                        "that skips the block-edge elements, so a 2-element block can never be "
+                        "tagged. Use larger blocks or amr/criterion=pressure|shear."<<endl;
+                    exit(1);
+                }
+            }
             //The mesh path implements periodic and gradfree domain boundaries
             //only. Anything else is not merely unhandled, it is silently
             //wrong: neighbors_uniform labels a non-gradfree boundary block
