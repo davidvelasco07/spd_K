@@ -3,7 +3,45 @@
 #include <set>
 #include <type_traits>
 
-double lohner_score(SD_Solution W, int var){
+//SPD_LOHNER_INTERIOR=1: the interior-only Lohner score (commit 6339d79 and
+//before), kept as the A/B reference. It skips the block-edge elements, so a
+//block of two elements per side scores exactly 0 and is never tagged.
+bool lohner_edge_on(){
+    static const bool v = getenv("SPD_LOHNER_INTERIOR") == nullptr;
+    return v;
+}
+
+//The Lohner score is an undivided second difference between neighbouring
+//ELEMENTS at the same sub-point (CLAUDE.md 7a4). An interior element has both
+//neighbours inside the block. A block-edge element has one of them across the
+//face, where only one point of the ghost element is valid: the point next to
+//the shared face, the one layer the SD field exchange writes
+//(copy_face_to_ghost / gather_fp_same / apply_domain_bc_fp). So the edge element
+//gets exactly one stencil, at its face-adjacent sub-point: s = n-1 across the
+//low face, s = 0 across the high face. A one-element block has no stencil.
+//side: -1 interior, 0 across the low face, 1 across the high face.
+KOKKOS_INLINE_FUNCTION bool lohner_stencil(bool lo, bool hi, int s, int n, int& side){
+    side = -1;
+    if(lo && hi) return false;
+    if(lo){ if(s != n-1) return false; side = 0; }
+    else if(hi){ if(s != 0) return false; side = 1; }
+    return true;
+}
+//a: distance from the edge sub-point to the ghost point, in units of this
+//block's element width (lohner_edge_ratios). At the same level and at a wall it
+//is 1 and this is the plain second difference. At a level jump the ghost holds
+//the neighbour's own face-adjacent point -- prolongated or restricted ALONG the
+//face, not across it -- so it sits at the neighbour's spacing, and the plain
+//difference would read a smooth gradient as curvature (a first-derivative term
+//of 0.07h at p=3, 0.5h at p=0). The divided form with the true spacing, scaled
+//back to the element width, is exact zero on a linear profile.
+KOKKOS_INLINE_FUNCTION double lohner_d2(double v0, double v1, double v2, int side, double a){
+    if(side < 0 || a == 1.0) return fabs(v0 - 2.0*v1 + v2);
+    if(side == 0) return fabs(2.0*((v2 - v1) - (v1 - v0)/a)/(1.0 + a));
+    return fabs(2.0*((v2 - v1)/a - (v1 - v0))/(1.0 + a));
+}
+
+double lohner_score(SD_Solution W, int var, const double* edge){
     W.copy();
     double g2 = 0.0;
     int t = 0;
@@ -22,23 +60,30 @@ double lohner_score(SD_Solution W, int var){
         for(int jj=0; jj<W.ny; jj++)
         for(int ii=0; ii<W.nx; ii++){
             double v0,v1,v2;
+            int side;
             if(dim==_x_){
-                if(i-1<NGHx || i+1>=W.Nx-NGHx) continue;
+                if(!lohner_stencil(i-1<NGHx, i+1>=W.Nx-NGHx, ii, W.nx, side)) continue;
+            } else if(dim==_y_){
+                if(!lohner_stencil(j-1<NGHy, j+1>=W.Ny-NGHy, jj, W.ny, side)) continue;
+            } else {
+                if(!lohner_stencil(k-1<NGHz, k+1>=W.Nz-NGHz, kk, W.nz, side)) continue;
+            }
+            double a = 1.0;
+            if(side >= 0){ a = edge ? edge[2*dim+side] : 0.0; if(a <= 0.0) continue; }
+            if(dim==_x_){
                 v0=A(t,var,k,j,i-1,kk,jj,ii);
                 v1=A(t,var,k,j,i,kk,jj,ii);
                 v2=A(t,var,k,j,i+1,kk,jj,ii);
             } else if(dim==_y_){
-                if(j-1<NGHy || j+1>=W.Ny-NGHy) continue;
                 v0=A(t,var,k,j-1,i,kk,jj,ii);
                 v1=A(t,var,k,j,i,kk,jj,ii);
                 v2=A(t,var,k,j+1,i,kk,jj,ii);
             } else {
-                if(k-1<NGHz || k+1>=W.Nz-NGHz) continue;
                 v0=A(t,var,k-1,j,i,kk,jj,ii);
                 v1=A(t,var,k,j,i,kk,jj,ii);
                 v2=A(t,var,k+1,j,i,kk,jj,ii);
             }
-            g2 = std::max(g2, std::abs(v0 - 2.0*v1 + v2));
+            g2 = std::max(g2, lohner_d2(v0, v1, v2, side, a));
         }
     }
     double den = 0.0;
@@ -238,7 +283,7 @@ double bfield_lohner_score(SD_Solution W, double bref){
 //They are captured as ngx/ngy/ngz -- not gx/gy/gz, which are the shear
 //indicator's own flattened cell indices below (naming them alike shadowed the
 //loop variables, and the A/B caught it as three lanes going non-identical).
-void block_scores_b(SD_Solution W, int which, int var, Vector out){
+void block_scores_b(SD_Solution W, int which, int var, Vector out, Vector edge){
     const int nb = W.nb;
     if(nb <= 0) return;
     const int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
@@ -307,23 +352,30 @@ void block_scores_b(SD_Solution W, int which, int var, Vector out){
                 for(int jj=0;jj<py;jj++)
                 for(int ii=0;ii<px;ii++){
                     double v0,v1,v2;
+                    int side;
                     if(dim==_x_){
-                        if(i-1<ngx || i+1>=Nx-ngx) continue;
+                        if(!lohner_stencil(i-1<ngx, i+1>=Nx-ngx, ii, px, side)) continue;
+                    } else if(dim==_y_){
+                        if(!lohner_stencil(j-1<ngy, j+1>=Ny-ngy, jj, py, side)) continue;
+                    } else {
+                        if(!lohner_stencil(k-1<ngz, k+1>=Nz-ngz, kk, pz, side)) continue;
+                    }
+                    double a = 1.0;
+                    if(side >= 0){ a = edge(6*(int)bb + 2*dim + side); if(a <= 0.0) continue; }
+                    if(dim==_x_){
                         v0=A(boff,var,k,j,i-1,kk,jj,ii);
                         v1=A(boff,var,k,j,i,kk,jj,ii);
                         v2=A(boff,var,k,j,i+1,kk,jj,ii);
                     } else if(dim==_y_){
-                        if(j-1<ngy || j+1>=Ny-ngy) continue;
                         v0=A(boff,var,k,j-1,i,kk,jj,ii);
                         v1=A(boff,var,k,j,i,kk,jj,ii);
                         v2=A(boff,var,k,j+1,i,kk,jj,ii);
                     } else {
-                        if(k-1<ngz || k+1>=Nz-ngz) continue;
                         v0=A(boff,var,k-1,j,i,kk,jj,ii);
                         v1=A(boff,var,k,j,i,kk,jj,ii);
                         v2=A(boff,var,k+1,j,i,kk,jj,ii);
                     }
-                    const double d = fabs(v0 - 2.0*v1 + v2);
+                    const double d = lohner_d2(v0, v1, v2, side, a);
                     g2 = d>g2 ? d : g2;
                 }
             }
@@ -392,36 +444,71 @@ static bool derefine_from_score(int, double s){
 }
 //One block's score, on the host, with the per-block device->host copy each of
 //these functions opens with. This is the reference path (SPD_NO_SCORE_BATCH=1).
-static double block_score_host(int criterion, SD_Solution W){
+static double block_score_host(int criterion, SD_Solution W, const double* edge){
     switch(criterion){
         case 1:  return pressure_gradient_score(W);
         case 3:  return shear_score(W);
-        default: return lohner_score(W, _d_);
+        default: return lohner_score(W, _d_, edge);
     }
 }
 
 template<typename Block>
-static bool refine_flag(int criterion, Block& blk){
+static void block_primitives(Block& blk){
     if constexpr (std::is_same_v<Block, Hydro_ader>)
         compute_primitives(blk.U_sp, blk.W_sp);
     else
         mhd_compute_primitives(blk.U_sp, blk.W_sp);
-    //criterion 4 on MHD is handled in tag_blocks_impl, which needs every
-    //block's score at once to set the field scale and to derefine
-    if(criterion==2) return trouble_fraction(blk) > 0.01;
-    return refine_from_score(criterion, block_score_host(criterion, blk.W_sp));
 }
 
 template<typename Block>
-static bool derefine_flag(int criterion, const std::vector<Block*>& sibs){
+static bool refine_flag(int criterion, Block& blk, const double* edge){
+    block_primitives(blk);
+    //criterion 4 on MHD is handled in tag_blocks_impl, which needs every
+    //block's score at once to set the field scale and to derefine
+    if(criterion==2) return trouble_fraction(blk) > 0.01;
+    return refine_from_score(criterion, block_score_host(criterion, blk.W_sp, edge));
+}
+
+template<typename Block>
+static bool derefine_flag(int criterion, const std::vector<Block*>& sibs,
+                          const std::vector<const double*>& edges){
     if(criterion==2){
         double f = 0.0;
         for(auto* b : sibs) f = std::max(f, trouble_fraction(*b));
         return f < 0.001;
     }
     double s = 0.0;
-    for(auto* b : sibs) s = std::max(s, block_score_host(criterion, b->W_sp));
+    for(size_t q=0; q<sibs.size(); q++)
+        s = std::max(s, block_score_host(criterion, sibs[q]->W_sp, edges[q]));
     return derefine_from_score(criterion, s);
+}
+
+//Per block and face, index 6*ib + 2*dim + side: the distance, in units of the
+//block's element width, from the edge element's face-adjacent sub-point to the
+//ghost point across that face (see lohner_d2). The ghost point is the
+//neighbour's own face-adjacent point. Same level: x_sp[0] + (1 - x_sp[p]) = 1
+//for symmetric nodes. Physical boundary: the mirrored or copied interior point,
+//1. Coarser neighbour: its point sits twice as far from the face; finer: half
+//as far. 0 means no stencil across that face.
+static std::vector<double> lohner_edge_ratios(const BlockForest& forest){
+    const int nb = forest.Nblocks();
+    const bool on = lohner_edge_on() && !(nb <= 1 && forest.max_level() == 0);
+    //(Exchange_sd_field fills nothing on a single unrefined block.)
+    std::vector<double> r(6*nb, on ? 1.0 : 0.0);
+    if(!on) return r;
+    const double xl = amr_sp_last, xf = amr_sp_first;
+    const double co[2] = {2.0 - xl, 1.0 + xf};
+    const double fi[2] = {0.5*(1.0 + xl), 1.0 - 0.5*xf};
+    for(int dim=0; dim<3; dim++){
+        if(!forest.active[dim]) continue;
+        for(int side=0; side<2; side++){
+            if(!forest.same_jb[dim][side].empty()) continue;   //one level on this face
+            const FaceGroups& g = forest.face_groups[dim][side];
+            for(int ib : g.co_ib) r[6*ib+2*dim+side] = co[side];
+            for(int ib : g.fi_ib) r[6*ib+2*dim+side] = fi[side];
+        }
+    }
+    return r;
 }
 
 //SPD_NO_SCORE_BATCH=1 restores the per-block score path, which is the A/B
@@ -444,12 +531,19 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
     //refine_flag/derefine_flag. Criterion 2 reads an FV array and criterion 4
     //needs a forest-wide field scale first, so both keep the per-block path.
     std::vector<double> score;
+    const std::vector<double> edge = lohner_edge_ratios(forest);
     if(!no_score_batch() && criterion!=2 && !(std::is_same_v<Block,MHD_ader> && criterion==4)
        && W_pack.Vector.size()>0 && W_pack.nb == forest.Nblocks()){
         const int nb = forest.Nblocks();
         Block::primitives_b(U_pack, W_pack);
         Vector sc("block_scores", nb);
-        block_scores_b(W_pack, criterion, _d_, sc);
+        Vector ev("lohner_edge", edge.size());
+        {
+            auto evh = Kokkos::create_mirror_view(ev);
+            for(size_t q=0; q<edge.size(); q++) evh(q) = edge[q];
+            Kokkos::deep_copy(ev, evh);
+        }
+        block_scores_b(W_pack, criterion, _d_, sc, ev);
         auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc);
         score.assign(nb, 0.0);
         for(int ib=0; ib<nb; ib++) score[ib] = h(ib);
@@ -495,10 +589,21 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
         }
     }
     if(bscore.empty()){
+        //The host reference (SPD_NO_SCORE_BATCH=1) scores blocks it never tests
+        //for refinement: the derefine pass scores sibling groups AT max_level,
+        //which refine_flag skips. Their W_sp then keeps the primitives of the
+        //last stage, including a ghost point layer that the pre-tag exchange has
+        //since rewritten in U_sp -- the Lohner edge stencil read it and this path
+        //parted from the batched one on the p=0 implosion lane (2 of 8 files).
+        //The interior values are current either way, so the interior-only score
+        //is unaffected. Reference path at regrid cadence: a per-block loop is
+        //allowed here (rule 1).
+        if(score.empty())
+            for(int ib=0; ib<forest.Nblocks(); ib++) block_primitives(blocks[ib]);
         for(int ib=0; ib<forest.Nblocks(); ib++){
             if(max_level>=0 && forest.blocks[ib].level >= max_level) continue;
             const bool tag = score.empty()
-                           ? refine_flag(criterion, blocks[ib])
+                           ? refine_flag(criterion, blocks[ib], &edge[6*ib])
                            : refine_from_score(criterion, score[ib]);
             if(tag) to_refine.push_back(ib);
         }
@@ -542,8 +647,9 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
             continue;
         }
         std::vector<Block*> sibs;
-        for(int ib : kv.second) sibs.push_back(&blocks[ib]);
-        if(derefine_flag(criterion, sibs))
+        std::vector<const double*> sib_edges;
+        for(int ib : kv.second){ sibs.push_back(&blocks[ib]); sib_edges.push_back(&edge[6*ib]); }
+        if(derefine_flag(criterion, sibs, sib_edges))
             to_derefine.push_back(kv.second);
     }
 }

@@ -1191,6 +1191,8 @@ void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p){
         for(int i=0;i<m;i++) xf(i) = x_fp[i];
         Kokkos::deep_copy(amr_x_fp, xf);
     }
+    amr_sp_first = x_sp[0];
+    amr_sp_last  = x_sp[p];
     amr_P = Matrix("amr_P", 2*n, n);
     amr_R = Matrix("amr_R", n, 2*n);
     transfer_matrices(amr_P, amr_R, x_sp, p);

@@ -53,7 +53,7 @@ bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
 sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL`
 (the per-direction sweep instead of the symmetric fill order, rule 6b),
-`SPD_OLD_DEREFINE_APPLY` (the stale-index derefine loop, rule 7a3). Then md5 the dumps of both paths -- and the block
+`SPD_OLD_DEREFINE_APPLY` (the stale-index derefine loop, rule 7a3), `SPD_LOHNER_INTERIOR` (the interior-only Lohner score, rule 7a4). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -375,8 +375,21 @@ measured on the Liska-Wendroff implosion (512^2, t=2.5, 32^2-DoF blocks):
   the uniform field of the scheme you run** (SDFB4: 0.12/0.03 tags the same 6%).
 - A block with < 3 elements per side has no element with two interior
   neighbours, scores exactly 0, and is never tagged: the four 8^2-DoF SDFB4
-  lanes (2 elements) ran to t=2.5 on their ROOT with a clean log. `main.cpp`
-  now refuses `amr/criterion=lohner` with < 3 elements per active side.
+  lanes (2 elements) ran to t=2.5 on their ROOT with a clean log. **Fixed: the
+  score now reaches across the block edge.** Each edge element takes ONE extra
+  stencil, at its face-adjacent sub-point (n-1 across the low face, 0 across the
+  high face), whose outer value is the ghost point the SD field exchange writes
+  -- the only valid point of a ghost element (rule 6). `Mesh::exchange_for_tagging`
+  refreshes that layer right before every tag: nothing else writes it after the
+  last stage, and a freshly built block never had it. At a level jump that ghost
+  is the NEIGHBOUR's face-adjacent point, moved along the face but not across it,
+  so it sits at the neighbour's spacing: the plain difference would read a smooth
+  gradient as curvature (a first-derivative term of 0.07h at p=3, 0.5h at p=0),
+  and the stencil uses the divided form with the true spacing there
+  (`lohner_edge_ratios`, `lohner_d2`). Blocks now need 2 elements per side;
+  `SPD_LOHNER_INTERIOR=1` is the old score and still needs 3. Gate:
+  `hydro_implosion_lohner_edge_2d` (2-element SDFB4 blocks must refine; the old
+  score refuses that config, so the gate cannot pass without the stencil).
 
 A CV-lattice score is NOT the fix: the SD sub-cells are not equally spaced
 (rule 6), an undivided second difference on that lattice is of the order of
@@ -405,6 +418,14 @@ Two lessons. A symmetry test needs an instrument at the REGRID cadence, not
 the output cadence: the mesh was symmetric at every dump and asymmetric in
 between. And before calling anything "round-off", run it on a second backend:
 the same digits on both is a deterministic defect.
+
+It had already been misread once. Two days earlier the 1024^2 Sedov lane with
+8^2-DoF MUSCL blocks broke its MIRROR symmetry at 9e-3 (47 of 3154 leaves without
+a mirror partner), and it was written up -- in the paper and a report -- as
+threshold flips: flat interior pressure, 8-cell blocks scoring on the cuts,
+mirror scores differing at round-off. Plausible, detailed, and wrong: the rerun
+on the fixed derefinement is 5.9e-13 on the same lane. **A threshold story for a
+symmetry break is a hypothesis until `SPD_SYM_CHECK=1` has seen every regrid.**
 
 ## 7b. With the cascade live, cell values are NOT reproducible across backends
 
@@ -696,6 +717,16 @@ enters through the nozzle and leaves through the far boundary.
   longer the one the run started with, and this project has already published a
   reference that "ran on a binary rebuilt mid-run". Use a second tree, and record
   the src md5 at launch.
+- **A tree copied WITH its build directory builds the ORIGINAL tree's sources.**
+  `cp -a ~/spd_K-deref ~/spd_K-edge` then `cmake --build ~/spd_K-edge/build-cuda`
+  compiled `~/spd_K-deref/src` -- the copied CMakeCache and Makefiles hold that
+  tree's absolute paths (`spd_K_SOURCE_DIR`, `CMAKE_HOME_DIRECTORY`) -- and
+  reported success. The source md5 of the new tree matched the laptop; the binary
+  did not contain the change, and a GPU smoke test "failed" for a reason that had
+  nothing to do with the code. Configure a copied tree fresh (`rm -rf build-cuda`,
+  full configure line below) and check `spd_K_SOURCE_DIR` in its cache before
+  trusting anything it builds. Kokkos lives at
+  `FETCHCONTENT_SOURCE_DIR_KOKKOS=~/spd_K-blast/build-cuda/_deps/kokkos-src`.
 - `nvcc` is not on `PATH` over non-interactive ssh: `export PATH=/usr/local/cuda/bin:$PATH`,
   or cmake fails with a bogus `string sub-command REPLACE` error from Kokkos.
 - **The full working apollo configure line** (the default toolchain does not

@@ -230,6 +230,11 @@ extern Matrix amr_RF_fp;
 //Flux-point nodes in [0,1] (length p+2); used to fill interior normal FPs
 //after face-only Toth–Roe prolongation of face B.
 extern Vector amr_x_fp;
+//First and last solution points of the reference element, x_sp[0] and x_sp[p]
+//in [0,1]. The Lohner score's block-edge stencil needs the position of the ghost
+//point across a face, which at a level jump sits at the NEIGHBOUR's spacing
+//(block_scores_b). Set by init_amr_transfer_matrices.
+extern double amr_sp_first, amr_sp_last;
 void init_amr_transfer_matrices(double* x_sp, double* x_fp, int p);
 
 //Sets cfg.active/ndim and the per-direction ghost widths NGH_rt/nGH_rt. Needs

@@ -3591,6 +3591,19 @@ struct Mesh : public PhysicsModule {
     //Refine only. A criterion asking to DEREFINE the initial conditions is a
     //criterion bug, not a mesh outcome (Athena++ warns on the same condition), so
     //say so rather than acting on it.
+    //The Lohner score's block-edge stencils read the one ghost point layer the
+    //SD field exchange writes into U_sp. Nothing else refreshes that layer after
+    //the last stage's update (the stage couples elements through Exchange_fp),
+    //and a freshly built block has never had it written, so refresh it right
+    //before tagging. Off under SPD_LOHNER_INTERIOR=1, which is then the
+    //bit-identical reference: that score never reads a ghost.
+    void exchange_for_tagging(){
+        if(cfg.amr_criterion != 0 || !lohner_edge_on()) return;
+        STAGE("amr/tag_exchange");
+        for(int dim=0; dim<3; dim++)
+            if(cfg.active[dim]) Exchange_sd_field(&Block::U_sp, dim, true, &pv.U_sp);
+    }
+
     void initial_refine(){
         if(!cfg.amr_initial_refine || cfg.amr_max_level <= 0) return;
         //One pass per level is sufficient (each pass gains at most one level); the
@@ -3598,6 +3611,7 @@ struct Mesh : public PhysicsModule {
         for(int pass=0; pass < cfg.amr_max_level + 1; pass++){
             std::vector<int> to_refine;
             std::vector<std::vector<int>> to_derefine;
+            exchange_for_tagging();
             tag_blocks(forest, blocks, pv.U_sp, pv.W_sp, to_refine, to_derefine,
                        cfg.amr_max_level, cfg.amr_criterion);
             if(pass==0 && !to_derefine.empty() && Master)
@@ -3647,6 +3661,7 @@ struct Mesh : public PhysicsModule {
         //a no-op should not have paid for a snapshot of every block.
         std::vector<int> to_refine;
         std::vector<std::vector<int>> to_derefine;
+        exchange_for_tagging();
         { STAGE("amr/tag");
           tag_blocks(forest, blocks, pv.U_sp, pv.W_sp, to_refine, to_derefine,
                      cfg.amr_max_level, cfg.amr_criterion); }

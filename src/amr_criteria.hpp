@@ -8,7 +8,13 @@ struct Hydro_ader;
 struct MHD_ader;
 struct SD_Solution;
 
-double lohner_score(SD_Solution W, int var);
+//edge: this block's six face spacing ratios (lohner_edge_ratios), or nullptr for
+//the interior-only score.
+double lohner_score(SD_Solution W, int var, const double* edge = nullptr);
+//false under SPD_LOHNER_INTERIOR=1: the interior-only score of commit 6339d79 and
+//before, which is the A/B reference. main.cpp's block-size guard and Mesh's
+//pre-tag exchange both read it.
+bool lohner_edge_on();
 double pressure_gradient_score(SD_Solution W);
 double shear_score(SD_Solution W);
 double bfield_mean(SD_Solution W);

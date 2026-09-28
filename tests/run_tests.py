@@ -413,6 +413,25 @@ CONFIGS = {
         "field": "W_cv_N32p3_2_0.dat",
         "t_end": 0.1,
     },
+    "hydro_implosion_lohner_edge_2d": {
+        # The Lohner score's block-edge stencil (CLAUDE.md 7a4): SDFB4 blocks of
+        # TWO elements per side (8^2 DoF) must refine. The interior-only score
+        # skips the block-edge elements, so such a block scored exactly 0 and the
+        # 8^2-DoF implosion lanes ran on their root with a clean log. Negative
+        # control: SPD_LOHNER_INTERIOR=1 (the old score) refuses this config at
+        # start-up, so a regression that drops the edge stencil turns this red.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["mesh/p=3", "fallback/style=cascade", "time/integrator=rk3",
+                      "mesh/nx1=8", "mesh/nx2=8", "meshblock/nx1=2", "meshblock/nx2=2",
+                      "time/tlim=0.02", "output/dt=0.01",
+                      "amr/max_level=1", "amr/adapt_interval=3", "amr/criterion=lohner",
+                      "amr/refine_threshold=0.12", "amr/derefine_threshold=0.03",
+                      "amr/initial_refine=true"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict"],
+        "field": "W_cv_N8p3_2_0.dat",
+        "t_end": 0.02,
+    },
     "hydro_wc_blast_1d_mb": {
         # Woodward-Colella interacting blast waves: reflecting walls on a 1D
         # forest of 8 blocks (the first wall test in 1D on the block path).

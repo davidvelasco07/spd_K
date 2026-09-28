@@ -678,22 +678,27 @@ int main(int argc, char** argv){
                 exit(1);
             }
             //The Lohner score is a second difference between neighbouring
-            //ELEMENTS at the same sub-point, and it skips the block-edge
-            //elements (a ghost element's interior is dead storage, rule 6), so
-            //a block with fewer than three elements along an active direction
-            //has no element to test and scores exactly 0 forever. Measured: the
-            //8^2-DoF SDFB4 implosion lanes (2 elements per side) ran to t=2.5
-            //on their root and reported a clean log. Refused rather than
-            //warned, for the same reason as rule 7a2: a criterion that cannot
-            //fire produces a uniform run that looks like an adaptive one.
+            //ELEMENTS at the same sub-point. A block-edge element takes its one
+            //stencil across the face, at its face-adjacent sub-point, from the
+            //ghost point layer the SD field exchange writes; that needs a second
+            //element on the far side, so a block needs 2 elements per active
+            //side. SPD_LOHNER_INTERIOR=1 (the old interior-only score) skips the
+            //edge elements altogether and needs 3: with fewer it scores exactly
+            //0 forever -- the 8^2-DoF SDFB4 implosion lanes (2 elements) ran to
+            //t=2.5 on their root with a clean log. Refused rather than warned
+            //(rule 7a2): a criterion that cannot fire produces a uniform run
+            //that looks like an adaptive one.
             if(cfg.amr_max_level>0 && cfg.amr_criterion==0){
-                const int nbmin = std::min(ax ? NBx : 3, std::min(ay ? NBy : 3, az ? NBz : 3));
-                if(nbmin<3){
-                    if(Master) cout<<"ERROR: amr/criterion=lohner needs at least 3 elements per "
+                const int need = lohner_edge_on() ? 2 : 3;
+                const int nbmin = std::min(ax ? NBx : need, std::min(ay ? NBy : need, az ? NBz : need));
+                if(nbmin<need){
+                    if(Master) cout<<"ERROR: amr/criterion=lohner needs at least "<<need<<" elements per "
                         "block side in every active direction (meshblock/nx* = "<<NBx<<","<<NBy<<","<<NBz
-                        <<"): the score is a second difference between neighbouring elements "
-                        "that skips the block-edge elements, so a 2-element block can never be "
-                        "tagged. Use larger blocks or amr/criterion=pressure|shear."<<endl;
+                        <<"): the score is a second difference between neighbouring elements"
+                        <<(need==3 ? " and SPD_LOHNER_INTERIOR=1 skips the block-edge elements"
+                                   : ", and a block-edge element needs a second element on the far side")
+                        <<", so such a block can never be tagged. Use larger blocks or "
+                        "amr/criterion=pressure|shear."<<endl;
                     exit(1);
                 }
             }
