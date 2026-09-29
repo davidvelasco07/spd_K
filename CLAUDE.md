@@ -68,7 +68,11 @@ rule 1), `SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead
 limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
 sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL`
 (the per-direction sweep instead of the symmetric fill order, rule 6b),
-`SPD_OLD_DEREFINE_APPLY` (the stale-index derefine loop, rule 7a3), `SPD_LOHNER_INTERIOR` (the interior-only Lohner score, rule 7a4). Then md5 the dumps of both paths -- and the block
+`SPD_OLD_DEREFINE_APPLY` (the stale-index derefine loop, rule 7a3), `SPD_LOHNER_INTERIOR` (the interior-only Lohner score, rule 7a4),
+`SPD_FV_ONLY_SD` (hydro `job/scheme=vl2|plm`: `=1` runs the dead SD flux path
+and blends it in as `f + theta*(fL - f)`, the pre-skip reference; `=2` runs it
+but takes the MUSCL flux outright, which must be bit-identical to the default
+skip -- see "a discard that rounds" below). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -88,6 +92,23 @@ the base state the halo publishes and the commit updates from. Skipping it gave
 "non-finite dt at step 1" on every pinned lane while levels -1 and 0 stayed
 bit-identical, i.e. the A/B localised it only because the force level was part of
 the sweep.
+
+**A discard that rounds is not a discard.** Under hydro `job/scheme=vl2|plm` the
+blend pins theta to 1, so the SD flux path looked dead -- 20.5% of the fenced step
+on the 2048^2 KH MUSCL AMR lane at 32^2-DoF blocks (A100). Skipping it could NOT
+be bit-identical: the blend is `f + theta*(fL - f)`, which at theta = 1 equals
+`fL` only while `f` and `fL` are within a factor of two, rounds on the SD flux
+otherwise, and is NaN whenever `f` is. Every MUSCL lane carried the SD flux at
+round-off (4e-15 to 1.9e-13 against e8d36e0, block maps unchanged). So the skip
+(`Mesh::sd_path_dead`, shared with MHD's) came with a blend that takes `fL`
+outright, and the A/B has three sides, not two: `SPD_FV_ONLY_SD=2` (path run,
+flux taken outright) must match the default bit for bit -- that is what proves
+the path dead -- and `=1` must match the pre-change binary. Both held on five
+MUSCL lanes (two mixed-level AMR, uniform multiblock, `plm`, p=3 ADER), and two
+SD lanes stayed identical. **Before calling work dead, read how its consumer
+combines it: a zero weight multiplies, it does not erase.** A MUSCL dump made
+before this change is not bit-comparable with a new default run; to reproduce
+one, run with `SPD_FV_ONLY_SD=1`.
 
 **The A/B catches what the suite structurally cannot.** Batching the refinement
 scores, a device-code fix captured the ghost counts as `gx/gy/gz` -- which are the

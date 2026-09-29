@@ -892,7 +892,8 @@ void compute_fluxes(
     bool az,
     double gm,
     bool pred,
-    int lim
+    int lim,
+    bool take_fb
     ){
     //wL/wR hold only the D-direction faces of the two cells adjacent to the
     //face (l = -1, 0); with D compile-time everything stays in registers.
@@ -941,6 +942,15 @@ void compute_fluxes(
     conservatives(wL[0],uL,gm);
     conservatives(wR[1],uR,gm);
     riemann_hllc(fL,uL,uR,v1,v2,v3,gm);
+    //job/scheme=vl2|plm (theta = 1 on every face): take the fallback flux
+    //outright. The blend below is NOT that at theta = 1: f + (fL - f) rounds
+    //whenever f and fL differ by more than a factor of two, and it is NaN
+    //whenever f is, so the SD flux it was handed leaked into the MUSCL lane at
+    //round-off and kept the whole SD path live (Mesh::sd_path_dead).
+    if(take_fb){
+        for(int var=0; var<NVAR; var++) F(off+var,k,j,i) = fL[var];
+        return;
+    }
     //Face blend factor: max of the thetas of the two adjacent cells
     //(reference: affected_faces). Convex blend of the primary and the
     //fallback flux; the same value is seen from both sides of the face,
@@ -1113,6 +1123,31 @@ void level_fluxes_b(
 //AMR forest (447,840 of 605,961 on the fig-21 MUSCL profile). Geometry rides in
 //as packed Matrices exactly as level_fluxes_b takes it; compute_fluxes already
 //carried the (off, toff) offsets this needs.
+//SPD_FV_ONLY_SD, the A/B for the pure-MUSCL dead-work skip (Mesh::sd_path_dead):
+//  unset  skip the SD flux path, take the fallback flux outright (default)
+//  1      run the SD path and blend it in as f + theta*(fL - f): the pre-skip
+//         reference, which carries the SD flux into the MUSCL lane at round-off
+//  2      run the SD path but take the fallback flux outright: must be
+//         bit-identical to the default, which is what proves the path dead
+int fv_only_sd_mode(){
+    static const int m = [](){
+        const char* s = getenv("SPD_FV_ONLY_SD");
+        if(!s) return 0;
+        const std::string v(s);
+        if(v=="1") return 1;
+        if(v=="2") return 2;
+        std::cout<<"ERROR: SPD_FV_ONLY_SD='"<<v<<"' (expected unset, 1 or 2)"<<std::endl;
+        exit(1);
+    }();
+    return m;
+}
+
+//Under job/scheme=vl2|plm theta is 1 on every face; the face then takes the
+//fallback flux outright unless SPD_FV_ONLY_SD=1 asks for the old blend.
+static bool fv_only_takes_fb(){
+    return cfg.fv_only && fv_only_sd_mode() != 1;
+}
+
 void fallback_fluxes_b(
     FV_Solution U,
     FV_Solution theta,
@@ -1130,6 +1165,7 @@ void fallback_fluxes_b(
     const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
+    const bool take_fb = fv_only_takes_fb();
     FV_Vector u=U.Vector, th=theta.Vector;
     FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cxd=cxm.data(), *fxd=fxm.data();
@@ -1145,9 +1181,9 @@ void fallback_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
-        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
-        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
     }, "fallback_fluxes_b");
 }
 
@@ -1175,6 +1211,7 @@ void fallback_fluxes(
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
+    const bool take_fb = fv_only_takes_fb();
     FV_Vector u=U.Vector, th=theta.Vector;
     FV_Vector fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cx=x_c.data(), *ffx=x_f.data();
@@ -1183,8 +1220,8 @@ void fallback_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
-        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
-        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim);
+        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
     });
 }

@@ -1816,15 +1816,22 @@ struct Mesh : public PhysicsModule {
     //The per-block FV face coordinates come in as the geometry pack, so one
     //launch spans blocks that sit at different refinement levels.
     void FV_flux_update_batched(int ader){
-        if(cfg.active[_x_])
-            face_integral_b(pv.F_ader_fp_x, pv.F_x, pv.T_fp_x,
-                            blocks[0].sp_to_cv, ader, _x_);
-        if(cfg.active[_y_])
-            face_integral_b(pv.F_ader_fp_y, pv.F_y, pv.T_fp_y,
-                            blocks[0].sp_to_cv, ader, _y_);
-        if(cfg.active[_z_])
-            face_integral_b(pv.F_ader_fp_z, pv.F_z, pv.T_fp_z,
-                            blocks[0].sp_to_cv, ader, _z_);
+        //The projection is dead under pure MUSCL (sd_path_dead()): the blend
+        //writes the MUSCL flux over every face the commit reads.
+        if(!sd_path_dead()){
+            if(cfg.active[_x_])
+                face_integral_b(pv.F_ader_fp_x, pv.F_x, pv.T_fp_x,
+                                blocks[0].sp_to_cv, ader, _x_);
+            if(cfg.active[_y_])
+                face_integral_b(pv.F_ader_fp_y, pv.F_y, pv.T_fp_y,
+                                blocks[0].sp_to_cv, ader, _y_);
+            if(cfg.active[_z_])
+                face_integral_b(pv.F_ader_fp_z, pv.F_z, pv.T_fp_z,
+                                blocks[0].sp_to_cv, ader, _z_);
+        }
+        //NOT skippable, for the reason MOOD_begin_batched gives: the candidate
+        //it builds is dead under pure MUSCL, but the same kernel seeds U_old
+        //from U_cv, the base state the halo publishes and the commit updates.
         fv_update_solution_b(pv.U_new, pv.U_old, pv.U_cv,
             pv.F_x, fvx_p, pv.F_y, fvy_p, pv.F_z, fvz_p,
             blocks[0].wt, ader, dt, 0);
@@ -1982,7 +1989,11 @@ struct Mesh : public PhysicsModule {
         for(int ader=0;ader<n_ader;ader++){
             { STAGE("mood/flux_update"); FV_flux_update_batched(ader); }
             { STAGE("xchg/Exchange_U_old"); Exchange_fv_field(&Block::U_old,&pv.U_old,true); }
-            { STAGE("xchg/Exchange_U_new"); Exchange_fv_field(&Block::U_new,&pv.U_new,true); }
+            //Only detection reads the candidate, and pure MUSCL never detects.
+            //U_old goes first either way, so it still takes the post-regrid
+            //refresh (fv_ghosts_stale_).
+            if(!sd_path_dead()){ STAGE("xchg/Exchange_U_new");
+                                 Exchange_fv_field(&Block::U_new,&pv.U_new,true); }
             { STAGE("mood/detect"); FV_detect_batched(); }
             if(!cfg.fv_only){ STAGE("xchg/Exchange_flagged");
                                  Exchange_fv_field(&Block::flagged,&pv.flagged); }
@@ -2250,7 +2261,33 @@ struct Mesh : public PhysicsModule {
         return cfg.mood_force_level;
     }
     //The level-0 SD flux/EMF path produces nothing that survives assembly.
-    bool sd_path_dead() const { return pinned_level() >= 1; }
+    //
+    //Hydro has the same dead path under job/scheme=vl2|plm on the blend
+    //(cfg.fv_only): theta is 1 on every face and fallback_fluxes_b then writes
+    //the MUSCL flux over every face the commit and the cf/ correction read. The
+    //is_mhd branch is the one system difference -- MHD pins a cascade LEVEL,
+    //hydro pins the BLEND -- and the skip itself is shared. Measured on the
+    //2048^2 KH MUSCL AMR lanes (A100, 29 Sep): sd/Fluxes_pre, xchg/Exchange_fp,
+    //sd/Riemann_Solver and cf/correct_cf_flux were 20.5% of the fenced step at
+    //32^2-DoF blocks, 11.4% at 16^2. What else hydro skips with it: the SD
+    //projection in mood/flux_update and the U_new halo (the candidate is judged
+    //only by detection, which pure MUSCL never runs), and the ADER predictor.
+    //
+    //It was NOT dead before the blend learned to take the fallback flux
+    //outright: f + theta*(fL - f) at theta = 1 rounds on the SD flux f, so every
+    //MUSCL lane carried it at round-off. SPD_FV_ONLY_SD=1 is that old path
+    //(bit-identical to e8d36e0); =2 runs the path with the new blend and must
+    //be bit-identical to the skip. Same consequence as MHD for a diagnostic: the
+    //SD arrays (U_ader_fp_*, F_ader_fp_*) and U_new hold stale values here.
+    //fallback/style=cascade reads level 0 from the SD flux, so it never skips.
+    //A single-block run takes the standalone Hydro_ader advance, which takes
+    //the MUSCL flux outright too but still runs the path: its outputs dump
+    //F_ader_fp_x.
+    bool sd_path_dead() const {
+        if constexpr (is_mhd) return pinned_level() >= 1;
+        else return cfg.fallback && cfg.fv_only && !cfg.mood_cascade
+                    && fv_only_sd_mode() == 0;
+    }
     //Is cascade level L (1 or 2) ever read?
     bool cascade_level_live(int L) const {
         const int p = pinned_level();
@@ -2637,10 +2674,13 @@ struct Mesh : public PhysicsModule {
     }
 
     void Advance_hydro(){
-        for(int ader=0;ader<n_ader;ader++){
-            Solve_fluxes_hydro();
-            if(ader<n_ader-1) Update_prediction_hydro();
-        }
+        //Under pure MUSCL the SD fluxes and the ADER predictor that feeds them
+        //are computed and thrown away (see sd_path_dead()).
+        if(!sd_path_dead())
+            for(int ader=0;ader<n_ader;ader++){
+                Solve_fluxes_hydro();
+                if(ader<n_ader-1) Update_prediction_hydro();
+            }
         Update_solution_hydro();
     }
 

@@ -226,6 +226,10 @@ extern int  update_cascade(FV_Solution flagged, FV_Solution cascade, int n_casca
 extern void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
                              FV_Solution cascade, int dim);
 
+//SPD_FV_ONLY_SD: 0 unset (pure MUSCL skips the SD path), 1 the pre-skip
+//reference, 2 run the path but take the fallback flux (see hydro.cpp).
+int fv_only_sd_mode();
+
 void fallback_fluxes_b(
     FV_Solution U,
     FV_Solution theta,
