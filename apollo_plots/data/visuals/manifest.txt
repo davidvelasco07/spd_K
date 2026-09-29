@@ -1,4 +1,0 @@
-smr_sine_2d,cpu
-smr_patch_2d,cpu
-amr_pulse_2d,cpu
-mb_uniform_3d,cpu

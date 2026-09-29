@@ -29,3 +29,7 @@ bench_*.jsonl
 bench_*.log
 run_*/
 .cache/
+
+# run outputs and plots: produced by runs, kept on disk, not versioned
+kh_runs/
+apollo_plots/
