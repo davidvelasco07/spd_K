@@ -48,6 +48,11 @@ struct PhaseTimes {
     void add(const std::string& k, double s){ t[k]+=s; n[k]++; }
     void report(const char* tag) const {
         if(!on() || !Master || t.empty()) return;
+        //Restore the caller's stream state on the way out, precision included:
+        //resetting only the float field left std::cout at precision 1, so the
+        //driver's later "evolution: N steps, T s" line printed "9e+02 s".
+        const std::ios_base::fmtflags flags0 = std::cout.flags();
+        const std::streamsize prec0 = std::cout.precision();
         double tot = 0.0;
         for(const auto& kv : t) tot += kv.second;
         std::vector<std::pair<double,std::string>> v;
@@ -59,7 +64,8 @@ struct PhaseTimes {
             std::cout<<"  "<<std::setw(8)<<std::setprecision(3)<<e.first<<" s "
                      <<std::setw(5)<<std::setprecision(1)<<(100*e.first/tot)<<"%  "
                      <<std::setw(9)<<n.at(e.second)<<" calls  "<<e.second<<std::endl;
-        std::cout<<std::defaultfloat;
+        std::cout.flags(flags0);
+        std::cout.precision(prec0);
     }
 };
 
