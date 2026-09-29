@@ -29,8 +29,22 @@ Why: this is the single largest source of avoidable cost in the code, repeatedly
   because Mesh only calls it when `max_level == 0`.** Profile the uniform
   multiblock lane too, not just the AMR one.
 
-**As of `a8f3da0` there is no live per-block host loop left in the per-step path.**
-Every remaining `for(int b=0; b<nblocks; b++)` in `mesh.hpp` is either regrid/setup
+**`a8f3da0` said no live per-block host loop was left in the per-step path. It was
+wrong: grep for the loop, do not trust a list.** The hydro SD update
+(`sd/Update_prediction`, `sd/Update_solution`) stayed per-block until it was
+batched behind `SPD_NO_SD_UPDATE_BATCH`: 30% of the fenced time on a uniform
+256-block ADER lane, 264k launches (304 per stage) on a 304-block mixed-level
+lane. On the Serial CPU backend the batch is a small LOSS (`sd/Update_solution`
+3.38 -> 3.95 s, +2% of the fenced step): 264k Serial launches cost ~0.1 s, and
+the batched body is slower per point (launched once per block it takes 4.06 s).
+On an A100 (apollo, 29 Sep) the same phase went 7.03 -> 0.057 s at 304 blocks and
+12.69 -> 0.16 s at 1216, the predictor 4.17 -> 0.06 s at 256 (uniform ADER): the
+fenced step 6.4x, 4.4x and 9.6x faster. Judge a batch on the GPU; a local Serial
+timing says nothing about launch cost. Three loops are still
+live and unswitched, each only under a non-default option: `sd/Viscosity`
+(`hydro/nu>0`), MHD's `sd/Update_CT` (MHD without the fallback), and
+`mhd_reduce_nad_gscales` (`mhd/mood_nad_scale=grange|gcfl`). Every other
+`for(int b=0; b<nblocks; b++)` in `mesh.hpp` is either regrid/setup
 (`build_block_solvers`, the table builders, snapshot/transfer/finish_ic), host-side
 scalar bookkeeping with no launches (`sync_block_dt`), an output-time diagnostic,
 or the `else` branch of a batching switch -- which is the A/B reference and must
@@ -49,7 +63,8 @@ Keep the per-block path and gate the batched one behind a switch:
 bookkeeping, 1024 mood/detect, 2048 cf/correct_cf_emf, 4096 cf/enforce_fv_emf,
 8192 the pinned-level dead-work skip, 16384 sync/face_B; default 32767), `SPD_NO_MHD_BATCH`,
 `SPD_NO_RK_BATCH`, `SPD_NO_SCORE_BATCH` (the AMR refinement scores),
-`SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
+`SPD_NO_SD_UPDATE_BATCH` (the per-block hydro SD predictor and pure-SD update,
+rule 1), `SPD_OLD_XCHG`, `SPD_NO_PACK`, `SPD_NO_FV_GHOST_LIN` (injection instead of the
 limited-linear coarse->fine CV ghost fill), `SPD_NO_FV_PRERESTRICT` (the
 sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL`
 (the per-direction sweep instead of the symmetric fill order, rule 6b),

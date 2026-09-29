@@ -446,6 +446,134 @@ void update_solution(
     });
 }
 
+//Batched counterparts of update_prediction / update_solution: one launch over
+//a whole pack. U has one leading slice per block (b*U.n_ader), U_ader and the
+//fluxes fold the block into their leading axis as b*nader + t_id, and
+//hx/hy/hz carry each block's element size -- the only thing that differs
+//between refinement levels. The loop bodies are the per-block ones verbatim
+//with dx read once per point, so every operand and every operation order is
+//the same and the result is bit-identical (SPD_NO_SD_UPDATE_BATCH=1 is the
+//per-block reference). The ranges match too: prediction spans every element,
+//ghosts included, and the solution update the active elements only.
+void update_prediction_b(
+    SD_Solution U,
+    SD_Solution U_ader,
+    SD_Solution F_x,
+    SD_Solution F_y,
+    SD_Solution F_z,
+    Matrix dfp_to_sp,
+    Matrix invader,
+    Vector w,
+    Vector hx,
+    Vector hy,
+    Vector hz,
+    double dt){
+
+    int nb = U.nb;
+    int Nx = U.Nx;
+    int Ny = U.Ny;
+    int Nz = U.Nz;
+    int px = U.nx;
+    int py = U.ny;
+    int pz = U.nz;
+    int q  = F_x.nx;
+    int nader = F_x.n_ader;
+    int nader_u = U.n_ader;
+    int nvar = U.n_var;
+    bool ax = cfg.active[_x_];
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
+    sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        const int u0 = b*nader_u;
+        const int a0 = b*nader;
+        const double dx = hx(b), dy = hy(b), dz = hz(b);
+        for(int var=0; var<nvar; var++){
+        double dudt[10];
+        int t_id;
+        int ll;
+        double u_old;
+        double du;
+        u_old =  U.Vector(u0,var,k,j,i,kk,jj,ii);
+        for(t_id =0; t_id<nader; t_id++){
+            dudt[t_id] = 0;
+            for(ll=0; ll<q; ll++){
+                if(ax) dudt[t_id] += F_x.Vector(a0+t_id,var,k,j,i,kk,jj,ll)*dfp_to_sp(ii,ll)/dx;
+                if(ay) dudt[t_id] += F_y.Vector(a0+t_id,var,k,j,i,kk,ll,ii)*dfp_to_sp(jj,ll)/dy;
+                if(az) dudt[t_id] += F_z.Vector(a0+t_id,var,k,j,i,ll,jj,ii)*dfp_to_sp(kk,ll)/dz;
+            }
+            if(grav){
+                double S = gravity_source(U_ader,var,a0+t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+                dudt[t_id] -= S;
+            }
+        }
+        for(t_id=0; t_id<nader; t_id++){
+            du=0;
+            for(ll=0; ll<nader; ll++){
+                du += dudt[ll]*invader(t_id,ll)*w(ll)*dt;
+            }
+            U_ader.Vector(a0+t_id,var,k,j,i,kk,jj,ii) = u_old - du;
+        }
+        }
+    }, "update_prediction_b");
+}
+
+void update_solution_b(
+    SD_Solution U,
+    SD_Solution U_ader,
+    SD_Solution F_x,
+    SD_Solution F_y,
+    SD_Solution F_z,
+    Matrix da_to_b,
+    Vector w,
+    Vector hx,
+    Vector hy,
+    Vector hz,
+    double dt){
+
+    int nb = U.nb;
+    int Nx = U.Nx;
+    int Ny = U.Ny;
+    int Nz = U.Nz;
+    int px = U.nx;
+    int py = U.ny;
+    int pz = U.nz;
+    int q  = F_x.nx;
+    int nader = F_x.n_ader;
+    int nader_u = U.n_ader;
+    int nvar = U.n_var;
+    bool ax = cfg.active[_x_];
+    bool ay = cfg.active[_y_];
+    bool az = cfg.active[_z_];
+    double gx = cfg.g[_x_], gy = cfg.g[_y_], gz = cfg.g[_z_];
+    bool grav = (gx!=0.0 || gy!=0.0 || gz!=0.0);
+    sd_for_active_cells_b(nb,Nz,Ny,Nx,pz,py,px,
+        KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
+        const int u0 = b*nader_u;
+        const int a0 = b*nader;
+        const double dx = hx(b), dy = hy(b), dz = hz(b);
+        for(int var=0; var<nvar; var++){
+        double dudt;
+        double du;
+        du=0;
+        for(int t_id =0; t_id<nader; t_id++){
+            dudt = 0;
+            for(int ll=0; ll<q; ll++){
+                if(ax) dudt += F_x.Vector(a0+t_id,var,k,j,i,kk,jj,ll)*da_to_b(ii,ll)/dx;
+                if(ay) dudt += F_y.Vector(a0+t_id,var,k,j,i,kk,ll,ii)*da_to_b(jj,ll)/dy;
+                if(az) dudt += F_z.Vector(a0+t_id,var,k,j,i,ll,jj,ii)*da_to_b(kk,ll)/dz;
+            }
+            if(grav)
+                dudt -= gravity_source(U_ader,var,a0+t_id,k,j,i,kk,jj,ii,gx,gy,gz);
+            du += dudt*w(t_id)*dt;
+        }
+        U.Vector(u0,var,k,j,i,kk,jj,ii) -= du;
+        }
+    }, "update_solution_b");
+}
+
 //Reference implementation of the transverse face integration.
 //Cost per point is (p+1)^2 in 3D; kept only to validate the sweep version.
 void face_integral_ref(

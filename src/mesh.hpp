@@ -1482,9 +1482,9 @@ struct Mesh : public PhysicsModule {
         //of every ghost cell is unchanged.
         const bool prerestrict = linear && fv_ghost_lin_on() && fv_prerestrict_on()
                                  && forest_route() && forest.max_level()>0;
-        //SPD_NEW_XCHG routes the FV halo through the transaction tables. It
-        //needs the whole-pack view, so a field without one still takes the
-        //forest path.
+        //The FV halo goes through the transaction tables by default
+        //(SPD_OLD_XCHG=1 is the per-block reference). It needs the whole-pack
+        //view, so a field without one still takes the forest path.
         if(new_xchg() && packed){
             if(prerestrict)
                 for(int dim=0; dim<3; dim++){
@@ -2041,6 +2041,28 @@ struct Mesh : public PhysicsModule {
         { STAGE("mood/end"); FV_end_batched(); }
     }
 
+    //The SD predictor and the pure-SD final update, one launch over the pack.
+    //Both were per-block loops in every hydro step (rule 1): the solution update
+    //is taken by every multiblock/AMR run without the fallback, the predictor
+    //by every multiblock ADER run with or without it. SPD_NO_SD_UPDATE_BATCH=1
+    //restores the per-block loops, which are the A/B reference and must stay.
+    static bool sd_update_batched(){
+        static const bool v = getenv("SPD_NO_SD_UPDATE_BATCH") == nullptr;
+        return v;
+    }
+
+    void Update_prediction_hydro(){
+        STAGE("sd/Update_prediction");
+        if(sd_update_batched())
+            update_prediction_b(pv.U_sp, pv.U_ader_sp,
+                pv.F_ader_fp_x, pv.F_ader_fp_y, pv.F_ader_fp_z,
+                blocks[0].dfp_to_sp, blocks[0].invader, blocks[0].wt,
+                hx_p, hy_p, hz_p, this->dt);
+        else
+            for(int b=0;b<nblocks;b++)
+                blocks[b].Update_prediction(Xd[b].h,Yd[b].h,Zd[b].h);
+    }
+
     void Update_solution_hydro(){
         if(cfg.fallback){
             if(cfg.mood_cascade) FV_Update_solution_hydro_cascade();
@@ -2048,8 +2070,14 @@ struct Mesh : public PhysicsModule {
         }
         else {
             STAGE("sd/Update_solution");
-            for(int b=0;b<nblocks;b++)
-                blocks[b].Update_solution(Xd[b].h,Yd[b].h,Zd[b].h);
+            if(sd_update_batched())
+                update_solution_b(pv.U_sp, pv.U_ader_sp,
+                    pv.F_ader_fp_x, pv.F_ader_fp_y, pv.F_ader_fp_z,
+                    blocks[0].dfp_to_sp, blocks[0].wt,
+                    hx_p, hy_p, hz_p, this->dt);
+            else
+                for(int b=0;b<nblocks;b++)
+                    blocks[b].Update_solution(Xd[b].h,Yd[b].h,Zd[b].h);
         }
     }
 
@@ -2605,11 +2633,7 @@ struct Mesh : public PhysicsModule {
     void Advance_hydro(){
         for(int ader=0;ader<n_ader;ader++){
             Solve_fluxes_hydro();
-            if(ader<n_ader-1){
-                STAGE("sd/Update_prediction");
-                for(int b=0;b<nblocks;b++)
-                    blocks[b].Update_prediction(Xd[b].h,Yd[b].h,Zd[b].h);
-            }
+            if(ader<n_ader-1) Update_prediction_hydro();
         }
         Update_solution_hydro();
     }

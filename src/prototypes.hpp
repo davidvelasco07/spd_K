@@ -68,6 +68,9 @@ extern void build_sd_operators(SDOperators& o, int p, double* x_sp, double* x_fp
 
 extern void update_prediction(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, double, double, double, double);
 extern void update_solution(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, double, double, double, double);
+//Whole-pack counterparts: the element sizes come in one per block (hx/hy/hz)
+extern void update_prediction_b(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Matrix, Vector, Vector, Vector, Vector, double);
+extern void update_solution_b(SD_Solution, SD_Solution, SD_Solution, SD_Solution, SD_Solution, Matrix, Vector, Vector, Vector, Vector, double);
 extern void update_B_prediction(SD_Solution,SD_Solution,SD_Solution,SD_Solution,Matrix,Matrix,Vector,double,double,double,int);
 extern void update_B_solution(SD_Solution,SD_Solution,SD_Solution,Matrix,Vector,double,double,double,int);
 

@@ -529,14 +529,14 @@ CONFIGS = {
                       "refinement1/level=1", "refinement1/x1min=0.375",
                       "refinement1/x1max=0.625", "refinement1/x2min=0.375",
                       "refinement1/x2max=0.625"],
-        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
-        # max_revs revisions per step, each with its own halo and a full
-        # detect, and on the per-block forest path that is a launch explosion:
-        # this config alone ran >80 min unfinished. The table path is verified
+        # Runs on the table exchange, the default since b4acfcc
+        # (SPD_OLD_XCHG=1 restores the per-block forest path). The cascade
+        # does up to max_revs revisions per step, each with its own halo and a
+        # full detect, and on the forest path that is a launch explosion: this
+        # config alone ran >80 min unfinished. The table path is verified
         # bit-identical to the forest path at 1 and 2 levels on both backends,
-        # so this costs no coverage of the physics -- but it does mean the
-        # forest path is no longer exercised here.
-        "env": {"SPD_NEW_XCHG": "1"},
+        # so this costs no coverage of the physics -- but the forest path is
+        # not exercised here.
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
@@ -546,14 +546,14 @@ CONFIGS = {
         # dynamic AMR on a Gaussian pulse
         "input": "inputs/amr_pulse.athinput",
         "overrides": ["fallback/style=cascade"],
-        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
-        # max_revs revisions per step, each with its own halo and a full
-        # detect, and on the per-block forest path that is a launch explosion:
-        # this config alone ran >80 min unfinished. The table path is verified
+        # Runs on the table exchange, the default since b4acfcc
+        # (SPD_OLD_XCHG=1 restores the per-block forest path). The cascade
+        # does up to max_revs revisions per step, each with its own halo and a
+        # full detect, and on the forest path that is a launch explosion: this
+        # config alone ran >80 min unfinished. The table path is verified
         # bit-identical to the forest path at 1 and 2 levels on both backends,
-        # so this costs no coverage of the physics -- but it does mean the
-        # forest path is no longer exercised here.
-        "env": {"SPD_NEW_XCHG": "1"},
+        # so this costs no coverage of the physics -- but the forest path is
+        # not exercised here.
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p3_1_0.dat",
@@ -570,7 +570,6 @@ CONFIGS = {
         # the minmod limiter also has to leave the pulse admissible.
         "input": "inputs/amr_pulse.athinput",
         "overrides": ["mesh/p=0", "job/scheme=vl2"],
-        "env": {"SPD_NEW_XCHG": "1"},
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N32p0_1_0.dat",
@@ -586,14 +585,14 @@ CONFIGS = {
         # mapping right.
         "input": "inputs/amr_pulse.athinput",
         "overrides": ["fallback/style=cascade", "amr/max_level=2"],
-        # Runs on the table exchange (SPD_NEW_XCHG=1). The cascade does up to
-        # max_revs revisions per step, each with its own halo and a full
-        # detect, and on the per-block forest path that is a launch explosion:
-        # this config alone ran >80 min unfinished. The table path is verified
+        # Runs on the table exchange, the default since b4acfcc
+        # (SPD_OLD_XCHG=1 restores the per-block forest path). The cascade
+        # does up to max_revs revisions per step, each with its own halo and a
+        # full detect, and on the forest path that is a launch explosion: this
+        # config alone ran >80 min unfinished. The table path is verified
         # bit-identical to the forest path at 1 and 2 levels on both backends,
-        # so this costs no coverage of the physics -- but it does mean the
-        # forest path is no longer exercised here.
-        "env": {"SPD_NEW_XCHG": "1"},
+        # so this costs no coverage of the physics -- but the forest path is
+        # not exercised here.
         "ndim": 2,
         "checks": ["mixed_levels", "mass_strict"],
         "field": "W_cv_N64p3_1_0.dat",
