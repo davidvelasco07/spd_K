@@ -359,6 +359,18 @@ int main(int argc, char** argv){
         else if(crit=="shear") cfg.amr_criterion = 3;
         else if(crit=="bfield") cfg.amr_criterion = 4;
         else cfg.amr_criterion = 0;
+        {
+            const string lv = pin.GetOrAddString("amr","lohner_vars","density");
+            if(lv=="density") cfg.amr_lohner_vars = 1;
+            else if(lv=="pressure") cfg.amr_lohner_vars = 2;
+            else if(lv=="density,pressure" || lv=="pressure,density" || lv=="both")
+                cfg.amr_lohner_vars = 3;
+            else {
+                if(Master) cout<<"ERROR: amr/lohner_vars="<<lv
+                    <<" (density | pressure | density,pressure)"<<endl;
+                exit(1);
+            }
+        }
         //Per-criterion defaults (see global.hpp): a deck that sets neither gets
         //the pair the criterion was calibrated with, and parameters.txt records
         //the resolved pair rather than a sentinel. The trouble criterion (2) is

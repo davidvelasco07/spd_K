@@ -448,7 +448,13 @@ static double block_score_host(int criterion, SD_Solution W, const double* edge)
     switch(criterion){
         case 1:  return pressure_gradient_score(W);
         case 3:  return shear_score(W);
-        default: return lohner_score(W, _d_, edge);
+        default: {
+            //amr/lohner_vars: the larger of the per-variable scores
+            double s = 0.0;
+            if(cfg.amr_lohner_vars & 1) s = std::max(s, lohner_score(W, _d_, edge));
+            if(cfg.amr_lohner_vars & 2) s = std::max(s, lohner_score(W, _p_, edge));
+            return s;
+        }
     }
 }
 
@@ -543,10 +549,17 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
             for(size_t q=0; q<edge.size(); q++) evh(q) = edge[q];
             Kokkos::deep_copy(ev, evh);
         }
-        block_scores_b(W_pack, criterion, _d_, sc, ev);
-        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc);
+        //The Lohner criterion scores each variable of amr/lohner_vars in its own
+        //launch and keeps the larger; density alone is one launch, as before.
+        const int lvars = criterion==0 ? cfg.amr_lohner_vars : 1;
+        const int vars[2] = {_d_, _p_};
         score.assign(nb, 0.0);
-        for(int ib=0; ib<nb; ib++) score[ib] = h(ib);
+        for(int q=0; q<2; q++){
+            if(!(lvars & (1<<q))) continue;
+            block_scores_b(W_pack, criterion, vars[q], sc, ev);
+            auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc);
+            for(int ib=0; ib<nb; ib++) score[ib] = std::max(score[ib], h(ib));
+        }
     }
     //Scores of the |B| criterion, which needs every block's score in one place
     //so the derefine pass can reuse it. Empty for every other criterion, which

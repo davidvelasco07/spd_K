@@ -120,6 +120,7 @@ and an RK integrator (`time/integrator=rk2|rk3`); ADER is refused on a mixed-lev
 | `adapt_interval` | 0 | regrid every N steps (0 = never; static patches only) |
 | `criterion` | `lohner` | `lohner` (density second derivative), `pressure` (relative gradient), `shear` (velocity shear, Stone+2020 eq. 27), `trouble` (fraction of demoted cells > 0.01), `bfield` (MHD) |
 | `refine_threshold` / `derefine_threshold` | per criterion | threshold pair with hysteresis, read by `pressure` (default 0.03 / 0.0075), `lohner` (0.5 / 0.0125) and `shear` (0.1 / 0.05); `trouble` is a fixed 0.01 fraction. Before 2026-09 only `shear` read them |
+| `lohner_vars` | `density` | variables the `lohner` criterion scores: `density`, `pressure` or `density,pressure` (the block's score is the larger of the two, each normalized by its own block mean). `density` alone misses a contact-free shock of small density jump; `pressure` alone misses a contact; the block-interior `pressure` criterion misses both a contact and a jump that sits on a block face (the Sod tube at t=0) |
 | `refine_frac` / `derefine_frac` | per criterion | ranking fractions (`lohner`) |
 | `initial_refine` | false | iterate tag -> refine -> re-evaluate the IC before step 1 until no block is added (Athena++ `Mesh::Initialize`); use with threshold criteria |
 | `prolong_dmp` | false | discrete maximum principle on prolongation (measured harmful, off) |

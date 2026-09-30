@@ -182,6 +182,14 @@ struct RunConfig {
     int adapt_interval = 0;              //0 = no dynamic AMR; else adapt every N steps
     int amr_max_level = 0;               //maximum refinement level
     int amr_criterion = 0;               //0=Lohner, 1=pressure, 2=trouble, 3=shear, 4=bfield
+    //Variables the Lohner criterion scores, as a bit mask: 1 density, 2 pressure,
+    //3 both (the block's score is the larger of the two, each normalized by its
+    //own block mean). Density alone is the default and the pre-2026-09-30
+    //behaviour. Pressure is what tags a shock whose density jump is small, and
+    //density what tags a contact, across which the pressure is continuous; the
+    //block-interior pressure criterion (1) sees neither a contact nor a jump
+    //that sits exactly on a block face, which is where the Sod tube starts.
+    int amr_lohner_vars = 1;
     //Bound the p>=1 Lagrange prolongation by a discrete maximum principle taken
     //from the coarse neighbourhood, on top of the PAD limiter. Off keeps the
     //unlimited interpolation, which rings at sharp interfaces; on can clip
