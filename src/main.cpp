@@ -422,6 +422,27 @@ int main(int argc, char** argv){
         cfg.fv_predictor = pin.GetOrAddBoolean("fallback","predictor",
                                                cfg.fv_predictor);
         string system_name = pin.GetOrAddString("job","system","hydro");
+        //A pure MUSCL lane (job/scheme=vl2|plm) is one MUSCL flux on every face,
+        //so it has no use for the MOOD cascade -- and the cascade did not leave
+        //it alone: cascade_levels_pack starts every cell at level 0, the SD flux
+        //(first-order Rusanov at p=0), and lifts a cell to MUSCL only where
+        //detection flags it. A deck that sets fallback/style=cascade (dmr,
+        //woodward_colella) therefore turned job/scheme=vl2 into first-order
+        //Rusanov with MUSCL where flagged, and reported it as MUSCL-Hancock.
+        //Measured on the 512x128 DMR (1 Oct 2026): minmod vs van Leer 2.0e-6 rms
+        //under the cascade, the limiter barely read, against 1.2e-2 under the
+        //blend; cascade vs blend 8-10 per cent rms. So a hydro vl2|plm lane runs
+        //the blend path whatever the deck says (theta pinned to 1, no
+        //detection); SPD_FV_ONLY_CASCADE=1 keeps the old behaviour, the A/B
+        //reference for dumps made before this. MHD is untouched: its low-order
+        //lanes pin the cascade level instead (mhd/mood_force_level=1).
+        if(system_name=="hydro" && cfg.fv_only && cfg.mood_cascade
+           && std::getenv("SPD_FV_ONLY_CASCADE")==nullptr){
+            cfg.mood_cascade = false;
+            pin.Set("fallback","style","blend");
+            if(Master) cout<<"NOTE: job/scheme="<<scheme<<" takes the MUSCL flux on every face; "
+                             "fallback/style=cascade is ignored (SPD_FV_ONLY_CASCADE=1 keeps it)"<<endl;
+        }
         //MHD Riemann solver (faces + edge EMF). Default llf; hlld matches the
         //Python spd Miyoshi–Kusano HLLD / dimension-by-dimension UCT path.
         {

@@ -72,7 +72,12 @@ sweep order that left a transverse ghost row stale, rule 6b), `SPD_NO_FV_SYMFILL
 `SPD_FV_ONLY_SD` (hydro `job/scheme=vl2|plm`: `=1` runs the dead SD flux path
 and blends it in as `f + theta*(fL - f)`, the pre-skip reference; `=2` runs it
 but takes the MUSCL flux outright, which must be bit-identical to the default
-skip -- see "a discard that rounds" below). Then md5 the dumps of both paths -- and the block
+skip -- see "a discard that rounds" below), `SPD_FV_ONLY_CASCADE` (hydro
+`job/scheme=vl2|plm` under a deck's `fallback/style=cascade`, as `dmr` and
+`woodward_colella` set: `=1` keeps the cascade, which starts every cell on the SD
+flux -- first-order Rusanov at p=0 -- and lifts it to MUSCL only where detection
+flags it; that ran the DMR "MUSCL-Hancock" lanes until 1 Oct 2026, with the
+limiter barely read, 2e-6 rms between minmod and van Leer). Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
