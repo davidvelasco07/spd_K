@@ -180,6 +180,26 @@ CPU where the branch is not even compiled. One of them cost 39x
 (`mhd_compute_primitives`/`_conservatives`/`_dt`: MHD/hydro went 53x → 2.9x when
 they were deleted).
 
+The IC projection was the next four (`Initialize`, `mhd_Initialize`,
+`mhd_Initialize_A`, `rotational_a_to_b`, removed in f22a2c7): nvar x (p+1)^ndim
+IC evaluations per DoF on ONE host core, every initial-refine pass. A 3D disc
+refine pass sat >15 min on a GB200 with the GPUs idle. On an idle A100, 1-step
+wall times went 7.2 → 0.9 s (3D Sedov, 96^3 DoF), 6.4 → 0.7 s (3D MHD blast, 96^3)
+and 24.7 → 3.5 s (2D thick disc, 2304 blocks). Sharing the GPU with another run
+inflated these setup-heavy lanes 25-50x (DMR's 394-block start: 1.6 s idle, 96 s
+shared), so time startup on a quiet GPU. Its excuse ("device kernels reading
+setup views on some CUDA builds") was a UVM-era one, and the commit that added it
+also moved the setup views off UVM. **Moving work from host to device changes FMA
+contraction, so the t=0 state moves too**: 4e-14 relative on KH, 1e-13 on the
+disc, 1e-13 of max|B| on MHD (curl of A). Piecewise ICs whose interface misses
+every Gauss point (Sedov, square, DMR) stay bit-identical, as do the block maps on
+six refining lanes. The implosion is the trap. Its diagonal x+y = R runs THROUGH Gauss points, so two
+CVs moved by 5% (still x<->y symmetric). gcc on x86 does not contract and nvcc and
+arm64 clang do, so the Apollo CPU build matches the OLD GPU state while the Mac
+(where the goldens are made) matches the NEW one. An IC with a quadrature point on
+a discontinuity is not reproducible across compilers at O(1) in those cells.
+`mhd_jet_inflow_apply` still has a host branch and no call site.
+
 `amr_criteria.cpp` is the exception the grep will flag: its branches are a
 deliberate host REFERENCE, kept behind `SPD_NO_SCORE_BATCH=1`. But note what was
 actually wrong there — there was no device kernel to shadow, the `#else` looped on
