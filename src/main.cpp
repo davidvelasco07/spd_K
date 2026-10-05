@@ -648,6 +648,21 @@ int main(int argc, char** argv){
             }
         }
 
+        //The hydro cascade lets only a PAD failure reach first order; a NAD
+        //flag alone stops at MUSCL, as in the MHD cascade of Paper IV
+        //(project/mhd 399e844). Before it hydro PAD wrote the same flag as NAD,
+        //so a cell flagged on two revisions went to first order from NAD alone
+        //-- found 1 Oct 2026 on the Liska-Wendroff implosion, whose SDFB runs
+        //were more diffusive than MUSCL-Hancock. =false is that old cascade,
+        //the A/B reference for every hydro cascade dump made before this.
+        //Read only under fallback/style=cascade (pad_cell, update_cascade).
+        //It sits AFTER the MHD block on purpose: that block is unconditional
+        //and assigns mhd/mood_pad_first_order for every system, so a hydro
+        //parse placed before it was silently reset to false (measured: the
+        //first build of this switch was bit-identical to the old binary).
+        if(system_name=="hydro")
+            cfg.mood_pad_first_order = pin.GetOrAddBoolean("hydro","mood_pad_first_order",true);
+
         //Number of elements on this rank
         int Nx = ax ? NX/comm.nx : 1;
         int Ny = ay ? NY/comm.ny : 1;

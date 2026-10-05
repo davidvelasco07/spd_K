@@ -456,20 +456,42 @@ void blending_ring_b(FV_Solution theta_in, FV_Solution theta_out){
     });
 }
 
+//`pad1st` (hydro/mood_pad_first_order under fallback/style=cascade) marks a
+//PAD failure 2 instead of 1, so update_cascade can let it -- and only it --
+//reach first order, while a NAD flag (1) stops at MUSCL. That is the MHD
+//cascade of Paper IV (mhd_PAD; branch project/mhd, 399e844). Before it, PAD
+//wrote the same 1 as NAD and any cell flagged on two revisions went to first
+//order from NAD alone. It also tests finiteness: a comparison with NaN is
+//false, so a non-finite candidate passed both NAD and the bounds test. Only
+//the physical rows are tested -- NVAR's slot 5 is dead storage and can be NaN
+//(memory: trouble aggregate slot). Never under the blend style: theta reads
+//`flagged` as a weight, and a 2 would double it.
 KOKKOS_INLINE_FUNCTION
 void pad_cell(FV_Vector W, FV_Vector flagged, int off, int foff,
-              int k, int j, int i){
+              int k, int j, int i, bool pad1st){
         const double density  = W(off+_d_,k,j,i);
         const double pressure = W(off+_p_,k,j,i);
+        if(pad1st){
+            const bool finite = isfinite(density) && isfinite(pressure)
+                && isfinite(W(off+_vx_,k,j,i)) && isfinite(W(off+_vy_,k,j,i))
+                && isfinite(W(off+_vz_,k,j,i));
+            if(!finite || density<rho_min || density>rho_max
+                       || pressure<p_min  || pressure>p_max)
+                flagged(foff,k,j,i) = 2;
+            return;
+        }
         if(density<rho_min || density>rho_max)  flagged(foff,k,j,i) = 1;
         if(pressure<p_min  || pressure>p_max)   flagged(foff,k,j,i) = 1;
 }
 
+static bool pad_first_order(){ return cfg.mood_cascade && cfg.mood_pad_first_order; }
+
 void PAD_criteria(FV_Solution W, FV_Solution flagged){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
     FV_Vector w=W.Vector, fl=flagged.Vector;
+    const bool pad1st=pad_first_order();
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        pad_cell(w,fl,0,0,k,j,i);
+        pad_cell(w,fl,0,0,k,j,i,pad1st);
     });
 }
 
@@ -477,8 +499,9 @@ void PAD_criteria_b(FV_Solution W, FV_Solution flagged){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, nb=W.nb;
     int nvar=W.n_var, fnv=flagged.n_var;
     FV_Vector w=W.Vector, fl=flagged.Vector;
+    const bool pad1st=pad_first_order();
     fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
-        pad_cell(w,fl,b*nvar,b*fnv,k,j,i);
+        pad_cell(w,fl,b*nvar,b*fnv,k,j,i,pad1st);
     });
 }
 

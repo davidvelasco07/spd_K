@@ -77,7 +77,11 @@ skip -- see "a discard that rounds" below), `SPD_FV_ONLY_CASCADE` (hydro
 `woodward_colella` set: `=1` keeps the cascade, which starts every cell on the SD
 flux -- first-order Rusanov at p=0 -- and lifts it to MUSCL only where detection
 flags it; that ran the DMR "MUSCL-Hancock" lanes until 1 Oct 2026, with the
-limiter barely read, 2e-6 rms between minmod and van Leer). Then md5 the dumps of both paths -- and the block
+limiter barely read, 2e-6 rms between minmod and van Leer), and `hydro/mood_pad_first_order=false` (a DECK
+switch: the old hydro cascade, whose PAD wrote the same flag as NAD, so a cell flagged on two revisions went
+to first order from NAD alone; the default now stops NAD at MUSCL as Paper IV's MHD cascade does -- on the
+128^2 SDFB4 implosion 2.4-9.6% of cells sat at first order before, 0% after, i.e. every one was NAD-driven).
+Then md5 the dumps of both paths -- and the block
 maps too, for anything that feeds a refinement decision. Every switch must agree
 with every other on one mixed-level lane; ten of them do today, checked together. Verify on a **mixed-level** mesh, and with the feature that exercises the
 code turned **both ON and OFF** — both directions have already bitten:
@@ -388,6 +392,12 @@ two values of the knob and md5 the block maps: identical maps mean the knob is
 not connected.** The same A/B in the other direction (deck sets nothing -> must
 be bit-identical to the old binary) is what made the fix safe: 0 of 4 files
 differ on three decks.
+
+**The `<mhd>` parameter block in `main.cpp` is UNCONDITIONAL** -- it runs for every system and assigns shared
+`cfg` fields (`mood_pad_first_order`, `mood_max_level`, ...). The first build of `hydro/mood_pad_first_order`
+parsed it BEFORE that block, which reset it to the MHD default, and the new default came out bit-identical
+to the old binary on every lane. The A/B's "new default" side is what caught it: a fix that changes nothing
+is a knob that is not connected. A hydro parse of a shared field goes AFTER the MHD block.
 
 ## 7a2. A pointwise IC can be invisible to a coarse root, and then nothing refines
 
@@ -768,6 +778,13 @@ enters through the nozzle and leaves through the far boundary.
   full configure line below) and check `spd_K_SOURCE_DIR` in its cache before
   trusting anything it builds. Kokkos lives at
   `FETCHCONTENT_SOURCE_DIR_KOKKOS=~/spd_K-blast/build-cuda/_deps/kokkos-src`.
+- **`rsync -a` keeps the LAPTOP's mtime, so a resync can be OLDER than the remote object and make skips it.**
+  1 Oct 2026: `main.cpp` was fixed locally at 16:09:43 while the first remote build was still running; that
+  build compiled the OLD file at 16:10:00, the resync landed afterwards with mtime 16:09:43, and the rebuild
+  compiled nothing -- same binary md5 before and after, and a whole campaign launched on the unfixed code
+  (it showed up as old-vs-new differing by 1e-13). After any resync into a tree that has built, delete the
+  objects (`rm -f build-cuda/CMakeFiles/spd_K.dir/src/*.o`) and CHECK that the binary md5 changed; then
+  run one A/B on the remote binary that the change must move before launching anything long.
 - `nvcc` is not on `PATH` over non-interactive ssh: `export PATH=/usr/local/cuda/bin:$PATH`,
   or cmake fails with a bogus `string sub-command REPLACE` error from Kokkos.
 - **The full working apollo configure line** (the default toolchain does not

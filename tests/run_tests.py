@@ -177,8 +177,11 @@ CONFIGS = {
         "l1_limit": 6.0e-5,
     },
     "hydro_cascade_blast_2d": {
-        # Real shock: cells demote to levels 1 and 2, and the assembled
-        # single-valued face flux must still conserve mass to round-off.
+        # Real shock: cells demote to MUSCL, and the assembled single-valued
+        # face flux must still conserve mass to round-off. Golden regenerated
+        # 1 Oct 2026 for hydro/mood_pad_first_order=true (NAD stops at MUSCL;
+        # the 40 first-order cells of the old cascade were all NAD-driven, and
+        # none remain). The old golden is hydro_cascade_blast_nadfirst.
         "input": "inputs/sine_wave.athinput",
         "overrides": ["job/fallback=true", "mesh/nx3=1",
                       "problem/problem=spherical_blast",
@@ -190,6 +193,27 @@ CONFIGS = {
         "field": "W_cv_N8p3_1_0.dat",
         "t_end": 0.02,
         "golden_name": "hydro_cascade_blast",
+        "golden_rtol": 1e-6,
+    },
+    "hydro_cascade_blast_nadfirst_2d": {
+        # The OLD hydro cascade, hydro/mood_pad_first_order=false: PAD wrote the
+        # same flag as NAD, so a cell flagged on two revisions went to first
+        # order from NAD alone. Its golden is the August 2026 hydro_cascade_blast
+        # golden, which this switch reproduces bit for bit. It pins the A/B
+        # reference of every hydro cascade dump made before 1 Oct 2026, and it
+        # is the negative control for hydro_cascade_blast: the two goldens
+        # differ by 1.7e-01, so a cap that stops working turns that one red.
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["job/fallback=true", "mesh/nx3=1",
+                      "problem/problem=spherical_blast",
+                      "hydro/gamma=1.6666666666667",
+                      "time/tlim=0.02", "output/dt=0.02",
+                      "fallback/style=cascade", "hydro/mood_pad_first_order=false"],
+        "ndim": 2,
+        "checks": ["mass_strict", "golden"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.02,
+        "golden_name": "hydro_cascade_blast_nadfirst",
         "golden_rtol": 1e-6,
     },
     "hydro_cascade_blast_mb_2d": {

@@ -136,6 +136,8 @@ struct RunConfig {
                                          //stops at MUSCL. First order is the
                                          //positivity last resort, so it answers to
                                          //physics rather than to ringing.
+                                         //Parsed per system: hydro/... (default
+                                         //true), mhd/... (default false).
     int mood_max_level = 2;              //deepest cascade tier the detector may
                                          //demote to: 0 = high order only,
                                          //1 = stop at MUSCL, 2 = allow first
