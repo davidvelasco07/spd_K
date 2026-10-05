@@ -125,6 +125,7 @@ struct RunConfig {
                                          //whose flavour follows rsolver
                                          //(hll -> UCT-HLL, hlld -> UCT-HLLD).
     int limiter = _lim_minmod_;          //MUSCL/FV slope limiter (fallback/limiter)
+    int sd_rsolver = 0;                  //hydro SD flux-point Riemann solver (hydro/sd_riemann): 0 llf, 1 hllc
     int mood_nad_b = _nad_b_comps_;      //MHD NAD B mode: comps (default) or mag
                                          //(|B|-only is blind to Alfvénic / transverse
                                          //structure; matches AthenaK mood_nad_b=comps

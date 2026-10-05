@@ -529,6 +529,7 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
     int nader = U.n_ader;
     int nb = U.nb;
     double gm = cfg.gamma;
+    const int rs = cfg.sd_rsolver;   //hydro/sd_riemann; device cannot read cfg, so capture
     sd_for_cells_b(nb,Nz,Ny,Nx,pz,py,px,
         KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
         BOFF(nader);
@@ -548,7 +549,8 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
                 u_L[var] = U.Vector(B_INDICES_L);
                 u_R[var] = U.Vector(B_INDICES_R);
             }
-            riemann_llf(f,u_L,u_R,V1,V2,V3,gm);
+            if(rs==1) riemann_hllc(f,u_L,u_R,V1,V2,V3,gm);
+            else      riemann_llf(f,u_L,u_R,V1,V2,V3,gm);
             for(var=0;var<NVAR;var++){
                 F.Vector(B_INDICES_L) = f[var];
                 F.Vector(B_INDICES_R) = f[var];

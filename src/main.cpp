@@ -245,6 +245,20 @@ int main(int argc, char** argv){
             exit(1);
         }
         cfg.gamma    = pin.GetOrAddReal("hydro","gamma",1.4);
+        //Riemann solver at the SD flux points (element interfaces) of the hydro
+        //scheme. llf (Rusanov) is the historical choice and stays the default,
+        //bit-identical; hllc is the solver the FV fallback levels use. Added 1 Oct
+        //2026 to test how much of SDFB's dissipation on contact- and shear-driven
+        //flows (the Liska-Wendroff jet) is the interface flux rather than the cascade.
+        {
+            string srs = pin.GetOrAddString("hydro","sd_riemann","llf");
+            if(srs=="llf" || srs=="rusanov") cfg.sd_rsolver = 0;
+            else if(srs=="hllc")             cfg.sd_rsolver = 1;
+            else{
+                if(Master) cout<<"ERROR: hydro/sd_riemann = '"<<srs<<"' (expected llf or hllc)"<<endl;
+                exit(1);
+            }
+        }
         //Constant gravitational acceleration (source term); default 0 leaves
         //the homogeneous Euler equations untouched. Set e.g. hydro/g2 for a
         //vertical field (Rayleigh-Taylor).
