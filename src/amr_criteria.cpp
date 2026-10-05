@@ -98,6 +98,9 @@ double lohner_score(SD_Solution W, int var, const double* edge){
         cnt++;
     }
     den = den/std::max(cnt,1) + 1e-12;
+    //A passive-scalar row (amr/lohner_vars = scalar) is scored by the second difference itself: a concentration has a
+    //unit scale, and dividing by a block mean that tends to zero would refine on the round-off tail of the scalar.
+    if(var >= NVAR) return g2;
     return g2/den;
 }
 
@@ -394,7 +397,7 @@ void block_scores_b(SD_Solution W, int which, int var, Vector out, Vector edge){
                 cnt++;
             }
             den = den/(cnt>1 ? cnt : 1) + 1e-12;
-            res = g2/den;
+            res = var >= NVAR ? g2 : g2/den;   //a scalar row is not normalised, see lohner_score
         }
         out(bb) = res;
     });
@@ -453,6 +456,7 @@ static double block_score_host(int criterion, SD_Solution W, const double* edge)
             double s = 0.0;
             if(cfg.amr_lohner_vars & 1) s = std::max(s, lohner_score(W, _d_, edge));
             if(cfg.amr_lohner_vars & 2) s = std::max(s, lohner_score(W, _p_, edge));
+            if(cfg.amr_lohner_vars & 4) s = std::max(s, lohner_score(W, NVAR, edge));   //first passive scalar
             return s;
         }
     }
@@ -552,9 +556,9 @@ static void tag_blocks_impl(BlockForest& forest, std::vector<Block>& blocks,
         //The Lohner criterion scores each variable of amr/lohner_vars in its own
         //launch and keeps the larger; density alone is one launch, as before.
         const int lvars = criterion==0 ? cfg.amr_lohner_vars : 1;
-        const int vars[2] = {_d_, _p_};
+        const int vars[3] = {_d_, _p_, NVAR};   //bit 4: the first passive scalar (hydro only, main.cpp)
         score.assign(nb, 0.0);
-        for(int q=0; q<2; q++){
+        for(int q=0; q<3; q++){
             if(!(lvars & (1<<q))) continue;
             block_scores_b(W_pack, criterion, vars[q], sc, ev);
             auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc);

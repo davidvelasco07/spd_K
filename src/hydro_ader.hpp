@@ -125,8 +125,8 @@ struct Hydro_ader : public PhysicsModule{
         bool run_ic=true
     ) : comm_(comm), Xdim_(X_dim), Ydim_(Y_dim), Zdim_(Z_dim),
         pack_(pack), pib_(pack_ib) {
-        //Number of variables: rho, vx, vy, vz, e + FV bookkeeping slot
-        nvar = NVAR;
+        //Number of variables: rho, vx, vy, vz, e, then the passive scalars (define.hpp)
+        nvar = NVAR + cfg.nscal;
         n_output = 0;
         n_step = 0;
         t=0;
@@ -560,6 +560,15 @@ struct Hydro_ader : public PhysicsModule{
             f<<std::setprecision(17)<<t<<" "
              <<fv_mass(W_cv,Xdim_,Ydim_,Zdim_)<<endl;
         }
+        //scalar.txt: t and the total of each passive scalar. A file of its own, because the suite reads mass.txt
+        //as two columns.
+        if(Master && cfg.nscal>0){
+            std::ofstream f(output_folder()+"scalar.txt",
+                            n_output==0 ? std::ios::trunc : std::ios::app);
+            f<<std::setprecision(17)<<t;
+            for(int n=0; n<cfg.nscal; n++) f<<" "<<fv_scalar_mass(Xdim_,Ydim_,Zdim_,NVAR+n);
+            f<<endl;
+        }
         if(cfg.fallback){
             Write(troubles,n_output);
             Write(flagged,n_output);
@@ -677,6 +686,30 @@ struct Hydro_ader : public PhysicsModule{
         return mass;
     }
 
+    //Total of one passive scalar, the integral of rho*s over the active cells; `row` is NVAR+n. Taken from the
+    //CONSERVED cell averages, recomputed here from U_sp, and not from W_cv: at the first output W_cv still holds
+    //the cell averages of the initial PRIMITIVES, and the product of the averages of rho and s is not the average
+    //of rho*s (3.7e-4 of the total on the sine test, which read as a drift). The transform writes U_cv, which
+    //every stage and cons_to_prim_cv recompute from U_sp the same way, so the evolution does not see it.
+    double fv_scalar_mass(dimension X_dim, dimension Y_dim, dimension Z_dim, int row){
+        transform_sp_to_cv(U_sp,U_cv);
+        SD_Solution W = U_cv;
+        int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
+        int qx=px, qy=py, qz=pz;
+        Vector fx = X_dim.fv_faces;
+        Vector fy = Y_dim.fv_faces;
+        Vector fz = Z_dim.fv_faces;
+        bool ay=cfg.active[_y_], az=cfg.active[_z_];
+        GHOST_LOCALS;
+        return sd_sum_active_cells(Nz,Ny,Nx,pz,py,px,
+            KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii,double& sum){
+                double V = fx(I+1)-fx(I);
+                if(ay) V *= fy(J+1)-fy(J);
+                if(az) V *= fz(K+1)-fz(K);
+                sum += W.Vector(0,row,k,j,i,kk,jj,ii)*V;
+            });
+    }
+
     //FV update phases: the per-node body is split at every ghost exchange
     //(U_old/U_new, troubles, theta) so a multi-block driver can run each
     //phase over all blocks and substitute block-to-block exchanges. The
@@ -709,7 +742,7 @@ struct Hydro_ader : public PhysicsModule{
         //like transverse velocities, have no meaningful relative band)
         detect_troubles(W_new,W_old,troubles,flagged,
             alpha_x,alpha_y,alpha_z,
-            X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
+            X_dim,Y_dim,Z_dim,1,hydro_limit_mask(),hydro_scalar_mask());
     }
 
     //Fractional blend factor: spread the trouble flags to the neighborhood
@@ -818,7 +851,7 @@ struct Hydro_ader : public PhysicsModule{
         compute_primitives(U_new,W_new);
         detect_troubles(W_new,W_old,troubles,flagged,
             alpha_x,alpha_y,alpha_z,
-            X_dim,Y_dim,Z_dim,1,(1<<_d_)|(1<<_p_));
+            X_dim,Y_dim,Z_dim,1,hydro_limit_mask(),hydro_scalar_mask());
         return update_cascade(flagged,cascade,2);
     }
 

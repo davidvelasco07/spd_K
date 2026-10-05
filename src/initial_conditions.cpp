@@ -261,9 +261,61 @@ double ha_jet(int var, double x, double y, double z, ProblemParams pp){
     return 0.0;
 }
 
+//Shock-cloud interaction, the adiabatic set-up of Pittard & Parkin (2016, MNRAS 457, 4470; 3D) after Klein, McKee &
+//Colella (1994): a planar shock of Mach number pp.v1 runs along +x through an ambient medium at rest (pp.d0, pp.p0)
+//into a cloud in pressure equilibrium with it. The cloud is soft-edged, eq. 18-19 of Pittard et al. (2009, MNRAS
+//394, 1351):
+//    rho(r) = rho_amb [psi + (1 - psi) eta],   eta = (1/2)[1 + (alpha-1)/(alpha+1)],
+//    alpha  = exp{min[20, p1 ((r/r_c)^2 - 1)]},
+//with psi set so that the central density is pp.d1 (the contrast chi = d1/d0) and p1 = pp.p1 the steepness of the
+//edge (10 in both papers: an edge about a tenth of the radius wide). The cloud centre is (pp.cx, pp.cy, pp.cz), its
+//radius pp.radius; the shock starts pp.amp radii upstream of the centre, with the Rankine-Hugoniot state behind it.
+//In 2D the cloud is a cylinder, in 1D a slab. Boundaries: gradfree on every face (the upstream face then keeps
+//feeding the post-shock state).
 KOKKOS_INLINE_FUNCTION
-double initial_condition(int problem, int var, double x, double y, double z,
-                         double gm, double gy, bool ay, bool az, ProblemParams pp){
+double shock_cloud_density(double x, double y, double z, bool ay, bool az, ProblemParams pp){
+    double q = (x-pp.cx)*(x-pp.cx);
+    if(ay) q += (y-pp.cy)*(y-pp.cy);
+    if(az) q += (z-pp.cz)*(z-pp.cz);
+    q /= pp.radius*pp.radius;                                    //(r/r_c)^2
+    const double a0   = exp(-pp.p1);
+    const double eta0 = 0.5*(1.0 + (a0-1.0)/(a0+1.0));            //eta at the centre
+    const double psi  = (pp.d1/pp.d0 - eta0)/(1.0 - eta0);
+    const double al   = exp(fmin(20.0, pp.p1*(q-1.0)));
+    const double eta  = 0.5*(1.0 + (al-1.0)/(al+1.0));
+    return pp.d0*(psi + (1.0-psi)*eta);
+}
+
+KOKKOS_INLINE_FUNCTION
+double shock_cloud(int var, double x, double y, double z, double gm, bool ay, bool az, ProblemParams pp){
+    if(x < pp.cx - pp.amp*pp.radius){
+        //behind the shock: Rankine-Hugoniot for Mach M into (d0, p0) at rest
+        const double M2 = pp.v1*pp.v1;
+        const double rho2 = pp.d0*(gm+1.0)*M2/((gm-1.0)*M2 + 2.0);
+        if(var==_d_)  return rho2;
+        if(var==_vx_) return pp.v1*sqrt(gm*pp.p0/pp.d0)*(1.0 - pp.d0/rho2);
+        if(var==_p_)  return pp.p0*(2.0*gm*M2 - (gm-1.0))/(gm+1.0);
+        return 0.0;
+    }
+    if(var==_d_) return shock_cloud_density(x,y,z,ay,az,pp);
+    if(var==_p_) return pp.p0;
+    return 0.0;
+}
+
+//The advected scalar of Pittard & Parkin (2016) that marks cloud material: kappa = rho/(chi rho_amb) within two cloud
+//radii of the centre and zero beyond, so it is 1 at the centre and 1/chi at the edge of its support.
+KOKKOS_INLINE_FUNCTION
+double shock_cloud_kappa(double x, double y, double z, bool ay, bool az, ProblemParams pp){
+    double r2 = (x-pp.cx)*(x-pp.cx);
+    if(ay) r2 += (y-pp.cy)*(y-pp.cy);
+    if(az) r2 += (z-pp.cz)*(z-pp.cz);
+    if(r2 >= 4.0*pp.radius*pp.radius || x < pp.cx - pp.amp*pp.radius) return 0.0;
+    return shock_cloud_density(x,y,z,ay,az,pp)/pp.d1;
+}
+
+KOKKOS_INLINE_FUNCTION
+double euler_ic(int problem, int var, double x, double y, double z,
+                double gm, double gy, bool ay, bool az, ProblemParams pp){
     switch(problem){
         case _ic_sine_wave_:        return sine_wave(var,x,y,z,pp);
         case _ic_sedov_:            return sedov_blast(var,x,y,z,gm,az,pp);
@@ -278,9 +330,37 @@ double initial_condition(int problem, int var, double x, double y, double z,
         case _ic_dmr_:              return dmr(var,x,y);
         case _ic_rti_:              return rti(var,x,y,gm,gy,pp);
         case _ic_ha_jet_:           return ha_jet(var,x,y,z,pp);
+        case _ic_shock_cloud_:      return shock_cloud(var,x,y,z,gm,ay,az,pp);
         case _ic_user_:             return user_ic(var,x,y,z,gm,ay,az,pp);
         default:                    return 0;
     }
+}
+
+//Initial CONCENTRATION of passive scalar n (row NVAR+n, define.hpp), chosen by problem/scalar (_sic_*). A problem
+//that marks its own material (a cloud, a jet) should define the scalar here under its problem id instead.
+KOKKOS_INLINE_FUNCTION
+double scalar_ic(int sic, int n, int problem, double x, double y, double z,
+                 double gm, double gy, bool ay, bool az, ProblemParams pp){
+    if(problem == _ic_shock_cloud_ && n == 0) return shock_cloud_kappa(x,y,z,ay,az,pp);   //its own marker
+    switch(sic){
+        case _sic_uniform_: return 1.0;
+        case _sic_sine_:    return 0.5 + 0.25*sin(2*PI*(x + y + z + 0.25*n));
+        case _sic_blob_: {
+            double r2 = (x-pp.cx)*(x-pp.cx);
+            if(ay) r2 += (y-pp.cy)*(y-pp.cy);
+            if(az) r2 += (z-pp.cz)*(z-pp.cz);
+            return r2 < pp.radius*pp.radius ? 1.0 : 0.0;
+        }
+        case _sic_density_: return euler_ic(problem,_d_,x,y,z,gm,gy,ay,az,pp)/pp.d0;
+        default:            return 0.0;
+    }
+}
+
+KOKKOS_INLINE_FUNCTION
+double initial_condition(int problem, int var, double x, double y, double z,
+                         double gm, double gy, bool ay, bool az, ProblemParams pp, int sic){
+    if(var < NVAR) return euler_ic(problem,var,x,y,z,gm,gy,ay,az,pp);
+    return scalar_ic(sic,var-NVAR,problem,x,y,z,gm,gy,ay,az,pp);
 }
 
 void Initialize(
@@ -305,6 +385,7 @@ void Initialize(
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     ProblemParams pp = cfg.pp;
+    const int sic = cfg.scalar_ic;
 #ifdef KOKKOS_ENABLE_CUDA
     Matrix_h fx = setup_mirror(faces_x); setup_pull(faces_x, fx);
     Matrix_h fy = setup_mirror(faces_y); setup_pull(faces_y, fy);
@@ -328,7 +409,7 @@ void Initialize(
                     y = fy(j,jj) + xs(mm)*(fy(j,jj+1)-fy(j,jj));
                 for(int ll=0; ll<px; ll++){
                     x = fx(i,ii) + xs(ll)*(fx(i,ii+1)-fx(i,ii));
-                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp);
+                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp,sic);
                     s*=ws(ll);
                     if(ay) s*=ws(mm);
                     if(az) s*=ws(nn);
@@ -357,7 +438,7 @@ void Initialize(
                     y = faces_y(j,jj) + x_sp(mm)*(faces_y(j,jj+1)-faces_y(j,jj));
                 for(int ll=0; ll<px; ll++){
                     x = faces_x(i,ii) + x_sp(ll)*(faces_x(i,ii+1)-faces_x(i,ii));
-                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp);
+                    s = initial_condition(problem,var,x,y,z,gm,gy,ay,az,pp,sic);
                     s*=w_sp(ll);
                     if(ay) s*=w_sp(mm);
                     if(az) s*=w_sp(nn);

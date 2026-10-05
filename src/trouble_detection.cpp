@@ -43,7 +43,8 @@ double Alpha(double dv, double dUm, double dU, double dUp){
 KOKKOS_INLINE_FUNCTION
 void nad_cell(FV_Vector U_new, FV_Vector U, FV_Vector troubles, int off,
               int k, int j, int i, int nvar, int limit_mask, double tolerance,
-              bool ax, bool ay, bool az, bool moore, bool delta_mode){
+              bool ax, bool ay, bool az, bool moore, bool delta_mode,
+              int abs_mask=0, double abs_tol=0.0){
         for(int var=off; var<off+nvar; var++){
         if(!((limit_mask>>(var-off))&1)) continue;
         double maximum;
@@ -85,7 +86,13 @@ void nad_cell(FV_Vector U_new, FV_Vector U, FV_Vector troubles, int off,
                 minimum = min3(u_L,minimum,u_R);
             }
         }
-        if(delta_mode){
+        if((abs_mask>>(var-off))&1){
+            //ABSOLUTE band, for the passive-scalar rows (hydro_scalar_mask): a concentration has a unit scale and
+            //zero is a legitimate value, where a relative band has no width and round-off flags the cell.
+            minimum -= abs_tol;
+            maximum += abs_tol;
+        }
+        else if(delta_mode){
             //band scaled by the local solution range
             double eps = tolerance*(maximum-minimum);
             minimum -= eps;
@@ -104,28 +111,30 @@ void nad_cell(FV_Vector U_new, FV_Vector U, FV_Vector troubles, int off,
 
 //limit_mask: bit set per variable index included in the NAD/SED checks
 //(the reference implementation limits only density and pressure for hydro)
-void NAD(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double tolerance, int limit_mask){
+void NAD(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double tolerance, int limit_mask, int abs_mask=0){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
     //Every component of a solution array is a physical variable now, and the
     //mask decides which of them are limited.
     int nvar = U.n_var;
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     bool moore=cfg.nad_moore, delta_mode=cfg.nad_delta;
+    const double abs_tol=cfg.scalar_atol;
     FV_Vector un=U_new.Vector, u=U.Vector, tr=troubles.Vector;
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        nad_cell(un,u,tr,0,k,j,i,nvar,limit_mask,tolerance,ax,ay,az,moore,delta_mode);
+        nad_cell(un,u,tr,0,k,j,i,nvar,limit_mask,tolerance,ax,ay,az,moore,delta_mode,abs_mask,abs_tol);
     });
 }
 
 //Same over a whole pack: one launch for every block.
-void NAD_b(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double tolerance, int limit_mask){
+void NAD_b(FV_Solution U_new, FV_Solution U, FV_Solution troubles, double tolerance, int limit_mask, int abs_mask=0){
     int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz, nb=U.nb;
     int nvar = U.n_var;
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     bool moore=cfg.nad_moore, delta_mode=cfg.nad_delta;
+    const double abs_tol=cfg.scalar_atol;
     FV_Vector un=U_new.Vector, u=U.Vector, tr=troubles.Vector;
     fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
-        nad_cell(un,u,tr,b*nvar,k,j,i,nvar,limit_mask,tolerance,ax,ay,az,moore,delta_mode);
+        nad_cell(un,u,tr,b*nvar,k,j,i,nvar,limit_mask,tolerance,ax,ay,az,moore,delta_mode,abs_mask,abs_tol);
     });
 }
 
@@ -479,13 +488,14 @@ static PadBounds pad_bounds(){ return {cfg.pad_min_rho, cfg.pad_max_rho, cfg.pad
 
 KOKKOS_INLINE_FUNCTION
 void pad_cell(FV_Vector W, FV_Vector flagged, int off, int foff,
-              int k, int j, int i, bool pad1st, PadBounds pb){
+              int k, int j, int i, bool pad1st, PadBounds pb, int ns=0){
         const double density  = W(off+_d_,k,j,i);
         const double pressure = W(off+_p_,k,j,i);
         if(pad1st){
-            const bool finite = isfinite(density) && isfinite(pressure)
+            bool finite = isfinite(density) && isfinite(pressure)
                 && isfinite(W(off+_vx_,k,j,i)) && isfinite(W(off+_vy_,k,j,i))
                 && isfinite(W(off+_vz_,k,j,i));
+            for(int s=NVAR; s<NVAR+ns; s++) finite = finite && isfinite(W(off+s,k,j,i));   //passive scalars
             if(!finite || density<pb.rmin || density>pb.rmax
                        || pressure<pb.pmin || pressure>pb.pmax)
                 flagged(foff,k,j,i) = 2;
@@ -502,8 +512,10 @@ void PAD_criteria(FV_Solution W, FV_Solution flagged){
     FV_Vector w=W.Vector, fl=flagged.Vector;
     const bool pad1st=pad_first_order();
     const PadBounds pb=pad_bounds();
+    //cfg.nscal rows only on a hydro state: PAD_criteria is shared, and W carries them only when its width says so.
+    const int ns = (W.n_var == NVAR+cfg.nscal) ? cfg.nscal : 0;
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        pad_cell(w,fl,0,0,k,j,i,pad1st,pb);
+        pad_cell(w,fl,0,0,k,j,i,pad1st,pb,ns);
     });
 }
 
@@ -513,8 +525,9 @@ void PAD_criteria_b(FV_Solution W, FV_Solution flagged){
     FV_Vector w=W.Vector, fl=flagged.Vector;
     const bool pad1st=pad_first_order();
     const PadBounds pb=pad_bounds();
+    const int ns = (nvar == NVAR+cfg.nscal) ? cfg.nscal : 0;   //see PAD_criteria
     fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
-        pad_cell(w,fl,b*nvar,b*fnv,k,j,i,pad1st,pb);
+        pad_cell(w,fl,b*nvar,b*fnv,k,j,i,pad1st,pb,ns);
     });
 }
 
@@ -530,13 +543,14 @@ void detect_troubles(
     dimension Y_dim,
     dimension Z_dim,
     bool PAD,
-    int limit_mask
+    int limit_mask,
+    int abs_mask
     ){
     double tolerance = cfg.nad_tolerance;
     //Following the reference, smooth extrema detection only applies for p>1
     //(the SED stencil needs a genuinely high-order candidate solution)
     bool use_sed = cfg.sed && X_dim.p > 1;
-    NAD(W_new, W_old, troubles, tolerance, limit_mask);
+    NAD(W_new, W_old, troubles, tolerance, limit_mask, abs_mask);
     if(use_sed){
         if(cfg.active[_x_])
             smooth_extrema(W_new, alpha_x, X_dim.fv_centers, X_dim.fv_faces, _x_, limit_mask);
@@ -571,11 +585,12 @@ void detect_troubles_b(
     Matrix cz, Matrix fz,
     int p,
     bool PAD,
-    int limit_mask
+    int limit_mask,
+    int abs_mask
     ){
     double tolerance = cfg.nad_tolerance;
     bool use_sed = cfg.sed && p > 1;
-    NAD_b(W_new, W_old, troubles, tolerance, limit_mask);
+    NAD_b(W_new, W_old, troubles, tolerance, limit_mask, abs_mask);
     if(use_sed){
         if(cfg.active[_x_]) smooth_extrema_b(W_new, alpha_x, cx, fx, _x_, limit_mask);
         if(cfg.active[_y_]) smooth_extrema_b(W_new, alpha_y, cy, fy, _y_, limit_mask);

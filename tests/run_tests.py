@@ -1398,6 +1398,141 @@ CONFIGS = {
         "field": "W_cv_N64p0_1_0.dat",
         "t_end": 0.05,
     },
+    # ---- Passive scalars (hydro/nscalars): conserved rows rho*s after the energy --------------------------------
+    # A uniform concentration must stay uniform to round-off whatever the flow does: the scalar flux is the mass
+    # flux times the concentration on every path (SD flux points, LLF/HLLC interfaces, MUSCL, first order,
+    # prolongation, restriction, coarse-fine correction), so rho*s tracks rho bit for bit up to rounding. Its total
+    # must then equal the mass. Measured 5 Oct 2026: max|s-1| 8e-15, |S-M|/M 1e-14 (two levels, cascade live).
+    "hydro_scalar_uniform_amr_2d": {
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["fallback/style=cascade", "amr/max_level=2", "time/tlim=0.02", "output/dt=0.02",
+                      "hydro/nscalars=2", "problem/scalar=uniform"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "scalar_uniform", "scalar_mass"],
+        "field": "W_cv_N64p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    # Negative control of the gate above (CLAUDE.md rule 7): a non-uniform start must FAIL it, which shows the check
+    # reads the scalar rows of the dump and not something that is 1 by construction.
+    "hydro_scalar_uniform_sensitive_2d": {
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["fallback/style=cascade", "time/tlim=0.02", "output/dt=0.02",
+                      "hydro/nscalars=2", "problem/scalar=sine"],
+        "ndim": 2,
+        "checks": ["scalar_uniform_sensitive"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.02,
+    },
+    # The MUSCL-Hancock lane (p=0) and the walls: same property through the pure-FV path and mirror ghosts.
+    "hydro_scalar_uniform_muscl_amr_2d": {
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["mesh/p=0", "job/scheme=vl2", "amr/max_level=2",
+                      "hydro/nscalars=1", "problem/scalar=uniform"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "scalar_uniform", "scalar_mass"],
+        "field": "W_cv_N64p0_1_0.dat",
+        "t_end": 0.1,
+    },
+    # Three dimensions, blocks of 4^3 elements, one refined level around a Sedov deposit.
+    "hydro_scalar_uniform_amr_3d": {
+        "input": "inputs/sedov.athinput",
+        "overrides": ["mesh/p=3", "job/scheme=sd", "fallback/style=cascade", "time/integrator=rk3",
+                      "mesh/nx1=16", "mesh/nx2=16", "mesh/nx3=16", "mesh/x3len=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=4",
+                      "problem/radius=0.1", "time/tlim=0.002", "output/dt=0.002",
+                      "amr/max_level=1", "amr/criterion=lohner", "amr/lohner_vars=density,pressure",
+                      "amr/refine_threshold=0.3", "amr/derefine_threshold=0.075",
+                      "amr/initial_refine=true", "amr/adapt_interval=5",
+                      "hydro/nscalars=1", "problem/scalar=uniform"],
+        "ndim": 3,
+        "checks": ["mixed_levels", "mass_strict", "scalar_uniform", "scalar_mass"],
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.002,
+    },
+    # Smooth advection against the exact cell averages of rho*s (density 1 + 0.125 sin, concentration
+    # 0.5 + 0.25 sin, both carried at v = (1,1)): pure SD, p=3. Measured L1 5.56e-5 at N=8, order 4.1-4.4 over
+    # N = 4, 8, 16 (density: 4.3, 4.1).
+    "hydro_scalar_sine_2d": {
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/nx2=8", "mesh/nx3=1", "job/fallback=false",
+                      "time/integrator=rk3", "time/cfl=0.1", "hydro/nscalars=1", "problem/scalar=sine"],
+        "ndim": 2,
+        "checks": ["scalar_analytic", "scalar_mass"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.1,
+        "scalar_l1_limit": 8.0e-5,
+    },
+    # A discontinuous blob carried half a period on a uniform flow, cascade live. With the scalar rows in the
+    # detection (absolute band, fallback/scalar_tolerance) the concentration stays within 1e-2 of [0,1]
+    # (measured -9.8e-5 / 1 - 6.5e-3) ...
+    "hydro_scalar_blob_2d": {
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/nx2=8", "mesh/nx3=1", "job/fallback=true", "fallback/style=cascade",
+                      "time/integrator=rk3", "problem/amp=0", "problem/radius=0.2", "time/tlim=0.5",
+                      "output/dt=0.5", "hydro/nscalars=1", "problem/scalar=blob"],
+        "ndim": 2,
+        "checks": ["scalar_bounds", "scalar_mass"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.5,
+        "scalar_bound_tol": 1.0e-2,
+    },
+    # ... and without them it rings: measured -9.0e-2 / 1 + 1.3e-1. The control for the gate above, and the proof
+    # that fallback/NAD_scalars is connected (rule 7a).
+    "hydro_scalar_blob_nonad_sensitive_2d": {
+        "input": "inputs/sine_wave.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/nx2=8", "mesh/nx3=1", "job/fallback=true", "fallback/style=cascade",
+                      "time/integrator=rk3", "problem/amp=0", "problem/radius=0.2", "time/tlim=0.5",
+                      "output/dt=0.5", "hydro/nscalars=1", "problem/scalar=blob",
+                      "fallback/NAD_scalars=false"],
+        "ndim": 2,
+        "checks": ["scalar_bounds_sensitive"],
+        "field": "W_cv_N8p3_1_0.dat",
+        "t_end": 0.5,
+        "scalar_bound_floor": 3.0e-2,
+    },
+    # A non-uniform scalar on a blast with regrids: its total is conserved like the mass (measured 3e-14).
+    "hydro_scalar_conserve_amr_2d": {
+        "input": "inputs/amr_pulse.athinput",
+        "overrides": ["fallback/style=cascade", "time/tlim=0.05", "output/dt=0.025",
+                      "hydro/nscalars=2", "problem/scalar=blob", "problem/radius=0.15"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "scalar_mass"],
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.05,
+    },
+    # ---- Shock-cloud interaction (problem = shock_cloud, Pittard & Parkin 2016) ---------------------------------
+    # In a CLOSED box (walls in x, periodic in y), so that mass and the cloud scalar can be held to round-off while
+    # the Mach 10 shock runs over the cloud on a two-level mesh that follows the scalar (amr/lohner_vars=scalar).
+    # Measured 5 Oct 2026: both totals to 6e-14, 44-50 leaves. In the open box of the production deck the scalar
+    # total is NOT a round-off quantity: the scalar's round-off precursor reaches the upstream zero-gradient
+    # boundary, whose inflow copies it in (1e-7 of the total at 16 points per radius, 3e-5 at 4).
+    "hydro_shock_cloud_amr_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "scalar_mass", "leaves_at_most"],
+        "field": "W_cv_N64p3_3_0.dat",
+        "t_end": 0.3,
+        "leaf_limit": 55,
+    },
+    # The control for amr/lohner_vars=scalar (rule 7a): the same run scored on density refines the whole shock
+    # front as well and must carry MORE leaves (measured 62-74 against 44-50).
+    "hydro_shock_cloud_density_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "amr/lohner_vars=density"],
+        "ndim": 2,
+        "checks": ["leaves_more_than"],
+        "field": "W_cv_N64p3_3_0.dat",
+        "t_end": 0.3,
+        "leaf_limit": 55,
+    },
 }
 
 
@@ -1568,6 +1703,141 @@ def check_mass(outdir, cfg, limit):
     if not math.isfinite(drift):
         return False, f"non-finite mass drift (masses {m})"
     return drift < limit, f"mass drift = {drift:.3e} (limit {limit:.1e})"
+
+
+def load_all_cells(outdir, cfg):
+    """Every row of the dump cfg['field'] on its active cells, as (nz_c, ny_c, nx_c) arrays. The element count
+    and the degree are read from the dump's name and the row count from its size, so a run with passive scalars
+    (hydro/nscalars) loads its extra rows and an AMR composite loads at the level it was written at. Square
+    meshes only."""
+    m = re.search(r"_N(\d+)p(\d+)_", cfg["field"])
+    Nf, nn = int(m.group(1)), int(m.group(2)) + 1
+    act = [cfg["ndim"] >= 3, cfg["ndim"] >= 2, True]            # z, y, x
+    Ne = [Nf + 2 * NGH if a else 1 for a in act]
+    npt = [nn if a else 1 for a in act]
+    A = np.fromfile(os.path.join(outdir, cfg["field"]))
+    per = int(np.prod(Ne) * np.prod(npt))
+    if A.size % per:
+        raise ValueError(f"{cfg['field']}: {A.size} values is not a multiple of {per}")
+    A = A.reshape([A.size // per] + Ne + npt)
+    A = A[(slice(None),) + tuple(slice(NGH, -NGH) if a else slice(None) for a in act)]
+    return [A[v].transpose(0, 3, 1, 4, 2, 5).reshape(A.shape[1] * npt[0], A.shape[2] * npt[1],
+                                                     A.shape[3] * npt[2]) for v in range(A.shape[0])]
+
+
+def _columns(outdir, name):
+    path = os.path.join(outdir, name)
+    if not os.path.exists(path):
+        return None
+    return np.array([[float(x) for x in line.split()] for line in open(path) if line.strip()])
+
+
+def _scalar_rows(outdir, cfg):
+    rows = load_all_cells(outdir, cfg)
+    return rows, rows[NVAR:]
+
+
+def check_scalar_uniform(outdir, cfg, tol):
+    """A concentration that starts at 1 stays 1, and its total equals the mass."""
+    rows, sc = _scalar_rows(outdir, cfg)
+    if not sc:
+        return False, f"{cfg['field']} has {len(rows)} rows: no scalar row"
+    dev = max(float(np.abs(x - 1.0).max()) for x in sc)
+    S, M = _columns(outdir, "scalar.txt"), _columns(outdir, "mass.txt")
+    if S is None or M is None or len(S) != len(M) or len(S) < 2:
+        return False, "scalar.txt / mass.txt missing or of different length"
+    sm = float(np.abs(S[:, 1:] - M[:, 1:2]).max() / abs(M[0, 1]))
+    ok = np.isfinite(dev) and np.isfinite(sm) and dev < tol and sm < tol
+    return ok, f"max|s-1| = {dev:.3e}, |S-M|/M = {sm:.3e} over {len(sc)} scalars (limit {tol:.1e})"
+
+
+def check_scalar_uniform_sensitive(outdir, cfg, floor):
+    """Negative control of scalar_uniform: PASSES only if the concentration is visibly not 1."""
+    rows, sc = _scalar_rows(outdir, cfg)
+    if not sc:
+        return False, f"{cfg['field']} has {len(rows)} rows: no scalar row"
+    dev = max(float(np.abs(x - 1.0).max()) for x in sc)
+    return dev > floor, f"max|s-1| = {dev:.3e} (must exceed {floor:.1e} for the uniform gate to mean anything)"
+
+
+def check_scalar_mass(outdir, cfg, limit):
+    """Drift of the total of each passive scalar (scalar.txt: t S_0 S_1 ...)."""
+    S = _columns(outdir, "scalar.txt")
+    if S is None or len(S) < 2:
+        return False, "scalar.txt missing or shorter than two outputs"
+    if not np.all(np.isfinite(S)) or np.any(S[0, 1:] == 0.0):
+        return False, f"non-finite or zero reference scalar total: {S[0, 1:]}"
+    drift = float((np.abs(S[:, 1:] - S[0, 1:]) / np.abs(S[0, 1:])).max())
+    return drift < limit, f"scalar drift = {drift:.3e} over {S.shape[1]-1} scalars, {len(S)} outputs (limit {limit:.1e})"
+
+
+def _scalar_excursion(outdir, cfg):
+    rows, sc = _scalar_rows(outdir, cfg)
+    if not sc:
+        return None, None
+    return min(float(x.min()) for x in sc), max(float(x.max()) for x in sc)
+
+
+def check_scalar_bounds(outdir, cfg, tol):
+    """A concentration that starts in [0,1] stays there to within tol."""
+    lo, hi = _scalar_excursion(outdir, cfg)
+    if lo is None:
+        return False, f"{cfg['field']}: no scalar row"
+    ok = np.isfinite(lo) and np.isfinite(hi) and lo > -tol and hi < 1.0 + tol
+    return ok, f"s in [{lo:+.3e}, 1{hi-1.0:+.3e}] (tolerance {tol:.1e})"
+
+
+def check_scalar_bounds_sensitive(outdir, cfg, floor):
+    """Negative control of scalar_bounds: PASSES only if the concentration leaves [0,1] by more than floor."""
+    lo, hi = _scalar_excursion(outdir, cfg)
+    if lo is None:
+        return False, f"{cfg['field']}: no scalar row"
+    exc = max(-lo, hi - 1.0)
+    return exc > floor, f"s in [{lo:+.3e}, 1{hi-1.0:+.3e}]: excursion {exc:.3e} (must exceed {floor:.1e})"
+
+
+def check_scalar_analytic(outdir, cfg):
+    """L1 error of the cell averages of rho*s against the exact advected profiles of the sine_wave deck with
+    problem/scalar=sine in 2D: rho = 1 + 0.125 sin(2 pi phi), s = 0.5 + 0.25 sin(2 pi phi), phi = x + y - 2t."""
+    rows, sc = _scalar_rows(outdir, cfg)
+    if not sc or cfg["ndim"] != 2:
+        return False, "needs a 2D run with one scalar row"
+    m = re.search(r"_N(\d+)p(\d+)_", cfg["field"])
+    xf = np.fromfile(os.path.join(outdir, f"X_N{m.group(1)}p{m.group(2)}_0.dat"))[nGH:-nGH]
+    xq, wq = np.polynomial.legendre.leggauss(8)
+    X = 0.5 * (xf[:-1] + xf[1:])[:, None] + 0.5 * np.diff(xf)[:, None] * xq[None, :]
+    phi = X[None, :, None, :] + X[:, None, :, None] - 2.0 * cfg["t_end"]
+    w = wq[None, None, :, None] * wq[None, None, None, :] / 4.0
+    exact = ((1.0 + 0.125 * np.sin(2 * np.pi * phi)) * (0.5 + 0.25 * np.sin(2 * np.pi * phi)) * w).sum((2, 3))
+    V = np.outer(np.diff(xf), np.diff(xf))
+    err = float((np.abs(rows[0][0] * sc[0][0] - exact) * V).sum())
+    lim = cfg["scalar_l1_limit"]
+    return np.isfinite(err) and err < lim, f"L1(rho*s) = {err:.3e} (limit {lim:.1e})"
+
+
+def _max_leaves(outdir):
+    files = glob.glob(os.path.join(outdir, "amr_blocks_*.txt"))
+    counts = []
+    for path in files:
+        rows = [l for l in open(path) if l.strip() and not l.startswith("#")]
+        counts.append(len(rows) - 1)                      # first row is the header line of numbers
+    return max(counts) if counts else None
+
+
+def check_leaves_at_most(outdir, cfg):
+    """The mesh never carries more than cfg['leaf_limit'] leaves (a criterion that stays where it should)."""
+    n = _max_leaves(outdir)
+    if n is None:
+        return False, "no amr_blocks_*.txt written"
+    return n <= cfg["leaf_limit"], f"at most {n} leaves over the outputs (limit {cfg['leaf_limit']})"
+
+
+def check_leaves_more_than(outdir, cfg):
+    """Negative control of leaves_at_most: PASSES only if the mesh exceeds cfg['leaf_limit'] leaves."""
+    n = _max_leaves(outdir)
+    if n is None:
+        return False, "no amr_blocks_*.txt written"
+    return n > cfg["leaf_limit"], f"at most {n} leaves over the outputs (must exceed {cfg['leaf_limit']})"
 
 
 def check_divb(stdout, limit=1e-11):
@@ -2061,6 +2331,22 @@ def main():
             elif chk == "golden_differs":
                 ok, msg = check_golden_differs(outdir, cfg,
                                                cfg.get("differs_floor", 1e-8))
+            elif chk == "leaves_at_most":
+                ok, msg = check_leaves_at_most(outdir, cfg)
+            elif chk == "leaves_more_than":
+                ok, msg = check_leaves_more_than(outdir, cfg)
+            elif chk == "scalar_uniform":
+                ok, msg = check_scalar_uniform(outdir, cfg, cfg.get("scalar_tol", 1e-11))
+            elif chk == "scalar_uniform_sensitive":
+                ok, msg = check_scalar_uniform_sensitive(outdir, cfg, cfg.get("scalar_floor", 0.1))
+            elif chk == "scalar_mass":
+                ok, msg = check_scalar_mass(outdir, cfg, cfg.get("scalar_mass_limit", 1e-11))
+            elif chk == "scalar_bounds":
+                ok, msg = check_scalar_bounds(outdir, cfg, cfg.get("scalar_bound_tol", 1e-2))
+            elif chk == "scalar_bounds_sensitive":
+                ok, msg = check_scalar_bounds_sensitive(outdir, cfg, cfg.get("scalar_bound_floor", 3e-2))
+            elif chk == "scalar_analytic":
+                ok, msg = check_scalar_analytic(outdir, cfg)
             else:
                 # An unknown check name used to fall through this chain with
                 # `ok, msg` still holding the PREVIOUS check's values, so it
@@ -2072,6 +2358,9 @@ def main():
                 ok, msg = False, (f"unknown check '{chk}' (known: "
                                   f"analytic, mass_strict, mixed_levels, divb, "
                                   f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
+                                  f"leaves_at_most, leaves_more_than, "
+                                  f"scalar_uniform, scalar_uniform_sensitive, scalar_mass, "
+                                  f"scalar_bounds, scalar_bounds_sensitive, scalar_analytic, "
                                   f"golden, golden_active, golden_differs, "
                                   f"equilibrium_sensitive, static_equilibrium, inlet_field, inlet_field_sensitive, ha_jet, ha_jet_sensitive)")
             print(f"[{'PASS' if ok else 'FAIL'}] {name}: {msg}")

@@ -31,6 +31,13 @@ double sound_speed(double rho, double p, double gm){
     return sqrt(c2);
 }
 
+//NS (here and in every kernel below): the number of passive scalars, a COMPILE-TIME parameter. The scalar rows are
+//the tail NVAR <= s < NVAR+NS, so the NS = 0 instantiation is the Euler code as it was -- same arrays, same loops,
+//nothing left of the tail -- which is what keeps a run without scalars bit-identical and as fast on the GPU. A
+//runtime count did neither there: the tail loops pushed the kernels' local arrays out of the registers (24 per cent
+//on the 3D Sedov lane, A100) and moved the contraction of the flux arithmetic (35 of 43 suite lanes off by round-off).
+//The host picks the instantiation from cfg.nscal (NSCAL_DISPATCH).
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void conservatives(double* w, double* u, double gm){
     double E_kin=0;
@@ -42,7 +49,19 @@ void conservatives(double* w, double* u, double gm){
     u[_vz_] = w[0]*w[_vz_];
     E_kin += w[_vz_]*u[_vz_];
     u[_e_] = w[_p_]/(gm-1.)+0.5*E_kin;
+    //Passive scalars (define.hpp): conserved rho*s from the concentration s.
+    for(int s=NVAR; s<NVAR+NS; s++) u[s] = w[0]*w[s];
 }
+
+//One instantiation of a kernel per passive-scalar count, picked on the host from cfg.nscal (see `conservatives`).
+#if NSCAL_MAX != 2
+#error "NSCAL_DISPATCH lists the instantiations for 0..2 scalars: extend it together with NSCAL_MAX"
+#endif
+#define NSCAL_DISPATCH(fn, ...) \
+    do{ switch(cfg.nscal){ \
+        case 1:  fn<1>(__VA_ARGS__); break; \
+        case 2:  fn<2>(__VA_ARGS__); break; \
+        default: fn<0>(__VA_ARGS__); break; } }while(0)
 
 //Nozzle profile for the Ha et al. hypersonic jet (see ha_jet in
 //initial_conditions.cpp for the full setup and references). It lives here
@@ -120,7 +139,8 @@ void ha_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fy){
     });
 }
 
-void compute_conservatives(
+template<int NS>
+static void compute_conservatives_ns(
     SD_Solution W,
     SD_Solution U
     ){
@@ -138,19 +158,21 @@ void compute_conservatives(
         KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
         BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
-        double u[NVAR]={0};
-        double w[NVAR];
+        double u[NVAR+NS]={0};
+        double w[NVAR+NS];
         int var;
         for(var=0; var<nvar; var++)
             w[var] = W.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
-        conservatives(w,u,gm);
+        conservatives<NS>(w,u,gm);
         for(var=0; var<nvar; var++)
             U.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = u[var];
         }
     }, "compute_conservatives");
 }
+void compute_conservatives(SD_Solution W, SD_Solution U){ NSCAL_DISPATCH(compute_conservatives_ns, W, U); }
 
-void compute_conservatives(
+template<int NS>
+static void compute_conservatives_ns(
     FV_Solution W,
     FV_Solution U
     ){
@@ -160,17 +182,19 @@ void compute_conservatives(
     int nvar = W.n_var;
     double gm = cfg.gamma;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        double u[NVAR]={0};
-        double w[NVAR];
+        double u[NVAR+NS]={0};
+        double w[NVAR+NS];
         int var;
         for(var=0; var<nvar; var++)
             w[var] = W.Vector(var,k,j,i);
-        conservatives(w,u,gm);
+        conservatives<NS>(w,u,gm);
         for(var=0; var<nvar; var++)
             U.Vector(var,k,j,i) = u[var];
     });
 }
+void compute_conservatives(FV_Solution W, FV_Solution U){ NSCAL_DISPATCH(compute_conservatives_ns, W, U); }
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void primitives(double* u, double* w, double gm){
     double E_kin=0;
@@ -182,9 +206,11 @@ void primitives(double* u, double* w, double gm){
     w[_vz_] = u[_vz_]/u[0];
     E_kin += w[_vz_]*u[_vz_];
     w[_p_] = (u[_e_]-0.5*E_kin)*(gm-1.);
+    for(int s=NVAR; s<NVAR+NS; s++) w[s] = u[s]/u[0];
 }
 
-void compute_primitives(
+template<int NS>
+static void compute_primitives_ns(
     SD_Solution U, 
     SD_Solution W
     ){
@@ -202,18 +228,20 @@ void compute_primitives(
         BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         int var;
-        double u[NVAR];
-        double w[NVAR]={0};
-        for(var=0; var<NVAR; var++)
+        double u[NVAR+NS];
+        double w[NVAR+NS]={0};
+        for(var=0; var<NVAR+NS; var++)
             u[var] = U.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
-        primitives(u,w,gm);
-        for(var=0; var<NVAR; var++)
+        primitives<NS>(u,w,gm);
+        for(var=0; var<NVAR+NS; var++)
             W.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = w[var];
         }
     }, "compute_primitives");
 }
+void compute_primitives(SD_Solution U, SD_Solution W){ NSCAL_DISPATCH(compute_primitives_ns, U, W); }
 
-void compute_primitives(
+template<int NS>
+static void compute_primitives_ns(
     FV_Solution U,
     FV_Solution W
     ){
@@ -230,11 +258,12 @@ void compute_primitives(
         int var;
         for(var=0; var<nvar; var++)
             u[var] = U.Vector(boff+var,k,j,i);
-        primitives(u,w,gm);
+        primitives<NS>(u,w,gm);
         for(var=0; var<nvar; var++)
             W.Vector(boff+var,k,j,i) = w[var];
     }, "compute_primitives_fv");
 }
+void compute_primitives(FV_Solution U, FV_Solution W){ NSCAL_DISPATCH(compute_primitives_ns, U, W); }
 
 //Same timestep reduction over the whole pack. The block is an index inside the
 //kernel, not a host loop around it: one launch instead of one per block, which
@@ -274,6 +303,7 @@ double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
     return min_value;
 }
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void fluxes(double* u, double* w, double* f, int _v1_, int _v2_, int _v3_){
     f[   0] = u[   0]*w[_v1_];
@@ -281,12 +311,13 @@ void fluxes(double* u, double* w, double* f, int _v1_, int _v2_, int _v3_){
     f[_v2_] = u[_v2_]*w[_v1_];
     f[_v3_] = u[_v3_]*w[_v1_];
     f[_e_] = (u[_e_]+w[_p_])*w[_v1_];
+    for(int s=NVAR; s<NVAR+NS; s++) f[s] = u[s]*w[_v1_];
 }
 
 //Velocity indices as template parameters: with compile-time V1/V2/V3 the
 //var loops fully unroll and the u/w/f locals stay in registers instead of
 //spilling to local memory (runtime indices force stack-backed arrays)
-template<int V1, int V2, int V3>
+template<int V1, int V2, int V3, int NS>
 void compute_fluxes_t(
     SD_Solution U,
     SD_Solution F){
@@ -304,17 +335,24 @@ void compute_fluxes_t(
         BOFF(nader);
         for(int t_id=0; t_id<nader; t_id++){
         int var;
-        double u[NVAR];
-        double w[NVAR]={0};
-        double f[NVAR]={0};
-        for(var=0; var<NVAR; var++)
+        double u[NVAR+NS];
+        double w[NVAR+NS]={0};
+        double f[NVAR+NS]={0};
+        for(var=0; var<NVAR+NS; var++)
             u[var] = U.Vector(boff+t_id,var,k,j,i,kk,jj,ii);
-        primitives(u,w,gm);
-        fluxes(u,w,f,V1,V2,V3);
-        for(var=0; var<NVAR; var++)
+        primitives<NS>(u,w,gm);
+        fluxes<NS>(u,w,f,V1,V2,V3);
+        for(var=0; var<NVAR+NS; var++)
             F.Vector(boff+t_id,var,k,j,i,kk,jj,ii) = f[var];
         }
     }, "compute_fluxes");
+}
+
+template<int NS>
+static void compute_fluxes_ns(SD_Solution U, SD_Solution F, int _v1_){
+    if(_v1_==_vx_)      compute_fluxes_t<_vx_,_vy_,_vz_,NS>(U,F);
+    else if(_v1_==_vy_) compute_fluxes_t<_vy_,_vz_,_vx_,NS>(U,F);
+    else                compute_fluxes_t<_vz_,_vx_,_vy_,NS>(U,F);
 }
 
 void compute_fluxes(
@@ -325,9 +363,7 @@ void compute_fluxes(
     int _v3_){
     //Dispatch to the compile-time instantiation (only three cyclic
     //combinations are ever used, one per direction)
-    if(_v1_==_vx_)      compute_fluxes_t<_vx_,_vy_,_vz_>(U,F);
-    else if(_v1_==_vy_) compute_fluxes_t<_vy_,_vz_,_vx_>(U,F);
-    else                compute_fluxes_t<_vz_,_vx_,_vy_>(U,F);
+    NSCAL_DISPATCH(compute_fluxes_ns, U, F, _v1_);
 }
 
 //dt implied by the prescribed inflow state alone. Same CFL form as the
@@ -415,48 +451,55 @@ double compute_dt(
     #endif
 }
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void riemann_wind(double *F, double *U_L, double *U_R, double wind){
     for(int var=0; var<NVAR; var++)
         F[var] = 0.5*(U_R[var]+U_L[var])+wind*(U_R[var]-U_L[var]);
+    for(int var=NVAR; var<NVAR+NS; var++)
+        F[var] = 0.5*(U_R[var]+U_L[var])+wind*(U_R[var]-U_L[var]);
 }
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void riemann_llf(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_, double gm){
     double c_L,c_R,c_max;
     //Zero-initialized: the flux functions only fill the physical variables,
     //any extra bookkeeping slot (NVAR includes the FV trouble flag) would
     //otherwise carry uninitialized stack values into the flux arrays
-    double W_L[NVAR]={0};
-    double W_R[NVAR]={0};
-    double F_L[NVAR]={0};
-    double F_R[NVAR]={0};
-    primitives(U_L, W_L, gm);
-    primitives(U_R, W_R, gm);  
-    fluxes(U_L,W_L,F_L,_v1_,_v2_,_v3_);
-    fluxes(U_R,W_R,F_R,_v1_,_v2_,_v3_);
+    double W_L[NVAR+NS]={0};
+    double W_R[NVAR+NS]={0};
+    double F_L[NVAR+NS]={0};
+    double F_R[NVAR+NS]={0};
+    primitives<NS>(U_L, W_L, gm);
+    primitives<NS>(U_R, W_R, gm);  
+    fluxes<NS>(U_L,W_L,F_L,_v1_,_v2_,_v3_);
+    fluxes<NS>(U_R,W_R,F_R,_v1_,_v2_,_v3_);
     c_L = sound_speed(W_L[0],W_L[_p_],gm)+abs(W_L[_v1_]);
     c_R = sound_speed(W_R[0],W_R[_p_],gm)+abs(W_R[_v1_]);
     c_max = max(c_L,c_R);
     for(int var=0; var<NVAR; var++)
         F[var] = 0.5*(F_R[var]+F_L[var])-0.5*c_max*(U_R[var]-U_L[var]);
+    for(int var=NVAR; var<NVAR+NS; var++)
+        F[var] = 0.5*(F_R[var]+F_L[var])-0.5*c_max*(U_R[var]-U_L[var]);
 }
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _v3_, double gm){
     // F, U_L, U_R are arrays of size (nvar,faces)
     // Input: U_L, U_R
     // Output: F
     // Create local arrays of size nvar to solve Riemann problem at every given face.
-    double W_L[NVAR];
-    double W_R[NVAR];
+    double W_L[NVAR+NS];
+    double W_R[NVAR+NS];
     double c_L,c_R,c_max;
     double v_L,v_R,s_L,s_R,rc_L,rc_R;
     double v_star,p_star;
     double r_starL,r_starR,e_starL,e_starR;
     double r_gdv,v_gdv,p_gdv,e_gdv;
-    primitives(U_L, W_L, gm);
-    primitives(U_R, W_R, gm);
+    primitives<NS>(U_L, W_L, gm);
+    primitives<NS>(U_R, W_R, gm);
 
     c_L = sound_speed(W_L[_d_],W_L[_p_],gm)+abs(W_L[_v1_]);
     c_R = sound_speed(W_R[_d_],W_R[_p_],gm)+abs(W_R[_v1_]);
@@ -514,12 +557,15 @@ void riemann_hllc(double *F, double *U_L, double *U_R, int _v1_, int _v2_, int _
     F[_v2_] = r_gdv*v_gdv*(v_star>0 ? W_L[_v2_] : W_R[_v2_]);
     F[_v3_] = r_gdv*v_gdv*(v_star>0 ? W_L[_v3_] : W_R[_v3_]);
     F[_p_]  = v_gdv*(e_gdv + p_gdv);
+    //A passive scalar rides the mass flux and is upwinded on the contact, exactly as the transverse momenta above.
+    for(int s=NVAR; s<NVAR+NS; s++)
+        F[s] = r_gdv*v_gdv*(v_star>0 ? W_L[s] : W_R[s]);
 }
 
 //Direction and velocity indices as template parameters (see
 //compute_fluxes_t): compile-time indexing keeps the u_L/u_R/f locals in
 //registers instead of local memory
-template<int D, int V1, int V2, int V3>
+template<int D, int V1, int V2, int V3, int NS>
 void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
     //Store fluxes at the interface between elements to then solve the unique flux
     int Nx = U.Nx - (D==_x_);
@@ -537,9 +583,9 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
         KOKKOS_LAMBDA(int b, int k, int j, int i, int kk, int jj, int ii){
         BOFF(nader);
         int var;
-        double u_L[NVAR];
-        double u_R[NVAR];
-        double f[NVAR]={0};
+        double u_L[NVAR+NS];
+        double u_R[NVAR+NS];
+        double f[NVAR+NS]={0};
         int NidL[3];
         int nidL[3];
         int NidR[3];
@@ -548,20 +594,20 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
         indices(NidL,nidL,k,j,i,kk,jj,ii,l  ,n-1,D);
         indices(NidR,nidR,k,j,i,kk,jj,ii,l+1,  0,D);
         for(int t_id=0; t_id<nader; t_id++){
-            for(var=0;var<NVAR;var++){
+            for(var=0;var<NVAR+NS;var++){
                 u_L[var] = U.Vector(B_INDICES_L);
                 u_R[var] = U.Vector(B_INDICES_R);
             }
-            if(rs==1) riemann_hllc(f,u_L,u_R,V1,V2,V3,gm);
-            else      riemann_llf(f,u_L,u_R,V1,V2,V3,gm);
-            for(var=0;var<NVAR;var++){
+            if(rs==1) riemann_hllc<NS>(f,u_L,u_R,V1,V2,V3,gm);
+            else      riemann_llf<NS>(f,u_L,u_R,V1,V2,V3,gm);
+            for(var=0;var<NVAR+NS;var++){
                 F.Vector(B_INDICES_L) = f[var];
                 F.Vector(B_INDICES_R) = f[var];
             }
             if(viscous){
                 //Central interface state, consumed only by the diffusive terms
-                riemann_wind(f,u_L,u_R,0.5);
-                for(var=0;var<NVAR;var++){
+                riemann_wind<NS>(f,u_L,u_R,0.5);
+                for(var=0;var<NVAR+NS;var++){
                     U.Vector(B_INDICES_L) = f[var];
                     U.Vector(B_INDICES_R) = f[var];
                 }
@@ -570,13 +616,19 @@ void sd_riemann_solver_t(SD_Solution U, SD_Solution F, bool viscous){
     }, "sd_riemann_solver");
 }
 
-void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim, bool viscous){
-    if(dim==_x_)      sd_riemann_solver_t<_x_,_vx_,_vy_,_vz_>(U,F,viscous);
-    else if(dim==_y_) sd_riemann_solver_t<_y_,_vy_,_vz_,_vx_>(U,F,viscous);
-    else              sd_riemann_solver_t<_z_,_vz_,_vx_,_vy_>(U,F,viscous);
+template<int NS>
+static void sd_riemann_solver_ns(SD_Solution U, SD_Solution F, int dim, bool viscous){
+    if(dim==_x_)      sd_riemann_solver_t<_x_,_vx_,_vy_,_vz_,NS>(U,F,viscous);
+    else if(dim==_y_) sd_riemann_solver_t<_y_,_vy_,_vz_,_vx_,NS>(U,F,viscous);
+    else              sd_riemann_solver_t<_z_,_vz_,_vx_,_vy_,NS>(U,F,viscous);
 }
 
-void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
+void sd_riemann_solver(SD_Solution U, SD_Solution F, int v1, int v2, int v3, int dim, bool viscous){
+    NSCAL_DISPATCH(sd_riemann_solver_ns, U, F, dim, viscous);
+}
+
+template<int NS>
+static void sd_rusanov_solver_ns(SD_Solution U, SD_Solution F, int dim){
     //Store fluxes at the interface between elements to then solve the unique flux
     int Nx = U.Nx - (dim==_x_); 
     int Ny = U.Ny - (dim==_y_);
@@ -589,9 +641,9 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
     int nvar = U.n_var;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         int var;
-        double u_L[NVAR];
-        double u_R[NVAR];
-        double f[NVAR];
+        double u_L[NVAR+NS];
+        double u_R[NVAR+NS];
+        double f[NVAR+NS];
         int NidL[3];
         int nidL[3];
         int NidR[3];
@@ -604,7 +656,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
                 u_L[var] = U.Vector(INDICES_R);
                 u_R[var] = U.Vector(INDICES_L);
             }
-            riemann_wind(f,u_L,u_R,-0.5);
+            riemann_wind<NS>(f,u_L,u_R,-0.5);
             for(var=0;var<nvar;var++){
                 F.Vector(INDICES_L) += f[var];
                 F.Vector(INDICES_R) += f[var];
@@ -612,6 +664,7 @@ void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){
         }
     });
 }
+void sd_rusanov_solver(SD_Solution U, SD_Solution F, int dim){ NSCAL_DISPATCH(sd_rusanov_solver_ns, U, F, dim); }
 
 void compute_gradient(
     SD_Solution U,
@@ -674,7 +727,8 @@ void viscous_fluxes(
     f[_e_]  += w[_v1_]*f[_v1_];
 }
 
-void compute_viscous_flux(
+template<int NS>
+static void compute_viscous_flux_ns(
     SD_Solution U,
     SD_Solution dU1,
     int _v1_,
@@ -700,12 +754,12 @@ void compute_viscous_flux(
     //Se interpolate dU back to flux points
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
         for(int t_id=0; t_id<nader; t_id++){
-        double f[NVAR]={0};
-        double u[NVAR];
-        double w[NVAR]={0};
-        double du1[NVAR];
-        double du2[NVAR];
-        double du3[NVAR];
+        double f[NVAR+NS]={0};      //a passive scalar has no diffusive flux: its row stays 0
+        double u[NVAR+NS];
+        double w[NVAR+NS]={0};
+        double du1[NVAR+NS];
+        double du2[NVAR+NS];
+        double du3[NVAR+NS];
         int nid[3];
         int id;
         id = choose(dim,ii,jj,kk);
@@ -729,6 +783,10 @@ void compute_viscous_flux(
         }
     });
 }
+void compute_viscous_flux(SD_Solution U, SD_Solution dU1, int _v1_, SD_Solution dU2, int _v2_,
+                          SD_Solution dU3, int _v3_, Matrix sp_to_fp, double nu, double beta, int dim){
+    NSCAL_DISPATCH(compute_viscous_flux_ns, U, dU1, _v1_, dU2, _v2_, dU3, _v3_, sp_to_fp, nu, beta, dim);
+}
 
 //////////////////
 /// MUSCL-HANCOCK
@@ -747,6 +805,7 @@ void compute_viscous_flux(
 //    return 0.5*slope*(x_R-x_L);
 //}
 
+template<int NS=0>
 KOKKOS_INLINE_FUNCTION
 void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, double gm){
     //Terms belonging to inactive dimensions vanish identically because the
@@ -771,6 +830,9 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, do
     dWt[_p_] -= W[_vz_]*dWz[_p_] + dWz[_vz_]*gm*W[_p_];
     dWt[_vz_] -= W[_vx_]*dWx[_vz_];
     dWt[_vz_] -= W[_vy_]*dWy[_vz_];
+    //A concentration is advected: Ds/Dt = 0.
+    for(int s=NVAR; s<NVAR+NS; s++)
+        dWt[s] = -(W[_vx_]*dWx[s] + W[_vy_]*dWy[s] + W[_vz_]*dWz[s]);
 }
 
 //MUSCL-Hancock reconstruction of one cell, projected only onto the two
@@ -786,7 +848,7 @@ void corrector(double* W, double* dWt, double* dWx, double* dWy, double* dWz, do
 //It is a template parameter, not a runtime flag, because the predictor is not
 //just the +dwt term: the TRANSVERSE slopes exist solely to feed corrector(),
 //so plm needs only the D-direction slope. Zeroing dt would still pay for both.
-template<int D, bool PRED>
+template<int D, bool PRED, int NS>
 KOKKOS_INLINE_FUNCTION
 void slopes_d(
     FV_Vector W,
@@ -811,18 +873,18 @@ void slopes_d(
     double wL;
     double wR;
     double h;
-    double w[NVAR];
-    double dwx[NVAR];
-    double dwy[NVAR];
-    double dwz[NVAR];
-    double dwt[NVAR];
+    double w[NVAR+NS];
+    double dwx[NVAR+NS];
+    double dwy[NVAR+NS];
+    double dwz[NVAR+NS];
+    double dwt[NVAR+NS];
     //A slope is needed if it is the reconstruction direction, or if the Hancock
     //corrector will consume it. Both tests are compile-time, so plm compiles
     //down to the single slope it actually uses.
     constexpr bool need_x = PRED || D==_x_;
     constexpr bool need_y = PRED || D==_y_;
     constexpr bool need_z = PRED || D==_z_;
-    for(int var=0; var<NVAR; var++){
+    for(int var=0; var<NVAR+NS; var++){
         w[var] = W(off+var,k,j,i);
         dwx[var] = 0;
         dwy[var] = 0;
@@ -859,8 +921,8 @@ void slopes_d(
             }
         }
     }
-    if constexpr (PRED) corrector(w,dwt,dwx,dwy,dwz,gm);
-    for(int var=0; var<NVAR; var++){
+    if constexpr (PRED) corrector<NS>(w,dwt,dwx,dwy,dwz,gm);
+    for(int var=0; var<NVAR+NS; var++){
         h = (D==_x_ ? x_f[i+1]-x_f[i] : (D==_y_ ? y_f[j+1]-y_f[j] : z_f[k+1]-z_f[k]));
         double dw = (D==_x_ ? dwx[var] : (D==_y_ ? dwy[var] : dwz[var]));
         if constexpr (PRED){
@@ -874,7 +936,7 @@ void slopes_d(
     }
 }
 
-template<int D>
+template<int D, int NS>
 KOKKOS_INLINE_FUNCTION
 void compute_fluxes(
     FV_Vector W,
@@ -905,18 +967,18 @@ void compute_fluxes(
     //FACE_CELLS is the size of that pair, not a ghost width -- it was spelled
     //2*NGH, which reads as one and would silently resize these (and move the
     //wL[0]/wR[1] picks off the adjacent cells) if the SD halo ever grew.
-    double wL[FACE_CELLS][NVAR];
-    double wR[FACE_CELLS][NVAR];
-    double uL[NVAR];
-    double uR[NVAR];
-    double fL[NVAR];
+    double wL[FACE_CELLS][NVAR+NS];
+    double wR[FACE_CELLS][NVAR+NS];
+    double uL[NVAR+NS];
+    double uR[NVAR+NS];
+    double fL[NVAR+NS];
     double f;
     double th;
     int v1 = choose(D,_vx_,_vy_,_vz_);
     int v2 = choose(D,_vy_,_vz_,_vx_);
     int v3 = choose(D,_vz_,_vx_,_vy_);
     for(int l=-1; l<1; l++)
-        if(pred) slopes_d<D,true>(
+        if(pred) slopes_d<D,true,NS>(
             W,
             x_c,
             x_f,
@@ -935,7 +997,7 @@ void compute_fluxes(
             az,
             gm,
             lim);
-        else slopes_d<D,false>(
+        else slopes_d<D,false,NS>(
             W,x_c,x_f,y_c,y_f,z_c,z_f,off,
             k + (D==_z_ ? l:0),
             j + (D==_y_ ? l:0),
@@ -944,16 +1006,16 @@ void compute_fluxes(
     //Now we have the reconstructed values at both faces
     //We can then solve the Riemann problem
     //Left Boundary
-    conservatives(wL[0],uL,gm);
-    conservatives(wR[1],uR,gm);
-    riemann_hllc(fL,uL,uR,v1,v2,v3,gm);
+    conservatives<NS>(wL[0],uL,gm);
+    conservatives<NS>(wR[1],uR,gm);
+    riemann_hllc<NS>(fL,uL,uR,v1,v2,v3,gm);
     //job/scheme=vl2|plm (theta = 1 on every face): take the fallback flux
     //outright. The blend below is NOT that at theta = 1: f + (fL - f) rounds
     //whenever f and fL differ by more than a factor of two, and it is NaN
     //whenever f is, so the SD flux it was handed leaked into the MUSCL lane at
     //round-off and kept the whole SD path live (Mesh::sd_path_dead).
     if(take_fb){
-        for(int var=0; var<NVAR; var++) F(off+var,k,j,i) = fL[var];
+        for(int var=0; var<NVAR+NS; var++) F(off+var,k,j,i) = fL[var];
         return;
     }
     //Face blend factor: max of the thetas of the two adjacent cells
@@ -962,7 +1024,7 @@ void compute_fluxes(
     //which preserves exact conservation.
     th = max(theta(toff,k,j,i),
              theta(toff,k-(D==_z_ ? 1:0),j-(D==_y_ ? 1:0),i-(D==_x_ ? 1:0)));
-    for(int var=0; var<NVAR; var++){
+    for(int var=0; var<NVAR+NS; var++){
         f  = F(off+var,k,j,i);
         f  = f + th*(fL[var]-f);
         F(off+var,k,j,i) = f;
@@ -976,7 +1038,7 @@ void compute_fluxes(
 //job/scheme=vl2 agree by construction. muscl=false is donor cell: the two
 //face states are the adjacent cell averages, which is the most diffusive
 //level and the one that has to hold when nothing else does.
-template<int D>
+template<int D, int NS>
 KOKKOS_INLINE_FUNCTION
 void level_flux(
     FV_Vector W,
@@ -1000,52 +1062,53 @@ void level_flux(
     ,
     int lim,
     int fo_llf){
-    double uL[NVAR];
-    double uR[NVAR];
-    double f[NVAR];
+    double uL[NVAR+NS];
+    double uR[NVAR+NS];
+    double f[NVAR+NS];
     int v1 = choose(D,_vx_,_vy_,_vz_);
     int v2 = choose(D,_vy_,_vz_,_vx_);
     int v3 = choose(D,_vz_,_vx_,_vy_);
     if(muscl){
-        double wL[FACE_CELLS][NVAR];
-        double wR[FACE_CELLS][NVAR];
+        double wL[FACE_CELLS][NVAR+NS];
+        double wR[FACE_CELLS][NVAR+NS];
         for(int l=-1; l<1; l++)
-            if(pred) slopes_d<D,true>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
+            if(pred) slopes_d<D,true,NS>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
                         (wL[l+1]),(wR[l+1]),dt,ay,az,gm,lim);
-            else     slopes_d<D,false>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
+            else     slopes_d<D,false,NS>(W,x_c,x_f,y_c,y_f,z_c,z_f,off,
                         k + (D==_z_ ? l:0),
                         j + (D==_y_ ? l:0),
                         i + (D==_x_ ? l:0),
                         (wL[l+1]),(wR[l+1]),dt,ay,az,gm,lim);
         //Face between cell -1 and cell 0: the lower cell supplies the L state
         //at its upper face, the upper cell the R state at its lower face.
-        conservatives(wL[0],uL,gm);
-        conservatives(wR[1],uR,gm);
+        conservatives<NS>(wL[0],uL,gm);
+        conservatives<NS>(wR[1],uR,gm);
     }
     else{
         const int kL = k-(D==_z_), jL = j-(D==_y_), iL = i-(D==_x_);
-        double wl[NVAR];
-        double wr[NVAR];
-        for(int var=0; var<NVAR; var++){
+        double wl[NVAR+NS];
+        double wr[NVAR+NS];
+        for(int var=0; var<NVAR+NS; var++){
             wl[var] = W(off+var,kL,jL,iL);
             wr[var] = W(off+var,k,j,i);
         }
-        conservatives(wl,uL,gm);
-        conservatives(wr,uR,gm);
+        conservatives<NS>(wl,uL,gm);
+        conservatives<NS>(wr,uR,gm);
     }
     //hydro/fo_riemann = llf (5 Oct 2026): the first-order tier takes Rusanov, positivity-preserving under CFL 1/2.
     //This HLLC forms an acoustic star pressure that goes negative in a strong rarefaction (v_L << v_R) and is not
     //clipped -- the SDFB jet nozzle lips, where a v=800 beam meets gas at rest (SPD_POS_TRACE).
-    if(fo_llf) riemann_llf(f,uL,uR,v1,v2,v3,gm);
-    else       riemann_hllc(f,uL,uR,v1,v2,v3,gm);
-    for(int var=0; var<NVAR; var++) F(off+var,k,j,i) = f[var];
+    if(fo_llf) riemann_llf<NS>(f,uL,uR,v1,v2,v3,gm);
+    else       riemann_hllc<NS>(f,uL,uR,v1,v2,v3,gm);
+    for(int var=0; var<NVAR+NS; var++) F(off+var,k,j,i) = f[var];
 }
 
 //Fill one cascade level's face fluxes in every active direction.
-void level_fluxes(
+template<int NS>
+static void level_fluxes_ns(
     FV_Solution U,
     Vector x_c,
     Vector x_f,
@@ -1078,16 +1141,17 @@ void level_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
-        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
-        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        level_flux<_x_,NS>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(ay) level_flux<_y_,NS>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(az) level_flux<_z_,NS>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
     });
 }
 
 //Same over a whole pack: one launch per direction instead of one per block.
 //Geometry rides in as packed Matrices; a LayoutRight row is contiguous, so a
 //block's coordinates are just its row's base pointer.
-void level_fluxes_b(
+template<int NS>
+static void level_fluxes_b_ns(
     FV_Solution U,
     Matrix cxm, Matrix fxm, FV_Solution F_x,
     Matrix cym, Matrix fym, FV_Solution F_y,
@@ -1122,9 +1186,9 @@ void level_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
-        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
-        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        level_flux<_x_,NS>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(ay) level_flux<_y_,NS>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(az) level_flux<_z_,NS>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
     });
 }
 
@@ -1160,7 +1224,8 @@ static bool fv_only_takes_fb(){
     return cfg.fv_only && fv_only_sd_mode() != 1;
 }
 
-void fallback_fluxes_b(
+template<int NS>
+static void fallback_fluxes_b_ns(
     FV_Solution U,
     FV_Solution theta,
     Matrix cxm, Matrix fxm, FV_Solution F_x,
@@ -1193,13 +1258,14 @@ void fallback_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        compute_fluxes<_x_>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
-        if(ay) compute_fluxes<_y_>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
-        if(az) compute_fluxes<_z_>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        compute_fluxes<_x_,NS>(u,fx,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(ay) compute_fluxes<_y_,NS>(u,fy,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(az) compute_fluxes<_z_,NS>(u,fz,th,off,toff,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
     }, "fallback_fluxes_b");
 }
 
-void fallback_fluxes(
+template<int NS>
+static void fallback_fluxes_ns(
     FV_Solution U,
     FV_Solution theta,
     Vector x_c,
@@ -1232,8 +1298,28 @@ void fallback_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        compute_fluxes<_x_>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
-        if(ay) compute_fluxes<_y_>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
-        if(az) compute_fluxes<_z_>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        compute_fluxes<_x_,NS>(u,fx,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(ay) compute_fluxes<_y_,NS>(u,fy,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
+        if(az) compute_fluxes<_z_,NS>(u,fz,th,0,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ader,ay,az,gm,pred,lim,take_fb);
     });
+}
+
+//The entry points the solvers call: one instantiation per passive-scalar count (NSCAL_DISPATCH).
+void level_fluxes(FV_Solution U, Vector x_c, Vector x_f, FV_Solution F_x, Vector y_c, Vector y_f, FV_Solution F_y,
+                  Vector z_c, Vector z_f, FV_Solution F_z, int ader, Vector w, double dt, bool muscl){
+    NSCAL_DISPATCH(level_fluxes_ns, U, x_c, x_f, F_x, y_c, y_f, F_y, z_c, z_f, F_z, ader, w, dt, muscl);
+}
+void level_fluxes_b(FV_Solution U, Matrix cxm, Matrix fxm, FV_Solution F_x, Matrix cym, Matrix fym, FV_Solution F_y,
+                    Matrix czm, Matrix fzm, FV_Solution F_z, int ader, Vector w, double dt, bool muscl){
+    NSCAL_DISPATCH(level_fluxes_b_ns, U, cxm, fxm, F_x, cym, fym, F_y, czm, fzm, F_z, ader, w, dt, muscl);
+}
+void fallback_fluxes_b(FV_Solution U, FV_Solution theta, Matrix cxm, Matrix fxm, FV_Solution F_x, Matrix cym,
+                       Matrix fym, FV_Solution F_y, Matrix czm, Matrix fzm, FV_Solution F_z, int ader, Vector w,
+                       double dt){
+    NSCAL_DISPATCH(fallback_fluxes_b_ns, U, theta, cxm, fxm, F_x, cym, fym, F_y, czm, fzm, F_z, ader, w, dt);
+}
+void fallback_fluxes(FV_Solution U, FV_Solution theta, Vector x_c, Vector x_f, FV_Solution F_x, Vector y_c,
+                     Vector y_f, FV_Solution F_y, Vector z_c, Vector z_f, FV_Solution F_z, int ader, Vector w,
+                     double dt){
+    NSCAL_DISPATCH(fallback_fluxes_ns, U, theta, x_c, x_f, F_x, y_c, y_f, F_y, z_c, z_f, F_z, ader, w, dt);
 }

@@ -794,6 +794,35 @@ the inflow state (`Mesh::inflow_dt`, rule 8c). Gate: `hydro_ha_jet_mb_2d`
 `hydro_ha_jet_amr_2d`; and `hydro_fo_riemann_llf_sensitive_2d` /
 `hydro_cfl_squared_sensitive_2d` prove the two knobs are connected.
 
+## 8f. Passive scalars: rows after the energy, a tail loop, and a diagnostic that must read the conserved average
+
+`hydro/nscalars = n` (5 Oct 2026, for the shock-cloud flagship) carries `rho*s` as conserved rows `NVAR..NVAR+n-1`;
+the primitive row is the concentration. Three things to keep:
+
+- **The scalar count is a COMPILE-TIME template parameter `NS` of every hydro kernel** (`hydro.cpp`; `NSCAL_DISPATCH`
+  picks the instantiation from `cfg.nscal`, up to `NSCAL_MAX` = 2). Arrays are `[NVAR+NS]`, loops run to `NVAR+NS`, so
+  the `NS = 0` instantiation is the Euler code character for character. The first version carried a RUNTIME count
+  (`[NVAR_MAX]` arrays, a tail loop `NVAR <= var < NVAR+ns`): bit-identical on all 70 non-scalar suite configurations
+  on CPU, and on the A100 **35 of 43 hydro lanes differed from 620d9db by round-off and the 3D Sedov lane ran 24 per
+  cent slower with no scalar at all** (13.4 -> 16.7 s per 150 steps) -- the runtime-bounded tail pushed the kernels'
+  local arrays out of the registers, which also moved the FMA contraction. **A CPU A/B says nothing about GPU code
+  generation: run the default-path A/B and a timing on the GPU before calling a kernel change free.** A new hydro
+  kernel takes `NS` the same way, or the scalar silently stops being advected on that path.
+- **The scalar flux is the mass flux times the upwind concentration on every path** (pointwise `rho s v` at the SD
+  flux points, LLF, HLLC on the contact like the transverse momenta, MUSCL reconstructing the concentration). The
+  gate is that a uniform concentration stays uniform to round-off on a shocked, mixed-level run (`scalar_uniform`,
+  measured 8e-15 with two levels and the cascade live) and that its total equals the mass. It is not a bound on a
+  non-uniform scalar: on the blast-with-blob lane the concentration reaches 1.04 behind a 13:1 contact with SDFB4 and
+  1.03 with MUSCL-Hancock at p=0 -- `rho s` and `rho` carry different errors there, and their ratio shows it.
+- **At the first output `W_cv` is the cell average of the initial PRIMITIVES**, so `rho_cv * s_cv` is not the average
+  of `rho s`: the scalar total read 3.7e-4 off at t=0 and looked like a drift. `fv_scalar_mass` integrates the
+  conserved cell average recomputed from `U_sp`. Mass never showed this because density is linear.
+
+Detection: the scalar rows join NAD/SED with an ABSOLUTE band (`fallback/scalar_tolerance`), since a relative band has
+no width at zero. It is what holds a discontinuous scalar (blob: excursion 1e-4/6e-3 against 9e-2/1.3e-1 without),
+and it is not free on smooth flow, because a flagged scalar demotes the whole cell: density L1 on the smooth sine at
+16^2, p=3, went 7.9e-6 -> 1.3e-5. `fallback/NAD_scalars=false` takes them out.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

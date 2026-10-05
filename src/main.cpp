@@ -37,6 +37,7 @@ int problem_id(const string &name){
     if(name == "current_sheet")    return _ic_current_sheet_;
     if(name == "kh_mdz")           return _ic_kh_mdz_;
     if(name == "kh_rr22")          return _ic_kh_rr22_;
+    if(name == "shock_cloud")      return _ic_shock_cloud_;
     if(name == "user")             return _ic_user_;
     cout<<"ERROR: unknown problem '"<<name<<"'"<<endl;
     exit(1);
@@ -74,6 +75,11 @@ void problem_defaults(int problem, ProblemParams &pp){
         case _ic_rti_:              //d0 heavy (lower), d1 light (upper), p0 ref,
                                     //radius = interface yc, amp = perturbation
             pp = {0.025, 0.0,0.0,0.0, 2.0,1.0, 1.0,0.0, 0.5,0.0, 0};
+            break;
+        case _ic_shock_cloud_:      //Pittard & Parkin 2016: v1 = shock Mach number, d0/p0 ambient, d1 = central
+                                    //cloud density (chi = d1/d0), radius = cloud radius r_c, p1 = edge steepness
+                                    //(Pittard et al. 2009), amp = initial shock position, r_c upstream of the centre
+            pp = {3.0, 10.0,0.0,0.0, 1.0,10.0, 1.0,10.0, 1.0,0.0, 0};
             break;
         case _ic_user_:             //free-form: defaults for the sample Gaussian pulse
             pp = {0.5, 1.0,0.0,0.0, 1.0,0.0, 1.0,0.0, 0.5,0.1, 0};
@@ -328,6 +334,23 @@ int main(int argc, char** argv){
         //overshooting cell to first order as a PAD failure; see pad_cell.
         cfg.pad_max_rho = pin.GetOrAddReal("fallback","max_rho",1e10);
         cfg.pad_max_P   = pin.GetOrAddReal("fallback","max_P",1e10);
+        //Passive scalars (define.hpp NSCAL_MAX): hydro/nscalars conserved rows rho*s_n after the energy. The
+        //detection tests them with an ABSOLUTE band (fallback/scalar_tolerance) unless fallback/NAD_scalars=false;
+        //problem/scalar is their initial concentration for a problem that does not define its own.
+        cfg.nscal = pin.GetOrAddInteger("hydro","nscalars",0);
+        if(cfg.nscal < 0 || cfg.nscal > NSCAL_MAX){
+            if(Master) cout<<"ERROR: hydro/nscalars = "<<cfg.nscal<<" (expected 0.."<<NSCAL_MAX<<")"<<endl;
+            exit(1);
+        }
+        cfg.nad_scalars = pin.GetOrAddBoolean("fallback","NAD_scalars",true);
+        cfg.scalar_atol = pin.GetOrAddReal("fallback","scalar_tolerance",1e-5);
+        {   string sic = pin.GetOrAddString("problem","scalar","zero");
+            if(sic=="zero")         cfg.scalar_ic = _sic_zero_;
+            else if(sic=="uniform") cfg.scalar_ic = _sic_uniform_;
+            else if(sic=="sine")    cfg.scalar_ic = _sic_sine_;
+            else if(sic=="blob")    cfg.scalar_ic = _sic_blob_;
+            else if(sic=="density") cfg.scalar_ic = _sic_density_;
+            else { if(Master) cout<<"ERROR: problem/scalar = '"<<sic<<"' (expected zero, uniform, sine, blob or density)"<<endl; exit(1); } }
         cfg.floor_cons  = pin.GetOrAddString("hydro","floors","ramses")=="athenak";
         cfg.dfloor      = pin.GetOrAddReal("hydro","dfloor",1e-10);
         cfg.pfloor      = pin.GetOrAddReal("hydro","pfloor",-1.0);
@@ -390,9 +413,20 @@ int main(int argc, char** argv){
             else if(lv=="pressure") cfg.amr_lohner_vars = 2;
             else if(lv=="density,pressure" || lv=="pressure,density" || lv=="both")
                 cfg.amr_lohner_vars = 3;
+            //`scalar` scores the first passive scalar (hydro/nscalars >= 1), alone or with the others: the mesh then
+            //follows marked material and not every shock that crosses the box (the shock-cloud problem).
+            else if(lv=="scalar") cfg.amr_lohner_vars = 4;
+            else if(lv=="density,scalar" || lv=="scalar,density") cfg.amr_lohner_vars = 5;
+            else if(lv=="pressure,scalar" || lv=="scalar,pressure") cfg.amr_lohner_vars = 6;
+            else if(lv=="density,pressure,scalar") cfg.amr_lohner_vars = 7;
             else {
                 if(Master) cout<<"ERROR: amr/lohner_vars="<<lv
-                    <<" (density | pressure | density,pressure)"<<endl;
+                    <<" (density | pressure | scalar, or a comma list: density,pressure | density,scalar | "
+                      "pressure,scalar | density,pressure,scalar)"<<endl;
+                exit(1);
+            }
+            if((cfg.amr_lohner_vars & 4) && cfg.nscal < 1){
+                if(Master) cout<<"ERROR: amr/lohner_vars="<<lv<<" scores a passive scalar; set hydro/nscalars >= 1"<<endl;
                 exit(1);
             }
         }
@@ -447,6 +481,11 @@ int main(int argc, char** argv){
         cfg.fv_predictor = pin.GetOrAddBoolean("fallback","predictor",
                                                cfg.fv_predictor);
         string system_name = pin.GetOrAddString("job","system","hydro");
+        if(cfg.nscal > 0 && system_name != "hydro"){
+            if(Master) cout<<"ERROR: hydro/nscalars = "<<cfg.nscal<<" needs job/system = hydro (the "<<system_name
+                           <<" state has no scalar rows)"<<endl;
+            exit(1);
+        }
         //A pure MUSCL lane (job/scheme=vl2|plm) is one MUSCL flux on every face,
         //so it has no use for the MOOD cascade -- and the cascade did not leave
         //it alone: cascade_levels_pack starts every cell at level 0, the SD flux

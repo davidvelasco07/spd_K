@@ -77,6 +77,7 @@ problem = sine_wave
 | `pfloor` | (derived) | Pressure floor; defaults to the RAMSES `smallp = dfloor·min_c²/γ` (essentially zero). Set a physically sensible value (e.g. `1e-6`) when using `floors=athenak` |
 | `beta` | `-2/3·nu` | Bulk-viscosity coefficient (Stokes hypothesis by default) |
 | `g1`, `g2`, `g3` | `0.0` | Constant gravitational acceleration per direction (momentum/energy source term); `0` leaves the homogeneous Euler equations unchanged |
+| `nscalars` | `0` | Passive scalars (`0`–`2`, `system=hydro` only). Scalar `n` is one more conserved row `rho*s_n` after the energy, advected with the mass flux on every path (SD flux points, interface solvers, MUSCL and first-order fallback, AMR transfer and flux correction); the primitive row written to `W_cv` is the concentration `s_n`. `0` is the same arithmetic as a build without scalars. Each scalar adds a fifth to the memory and to the cost of the per-variable kernels. Start it with `problem/scalar`; its total is written to `scalar.txt` |
 
 ### `<induction>`
 
@@ -107,6 +108,8 @@ problem = sine_wave
 | `blending` | `true` | Fractional θ blending of fallback fluxes |
 | `max_revs` | `3` | Cap on MOOD detection/revision sweeps per stage (`system=mhd`). The loop exits as soon as no revisable troubled cell remains, so this is a safety cap; truncating it commits candidates that were never re-verified after the last demotion (they then lean on the ctoprim floors) |
 | `min_rho` | `1e-10` | PAD density floor for MHD trouble detection |
+| `NAD_scalars` | `true` | The passive-scalar rows (`hydro/nscalars`) enter NAD and SED next to density and pressure. On the advected-blob test the concentration leaves `[0,1]` by 1e-4/6e-3 with it and by 9e-2/1.3e-1 without. A flagged scalar demotes the whole cell, so an under-resolved smooth scalar also costs hydro accuracy (density L1 on the smooth sine test at 16² elements, p=3: 7.9e-6 → 1.3e-5) |
+| `scalar_tolerance` | `1e-5` | NAD band of a scalar row. **Absolute**, unlike `tolerance`: a concentration has a unit scale and zero is a legitimate value, where a relative band has no width |
 | `min_P` | `1e-10` | PAD gas-pressure floor for MHD trouble detection. Raising it toward the problem's pressure scale flags degenerating low-β cells before the primitive floors have to carry them |
 
 ### `<amr>` and `<refinementN>`
@@ -120,7 +123,7 @@ and an RK integrator (`time/integrator=rk2|rk3`); ADER is refused on a mixed-lev
 | `adapt_interval` | 0 | regrid every N steps (0 = never; static patches only) |
 | `criterion` | `lohner` | `lohner` (density second derivative), `pressure` (relative gradient), `shear` (velocity shear, Stone+2020 eq. 27), `trouble` (fraction of demoted cells > 0.01), `bfield` (MHD) |
 | `refine_threshold` / `derefine_threshold` | per criterion | threshold pair with hysteresis, read by `pressure` (default 0.03 / 0.0075), `lohner` (0.5 / 0.0125) and `shear` (0.1 / 0.05); `trouble` is a fixed 0.01 fraction. Before 2026-09 only `shear` read them |
-| `lohner_vars` | `density` | variables the `lohner` criterion scores: `density`, `pressure` or `density,pressure` (the block's score is the larger of the two, each normalized by its own block mean). `density` alone misses a contact-free shock of small density jump; `pressure` alone misses a contact; the block-interior `pressure` criterion misses both a contact and a jump that sits on a block face (the Sod tube at t=0) |
+| `lohner_vars` | `density` | variables the `lohner` criterion scores: `density`, `pressure`, `scalar` (the first passive scalar, `hydro/nscalars >= 1`; scored by its second difference alone, not divided by the block mean) or a comma list of them, e.g. `density,pressure` (the block's score is the larger of the two, each normalized by its own block mean). `density` alone misses a contact-free shock of small density jump; `pressure` alone misses a contact; the block-interior `pressure` criterion misses both a contact and a jump that sits on a block face (the Sod tube at t=0) |
 | `refine_frac` / `derefine_frac` | per criterion | ranking fractions (`lohner`) |
 | `initial_refine` | false | iterate tag -> refine -> re-evaluate the IC before step 1 until no block is added (Athena++ `Mesh::Initialize`); use with threshold criteria |
 | `prolong_dmp` | false | discrete maximum principle on prolongation (measured harmful, off) |
@@ -162,6 +165,10 @@ Runtime A/B switches (environment variables, all default off = the batched or re
 Selects the initial condition and supplies runtime parameters; see
 {doc}`initial_conditions` for the full list.
 
+| Parameter | Default | Description |
+|---|---|---|
+| `scalar` | `zero` | Initial concentration of the passive scalars (`hydro/nscalars`) for a problem that does not define its own: `zero`; `uniform` (1 everywhere, which must stay 1 to round-off); `sine` (`0.5 + 0.25 sin(2π(x+y+z))`, scalar `n` shifted by a quarter period); `blob` (1 inside the sphere of `radius` about `cx, cy, cz`, 0 outside); `density` (`rho/d0`) |
+
 ## Command-line overrides
 
 Any `block/parameter=value` pair can be appended after `-i file.athinput`:
@@ -175,7 +182,8 @@ Any `block/parameter=value` pair can be appended after `-i file.athinput`:
 When outputs are enabled, the run directory (default `output/`, or
 `$SPD_OUTPUT_DIR`) contains:
 
-- `W_cv_N{N}p{p}_{n}_0.dat` — CV-averaged primitives (hydro: 6 vars, mhd: 8 vars)
+- `W_cv_N{N}p{p}_{n}_0.dat` — CV-averaged primitives (hydro: `rho, vx, vy, vz, p`, then one concentration per passive scalar; mhd: 8 vars)
+- `mass.txt` — time and total mass at every output; `scalar.txt` — time and the total `∫ rho s_n dV` of each passive scalar (only with `hydro/nscalars > 0`)
 - `B2_cv_N{N}p{p}_{n}_0.dat` — CV-averaged magnetic field (induction, mhd)
 - `troubles_N*_{n}_0.dat` — FV trouble flags (when fallback is on)
 - `cascade_N*_{n}_0.dat` — per-cell MOOD cascade level (mhd with fallback)

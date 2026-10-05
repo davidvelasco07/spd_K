@@ -53,6 +53,16 @@
 //already had.
 #define NVAR (2+DIM)
 
+//Passive scalars (hydro/nscalars, 5 Oct 2026). Scalar n is one more conserved row, rho*s_n, carried AFTER the energy
+//(index NVAR+n); its primitive is the concentration s_n. NVAR stays the count of the Euler rows: every `var<NVAR` loop
+//of the hydro kernels is left as it was, and the scalar rows are the tail NVAR <= var < NVAR+NS, where NS is a
+//COMPILE-TIME template parameter of every hydro kernel (hydro.cpp, NSCAL_DISPATCH picks the instantiation from
+//cfg.nscal). The NS = 0 instantiation is the Euler code unchanged, which is what keeps a run without scalars
+//bit-identical and as fast; a runtime count was neither on the GPU. NSCAL_MAX is the largest instantiation built, and
+//NVAR_MAX sizes the stack arrays of the few regrid-time kernels that take the row count from the array.
+#define NSCAL_MAX 2
+#define NVAR_MAX (NVAR+NSCAL_MAX)
+
 #define _x_ 0
 #define _y_ 1
 #define _z_ 2
@@ -132,7 +142,14 @@ enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
       _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,
       _ic_mhd_vortex_, _ic_mhd_blast_, _ic_mhd_jet_, _ic_current_sheet_, _ic_kh_mdz_, _ic_kh_rr22_,
-      _ic_ha_jet_, _ic_woodward_colella_, _ic_dmr_};
+      _ic_ha_jet_, _ic_woodward_colella_, _ic_dmr_, _ic_shock_cloud_};
+//problem/scalar: the initial concentration of the passive scalars for a problem that does not define its own.
+//  zero     0 everywhere (default)
+//  uniform  1 everywhere: must stay 1 to round-off whatever the flow does
+//  sine     0.5 + 0.25 sin(2 pi (x+y+z)), smooth and periodic on the unit box (scalar n is shifted by n/4 of a period)
+//  blob     1 inside the sphere (cylinder, slab) of radius problem/radius about the box centre, 0 outside
+//  density  rho/problem_d0: the scalar starts as the density field, so it marks whatever the density marks
+enum {_sic_zero_, _sic_uniform_, _sic_sine_, _sic_blob_, _sic_density_};
 enum {_center_,_face_};
 
 #define _BCx_ _periodic_

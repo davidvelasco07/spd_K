@@ -1,0 +1,73 @@
+# Shock-cloud interaction in three dimensions: the adiabatic Mach 10, chi = 10 run of
+# Pittard & Parkin (2016, MNRAS 457, 4470), after Klein, McKee & Colella (1994).
+#
+# Lengths are in cloud radii r_c. The box is their -5 < X < 65, |Y|,|Z| < 10 with the
+# cloud at (5, 10, 10); the ambient medium is rho = 1, p = 1 at rest, gamma = 5/3, so
+#   v_b  = M sqrt(gamma p/rho) = 12.91          (shock speed)
+#   t_cc = sqrt(chi) r_c / v_b = 0.2449         (cloud-crushing time)
+# The shock starts 3 r_c upstream of the cloud centre and is level with it at
+# t_0 = 0.2324, their zero of time; tlim = t_0 + 20 t_cc.
+#
+# Cloud material is passive scalar 0 (kappa = rho/(chi rho_amb) within 2 r_c, zero
+# beyond), and the mesh follows it (amr/lohner_vars = scalar), not the planar shock.
+# The root mesh has one element (4 degrees of freedom) per cloud radius; each level
+# doubles that: max_level = 2 is 16 per radius, 3 is 32, 4 is 64.
+#
+# Two dimensions (a cylinder): mesh/nx3=1 meshblock/nx3=1.
+<job>
+system   = hydro
+fallback = true
+scheme   = sd
+
+<mesh>
+p     = 3
+nx1   = 70
+nx2   = 20
+nx3   = 20
+x1len = 70.0
+x2len = 20.0
+x3len = 20.0
+x1_bc = gradfree
+x2_bc = gradfree
+x3_bc = gradfree
+
+<meshblock>
+nx1 = 10
+nx2 = 10
+nx3 = 10
+
+<amr>
+max_level         = 2
+adapt_interval    = 10
+criterion         = lohner
+lohner_vars       = scalar
+refine_threshold  = 0.02
+derefine_threshold = 0.005
+initial_refine    = true
+
+<time>
+tlim       = 5.1314
+cfl        = 0.3
+integrator = rk3
+
+<output>
+dt   = 0.2449
+
+<hydro>
+gamma    = 1.6666666666666667
+nscalars = 1
+
+<problem>
+problem = shock_cloud
+cx      = 5.0
+cy      = 10.0
+cz      = 10.0
+# v1     = 10.0   # shock Mach number
+# d1     = 10.0   # central cloud density (chi = d1/d0)
+# p1     = 10.0   # edge steepness of Pittard et al. (2009)
+# radius = 1.0    # cloud radius
+# amp    = 3.0    # initial shock position, radii upstream of the centre
+
+<fallback>
+style   = cascade
+limiter = vanleer

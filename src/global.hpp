@@ -79,6 +79,17 @@ struct RunConfig {
     double pad_min_P   = 1e-10;          //strictness, cf. fallback min_rho/min_P)
     double pad_max_rho = 1e10;           //PAD ceilings (fallback/max_rho, max_P); the
     double pad_max_P   = 1e10;           //hydro capped cascade reads all four
+    int  nscal = 0;                      //hydro/nscalars: passive scalars, conserved rows rho*s_n
+                                         //after the energy (define.hpp NSCAL_MAX). 0 = none,
+                                         //the same arithmetic as before the scalars existed.
+    bool nad_scalars = true;             //fallback/NAD_scalars: the scalar rows enter NAD/SED
+                                         //next to density and pressure
+    double scalar_atol = 1e-5;           //fallback/scalar_tolerance: the NAD band of a scalar row
+                                         //is ABSOLUTE (a concentration has a unit scale and zero
+                                         //is a legitimate value; a relative band there flags
+                                         //round-off)
+    int  scalar_ic = 0;                  //problem/scalar: what the scalars start as when the
+                                         //problem does not define them (_sic_* in define.hpp)
     bool floor_cons = false;             //ctoprim floor semantics: false = RAMSES
                                          //(primitive view only; matches Python spd),
                                          //true = AthenaK (repair the conserved state)
@@ -229,6 +240,12 @@ struct RunConfig {
     double amr_derefine_frac = 0.0;
 };
 extern RunConfig cfg;
+
+//Variable masks of the hydro detection (bit n = row n of the primitive state). NAD and SED test density and
+//pressure, as the reference does, plus the scalar rows unless fallback/NAD_scalars=false; the scalar rows take the
+//absolute band (cfg.scalar_atol), which is what the second mask selects in nad_cell.
+inline int hydro_scalar_mask(){ return (cfg.nscal>0 && cfg.nad_scalars) ? (((1<<cfg.nscal)-1)<<NVAR) : 0; }
+inline int hydro_limit_mask(){ return (1<<_d_)|(1<<_p_)|hydro_scalar_mask(); }
 
 //AMR prolongation / overlap-restriction matrices (built once at startup)
 extern Matrix amr_P;

@@ -219,7 +219,7 @@ int limit_prolongation(SD_Solution C,
             const int j = ghy + (int)(r % My); r /= My;
             const int k = ghz + (int)(r % Mz); r /= Mz;
             const int t = (int)r;
-            double mean[NVAR];
+            double mean[NVAR_MAX];
             for(int var=0; var<nvar; var++) mean[var] = 0.0;
             double vol = 0.0;
             bool bad = false;
@@ -230,7 +230,7 @@ int limit_prolongation(SD_Solution C,
                 if(ay) wq *= fy(J+1)-fy(J);
                 if(az) wq *= fz(K+1)-fz(K);
                 vol += wq;
-                double u[NVAR];
+                double u[NVAR_MAX];
                 for(int var=0; var<nvar; var++){
                     u[var] = V(t,var,k,j,i,kk,jj,ii);
                     mean[var] += wq*u[var];
@@ -264,7 +264,7 @@ int limit_prolongation(SD_Solution C,
             for(int kk=0; kk<nz; kk++)
             for(int jj=0; jj<ny; jj++)
             for(int ii=0; ii<nx; ii++){
-                double u2[NVAR], ut[NVAR];
+                double u2[NVAR_MAX], ut[NVAR_MAX];
                 for(int var=0; var<nvar; var++) u2[var]=V(t,var,k,j,i,kk,jj,ii);
                 if(pad_admissible(u2, gm)) continue;
                 //Largest admissible t in [0,1]; t=0 is the mean, which is
@@ -408,14 +408,14 @@ int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz){
                 for(int var=0; var<nvar; var++) m[var] /= vol;
                 return true;
             };
-            double lo[NVAR], hi[NVAR], m[NVAR];
+            double lo[NVAR_MAX], hi[NVAR_MAX], m[NVAR_MAX];
             if(!gmean(gi,gj,gk,m)) return;
             for(int var=0; var<nvar; var++){ lo[var]=m[var]; hi[var]=m[var]; }
             const int off[6][3] = {{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
             for(int f=0; f<6; f++){
                 if(!ay && off[f][1]) continue;
                 if(!az && off[f][2]) continue;
-                double mn[NVAR];
+                double mn[NVAR_MAX];
                 if(!gmean(gi+off[f][0],gj+off[f][1],gk+off[f][2],mn)) continue;
                 for(int var=0; var<nvar; var++){
                     if(mn[var]<lo[var]) lo[var]=mn[var];
@@ -429,7 +429,7 @@ int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz){
                 const int i = ghx + gi*ex + di;
                 const int j = ghy + gj*ey + dj;
                 const int k = ghz + gk*ez + dk;
-                double em[NVAR]; double vol=0.0;
+                double em[NVAR_MAX]; double vol=0.0;
                 for(int var=0; var<nvar; var++) em[var]=0.0;
                 for(int kk=0; kk<nz; kk++)
                 for(int jj=0; jj<ny; jj++)
@@ -444,7 +444,7 @@ int limit_prolongation_dmp(SD_Solution Ucv, Vector fx, Vector fy, Vector fz){
                 if(!(vol>0.0)) continue;
                 for(int var=0; var<nvar; var++) em[var] /= vol;
                 //theta = 0 must be feasible: widen to admit this element's mean
-                double elo[NVAR], ehi[NVAR];
+                double elo[NVAR_MAX], ehi[NVAR_MAX];
                 for(int var=0; var<nvar; var++){
                     elo[var] = lo[var] < em[var] ? lo[var] : em[var];
                     ehi[var] = hi[var] > em[var] ? hi[var] : em[var];

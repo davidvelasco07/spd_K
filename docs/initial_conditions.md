@@ -33,6 +33,7 @@ Defaults are set per problem in `problem_defaults()` (`src/main.cpp`).
 | `rti` | `inputs/rti.athinput` | 2D | **reflective** in y, periodic in x; needs `hydro/g2` |
 | `orszag_tang` | `inputs/orszag_tang.athinput` | quasi-2D (`system=mhd`) | periodic; γ = 5/3; see {doc}`mhd` |
 | `field_loop` | `inputs/field_loop.athinput` | quasi-2D (`system=mhd`) | periodic; weak-field loop advection |
+| `shock_cloud` | `inputs/shock_cloud.athinput` | 2D–3D | **gradfree** on every face; γ = 5/3; `hydro/nscalars=1` |
 | `user` | `inputs/user.athinput` | any | see {doc}`user_ic` |
 
 ### Sod shock tube
@@ -77,6 +78,31 @@ into cold ambient gas (`γ = 5/3`). Runs in 2D or 3D; the panel below is a 3D
 run (`32³` elements), showing the mid-z slice of the expanding spherical shell.
 
 ![Sedov blast (3D)](gallery/sedov_3d.png)
+
+### Shock–cloud interaction
+
+The adiabatic set-up of Pittard & Parkin (2016, MNRAS 457, 4470), after Klein,
+McKee & Colella (1994): a planar shock of Mach number `v1` (default 10) runs
+along +x through gas at rest (`d0`, `p0`) into a cloud of central density `d1`
+(contrast χ = `d1/d0`, default 10) and radius `radius`, centred on
+`cx, cy, cz`, in pressure equilibrium with its surroundings. The cloud has the
+soft edge of Pittard et al. (2009, eq. 18–19) with steepness `p1` (default 10).
+The shock starts `amp` radii upstream of the cloud centre (default 3) with the
+Rankine–Hugoniot state behind it. In 2D the cloud is a cylinder.
+
+Cloud material is carried by passive scalar 0 (`hydro/nscalars=1`):
+κ = ρ/(χ ρ_amb) within two radii of the centre and zero beyond, the marker the
+paper's diagnostics integrate over. `amr/lohner_vars=scalar` makes the mesh
+follow it rather than every shock in the box. The deck is the paper's box
+(−5 < X < 65, |Y|, |Z| < 10 cloud radii) with one element per cloud radius on
+the root mesh. Time is usually quoted from the instant the shock is level with
+the cloud centre, in units of the cloud-crushing time
+`t_cc = sqrt(χ) radius / v_shock`.
+
+With zero-gradient boundaries the scalar total is conserved only until the
+scalar's round-off precursor reaches the upstream face, whose inflow copies
+it in (1e-7 of the total at 16 points per radius); in a closed box it is
+conserved to round-off through the whole interaction.
 
 ### Spherical blast
 

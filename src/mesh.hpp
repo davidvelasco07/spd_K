@@ -1825,7 +1825,7 @@ struct Mesh : public PhysicsModule {
         detect_troubles_b(pv.W_new, pv.W_old, pv.troubles, pv.flagged,
                           pv.alpha_x, pv.alpha_y, pv.alpha_z,
                           fvxc_p, fvx_p, fvyc_p, fvy_p, fvzc_p, fvz_p,
-                          Xd[0].p, 1, (1<<_d_)|(1<<_p_));
+                          Xd[0].p, 1, hydro_limit_mask(), hydro_scalar_mask());
     }
 
     //SD face fluxes -> FV faces -> candidate update, over the whole pack.
@@ -3335,6 +3335,16 @@ struct Mesh : public PhysicsModule {
         return worst;
     }
 
+    //Total of passive scalar n over the forest. is_hydro: the MHD state has no scalar rows (main.cpp refuses
+    //hydro/nscalars there), so there is no MHD side to keep in step.
+    double total_scalar(int n){
+        double S=0;
+        if constexpr (is_hydro)
+            for(int b=0;b<nblocks;b++)   //output-time diagnostic (CLAUDE.md rule 1)
+                S += blocks[b].fv_scalar_mass(Xd[b], Yd[b], Zd[b], NVAR+n);
+        return S;
+    }
+
     double total_mass(){
         double M=0;
         for(int b=0;b<nblocks;b++){
@@ -3407,6 +3417,13 @@ struct Mesh : public PhysicsModule {
             std::ofstream f(output_folder()+"mass.txt",
                             this->n_output==0 ? std::ios::trunc : std::ios::app);
             f<<std::setprecision(17)<<this->t<<" "<<total_mass()<<std::endl;
+        }
+        if(Master && cfg.nscal>0){   //scalar.txt, as the single-block solver writes it (hydro_ader.hpp)
+            std::ofstream f(output_folder()+"scalar.txt",
+                            this->n_output==0 ? std::ios::trunc : std::ios::app);
+            f<<std::setprecision(17)<<this->t;
+            for(int n=0; n<cfg.nscal; n++) f<<" "<<total_scalar(n);
+            f<<std::endl;
         }
         int M = forest.max_level();
         if(M>0){

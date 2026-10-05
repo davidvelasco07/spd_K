@@ -202,7 +202,7 @@ extern void fv_update_solution_b(
 extern void detect_troubles(
     FV_Solution, FV_Solution, FV_Solution, FV_Solution,
     FV_Solution, FV_Solution, FV_Solution,
-    dimension, dimension, dimension, bool, int);
+    dimension, dimension, dimension, bool, int, int abs_mask=0);
 //Whole-pack detection: same criteria, one launch each rather than one per
 //block. Geometry comes in as packed Matrices (a row per block) because blocks
 //at different refinement levels have different spacings.
@@ -210,7 +210,7 @@ extern void detect_troubles_b(
     FV_Solution, FV_Solution, FV_Solution, FV_Solution,
     FV_Solution, FV_Solution, FV_Solution,
     Matrix, Matrix, Matrix, Matrix, Matrix, Matrix,
-    int, bool, int);
+    int, bool, int, int abs_mask=0);
 extern int  update_cascade_b(FV_Solution, FV_Solution, int);
 extern void apply_blending(FV_Solution, FV_Solution);
 extern void blending_ring(FV_Solution, FV_Solution);
