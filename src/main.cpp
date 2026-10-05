@@ -317,6 +317,11 @@ int main(int argc, char** argv){
         cfg.max_revs  = pin.GetOrAddInteger("fallback","max_revs",3);
         cfg.pad_min_rho = pin.GetOrAddReal("fallback","min_rho",1e-10);
         cfg.pad_min_P   = pin.GetOrAddReal("fallback","min_P",1e-10);
+        //PAD ceilings. A physical one (the strong-shock compression limit
+        //(g+1)/(g-1) of a Sedov blast) lets the hydro capped cascade send an
+        //overshooting cell to first order as a PAD failure; see pad_cell.
+        cfg.pad_max_rho = pin.GetOrAddReal("fallback","max_rho",1e10);
+        cfg.pad_max_P   = pin.GetOrAddReal("fallback","max_P",1e10);
         cfg.floor_cons  = pin.GetOrAddString("hydro","floors","ramses")=="athenak";
         cfg.dfloor      = pin.GetOrAddReal("hydro","dfloor",1e-10);
         cfg.pfloor      = pin.GetOrAddReal("hydro","pfloor",-1.0);

@@ -77,6 +77,8 @@ struct RunConfig {
                                          //(they lean on the ctoprim floors).
     double pad_min_rho = 1e-10;          //PAD floors (runtime-tunable detection
     double pad_min_P   = 1e-10;          //strictness, cf. fallback min_rho/min_P)
+    double pad_max_rho = 1e10;           //PAD ceilings (fallback/max_rho, max_P); the
+    double pad_max_P   = 1e10;           //hydro capped cascade reads all four
     bool floor_cons = false;             //ctoprim floor semantics: false = RAMSES
                                          //(primitive view only; matches Python spd),
                                          //true = AthenaK (repair the conserved state)

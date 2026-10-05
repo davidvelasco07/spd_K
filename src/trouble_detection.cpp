@@ -466,17 +466,28 @@ void blending_ring_b(FV_Solution theta_in, FV_Solution theta_out){
 //the physical rows are tested -- NVAR's slot 5 is dead storage and can be NaN
 //(memory: trouble aggregate slot). Never under the blend style: theta reads
 //`flagged` as a weight, and a 2 would double it.
+//The pad1st path reads its bounds from the deck (fallback/min_rho, max_rho,
+//min_P, max_P; struct PadBounds), so a problem with a physical ceiling can
+//send a cell to first order when its candidate passes it -- the strong-shock
+//limit (g+1)/(g-1) rho0 of a Sedov blast, which the capped cascade overshot
+//by 19 per cent in 3D (4.78 against 4) where the old one had demoted those
+//cells on NAD alone. The defaults are the compiled rho_min/rho_max/p_min/
+//p_max, so a deck that sets none is bit-identical. The old path keeps the
+//compiled constants: it is the A/B reference.
+struct PadBounds { double rmin, rmax, pmin, pmax; };
+static PadBounds pad_bounds(){ return {cfg.pad_min_rho, cfg.pad_max_rho, cfg.pad_min_P, cfg.pad_max_P}; }
+
 KOKKOS_INLINE_FUNCTION
 void pad_cell(FV_Vector W, FV_Vector flagged, int off, int foff,
-              int k, int j, int i, bool pad1st){
+              int k, int j, int i, bool pad1st, PadBounds pb){
         const double density  = W(off+_d_,k,j,i);
         const double pressure = W(off+_p_,k,j,i);
         if(pad1st){
             const bool finite = isfinite(density) && isfinite(pressure)
                 && isfinite(W(off+_vx_,k,j,i)) && isfinite(W(off+_vy_,k,j,i))
                 && isfinite(W(off+_vz_,k,j,i));
-            if(!finite || density<rho_min || density>rho_max
-                       || pressure<p_min  || pressure>p_max)
+            if(!finite || density<pb.rmin || density>pb.rmax
+                       || pressure<pb.pmin || pressure>pb.pmax)
                 flagged(foff,k,j,i) = 2;
             return;
         }
@@ -490,8 +501,9 @@ void PAD_criteria(FV_Solution W, FV_Solution flagged){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz;
     FV_Vector w=W.Vector, fl=flagged.Vector;
     const bool pad1st=pad_first_order();
+    const PadBounds pb=pad_bounds();
     fv_for_cells_ngh(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
-        pad_cell(w,fl,0,0,k,j,i,pad1st);
+        pad_cell(w,fl,0,0,k,j,i,pad1st,pb);
     });
 }
 
@@ -500,8 +512,9 @@ void PAD_criteria_b(FV_Solution W, FV_Solution flagged){
     int nvar=W.n_var, fnv=flagged.n_var;
     FV_Vector w=W.Vector, fl=flagged.Vector;
     const bool pad1st=pad_first_order();
+    const PadBounds pb=pad_bounds();
     fv_for_cells_ngh_b(nb,Nz,Ny,Nx, KOKKOS_LAMBDA(int b,int k,int j,int i){
-        pad_cell(w,fl,b*nvar,b*fnv,k,j,i,pad1st);
+        pad_cell(w,fl,b*nvar,b*fnv,k,j,i,pad1st,pb);
     });
 }
 
