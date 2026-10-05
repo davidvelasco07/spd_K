@@ -829,6 +829,7 @@ double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz){
     int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, px=W.nx, py=W.ny, pz=W.nz;
     double gm=cfg.gamma, cfl=cfg.cfl;
     const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double pdiv = (cfg.cfl_type == _cfl_squared_) ? double(px)*px : double(px);   //SUM or SQUARED (define.hpp)
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     //Same host round trip as the conversions above, and worse: the reduction ran
     //as a SERIAL host loop over every cell, every step. The #else branch is a
@@ -847,7 +848,7 @@ double mhd_compute_dt(SD_Solution W, double dx, double dy, double dz){
             if(ay){ double a=fabs(Vw(0,_mvy_,k,j,i,kk,jj,ii))+mhd_fast_vel(p,rho,By,Bz,Bx,gm); c_max+=a; dx_min=min(dx_min,dy); inv_dt=max(inv_dt,a/dy); }
             if(az){ double a=fabs(Vw(0,_mvz_,k,j,i,kk,jj,ii))+mhd_fast_vel(p,rho,Bz,Bx,By,gm); c_max+=a; dx_min=min(dx_min,dz); inv_dt=max(inv_dt,a/dz); }
             if(c_max > 0){
-                double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
+                double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/pdiv;
                 reduce = reduce < dt_min ? reduce : dt_min;
             }
         });
@@ -870,6 +871,7 @@ double mhd_compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz){
     int nader=W.n_ader;
     double gm=cfg.gamma, cfl=cfg.cfl;
     const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double pdiv = (cfg.cfl_type == _cfl_squared_) ? double(px)*px : double(px);   //SUM or SQUARED (define.hpp)
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     SD_Vector Vw = W.Vector;
     double min_value = sd_min_cells_b(nb,Nz,Ny,Nx,pz,py,px,
@@ -887,7 +889,7 @@ double mhd_compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz){
             if(ay){ double a=fabs(Vw(boff,_mvy_,k,j,i,kk,jj,ii))+mhd_fast_vel(p,rho,By,Bz,Bx,gm); c_max+=a; dx_min=min(dx_min,dy); inv_dt=max(inv_dt,a/dy); }
             if(az){ double a=fabs(Vw(boff,_mvz_,k,j,i,kk,jj,ii))+mhd_fast_vel(p,rho,Bz,Bx,By,gm); c_max+=a; dx_min=min(dx_min,dz); inv_dt=max(inv_dt,a/dz); }
             if(c_max > 0){
-                double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
+                double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/pdiv;
                 reduce = reduce < dt_min ? reduce : dt_min;
             }
         });

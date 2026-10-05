@@ -750,6 +750,50 @@ to a config is the exact mistake rule 7 records, and the hard-fail on unknown
 names is what caught it. Mass is not conserved on this problem anyway -- it
 enters through the nozzle and leaves through the far boundary.
 
+## 8e. SDFB on the hypersonic jets: two defects, two tiers, two fixes
+
+SDFB4/SDFB8 at deck defaults failed both Ha jets (Mach 80 and 2000) where
+MUSCL-Hancock runs clean at every resolution. Neither "more revisions", the NAD
+tolerance, neighbourhood or SED, nor a smaller CFL saved them. `SPD_POS_TRACE=1`
+(hydro_ader.hpp; per revision, the worst candidate cell's level, flag, stage input
+and local Courant number on its own sub-cell widths) plus the `cascade_*` dumps
+separated two defects that each live in ONE tier:
+
+- **Negative pressure is made BY the first-order tier.** At the nozzle lips a
+  v = 800 beam meets gas at rest; HLLC's acoustic star pressure goes negative in
+  that rarefaction and is not clipped. `hydro/fo_riemann=llf` (Rusanov) fixed
+  Mach 80 for both schemes. What is left sits at level 2 (55 of 56 cells on
+  Mach 2000 SDFB4): Rusanov is positivity-preserving only to a sub-cell CFL of
+  1/2, and under `sum` the narrowest sub-cell runs at ~0.67 (p=3) and ~1 (p=7).
+  `time/cfl_type=squared` ((p+1)^2, the MHD paper's condition) removes them --
+  0 cells -- but did NOT save a run, because of the second defect.
+- **The near-vacuum is made by the MUSCL tier, and NAD cannot move it.** Strips
+  of rho ~ 1e-5..2e-7 with p ~ 1 beside the beam, sound speed ~ 300 (10x the
+  beam), all at levels 0/1: they pass PAD (min_rho 1e-10), and with the default
+  cap (a89608b) a NAD flag stops at MUSCL. They set dt: 85k steps instead of 2.5k,
+  or a stall. `hydro/mood_pad_first_order=false` (NAD may reach first order) took
+  rho_min to 2-5e-2 (MUSCL-Hancock: 1-3e-2) and the step count back to
+  1.3-2.0x MUSCL-Hancock's, at 0.4-2% of cells on first order.
+
+The paper configuration is therefore Rusanov + NAD-to-first-order, 3 revisions,
+`sum` CFL: every SDFB4/SDFB8 lane at 1N, 2N, 4N and under AMR completes both
+jets; on Mach 2000 a handful of p < 0 cells remain (1-2 per SDFB4 lane, 9-26
+per SDFB8 lane) along the beam edges, at the lip and on the bow shock. Six
+revisions take Mach 2000 at 1N to 0 (SDFB4) and 1 (SDFB8, p = -7e-3) at the same
+step count: the last revision's demotions are what is committed unchecked. A PAD density floor (`fallback/min_rho=1e-3`)
+also rescued 1N and failed at 2N/4N -- it treats the symptom in the wrong tier.
+**Ask which tier owns a bad cell before tuning the detector:** the `cascade`
+dump at the bad cell answers it in one line.
+
+The jets also run on the block path now: `x1_bc=inflow` (problem = ha_jet) and
+`outflow` faces go through the forest/table exchange (`Mesh::wall_bc`,
+`jet_face_to_ghost`, mode 4 of `apply_domain_bc_fv`) and the Mesh caps dt with
+the inflow state (`Mesh::inflow_dt`, rule 8c). Gate: `hydro_ha_jet_mb_2d`
+(4x4 blocks = the single-block golden, 0.0); controls
+`hydro_ha_jet_mb_ambient_sensitive_2d` and `hydro_ha_jet_mb_noinflow_sensitive_2d`;
+`hydro_ha_jet_amr_2d`; and `hydro_fo_riemann_llf_sensitive_2d` /
+`hydro_cfl_squared_sensitive_2d` prove the two knobs are connected.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

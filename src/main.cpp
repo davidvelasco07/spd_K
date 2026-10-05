@@ -228,9 +228,10 @@ int main(int argc, char** argv){
             std::string ct = pin.GetOrAddString("time","cfl_type","sum");
             if(ct == "sum")      cfg.cfl_type = _cfl_sum_;
             else if(ct == "min") cfg.cfl_type = _cfl_min_;
+            else if(ct == "squared") cfg.cfl_type = _cfl_squared_;   //SUM with (p+1)^2, define.hpp
             else {
                 if(Master) cout<<"ERROR: unknown time/cfl_type '"<<ct
-                                <<"' (sum, min)"<<endl;
+                                <<"' (sum, min, squared)"<<endl;
                 exit(1);
             }
         }
@@ -251,6 +252,11 @@ int main(int argc, char** argv){
         //2026 to test how much of SDFB's dissipation on contact- and shear-driven
         //flows (the Liska-Wendroff jet) is the interface flux rather than the cascade.
         {
+            //The first-order tier of the hydro cascade: hllc (default, bit-identical) or llf (5 Oct 2026, the jets).
+            {   string frs = pin.GetOrAddString("hydro","fo_riemann","hllc");
+                if(frs=="hllc") cfg.fo_rsolver = 0;
+                else if(frs=="llf" || frs=="rusanov") cfg.fo_rsolver = 1;
+                else { if(Master) cout<<"ERROR: hydro/fo_riemann = '"<<frs<<"' (expected hllc or llf)"<<endl; exit(1); } }
             string srs = pin.GetOrAddString("hydro","sd_riemann","llf");
             if(srs=="llf" || srs=="rusanov") cfg.sd_rsolver = 0;
             else if(srs=="hllc")             cfg.sd_rsolver = 1;
@@ -784,13 +790,18 @@ int main(int argc, char** argv){
             //hydro only (apply_domain_bc_fp/fv). MHD walls under blocks would
             //also need the face-B and EMF conditions of boundary.cpp/mhd.cpp,
             //which the forest path does not have; keep refusing them.
+            //Hydro also has the jet's boundaries there (5 Oct 2026): outflow on any face, and the
+            //prescribed inflow of problem = ha_jet on x1 (jet_face_to_ghost / apply_domain_bc_fv).
             for(int d=0; d<3; d++){
                 if(!cfg.active[d]) continue;
                 if(cfg.bc[d]==_periodic_ || cfg.bc[d]==_gradfree_) continue;
-                if(system_name=="hydro" && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_)) continue;
+                if(system_name=="hydro" && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
+                                            cfg.bc[d]==_outflow_)) continue;
+                if(system_name=="hydro" && cfg.bc[d]==_inflow_ && d==_x_ && cfg.problem==_ic_ha_jet_) continue;
                 if(Master)
                     cout<<"ERROR: meshblocks/AMR support periodic and gradfree boundaries, "
-                        <<"plus reflective and doublemach for hydro, but x"<<(d+1)
+                        <<"plus reflective, doublemach and outflow for hydro, and inflow on x1 for "
+                        <<"problem = ha_jet, but x"<<(d+1)
                         <<"_bc is none of those for system "<<system_name<<"."<<endl;
                 exit(1);
             }

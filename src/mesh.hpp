@@ -511,6 +511,19 @@ struct Mesh : public PhysicsModule {
                     mhd_compute_dt(blocks[b].W_cv, Xd[b].h, Yd[b].h, Zd[b].h));
             }
         }
+        if constexpr (is_hydro) this->Dt = std::min(this->Dt, inflow_dt());
+    }
+
+    //A beam fed through a boundary bounds the step on a forest too (CLAUDE.md rule 8c): the dt reductions see
+    //W_cv only, where the beam is not yet. The single-block path caps both of its sites with compute_inflow_dt;
+    //this is the Mesh's cap, at the finest spacing on the forest. A host-side loop over block spacings with no
+    //launches (rule 1: scalar bookkeeping); 1e300 wherever no inflow is prescribed, so it is a no-op elsewhere.
+    double inflow_dt() const {
+        if(cfg.inflow_rho <= 0.0) return 1e300;
+        double d = 1e300;
+        for(int b=0;b<nblocks;b++)
+            d = std::min(d, compute_inflow_dt(Xd[b].h, Yd[b].h, Zd[b].h, blocks[b].W_cv.nx));
+        return d;
     }
 
     SD_Solution& fp(int b, int dim){
@@ -780,11 +793,14 @@ struct Mesh : public PhysicsModule {
     //forest/table exchange even on a uniform mesh: the uniform fast-path
     //kernels (block_boundary_*, neighbors_uniform) know periodic and gradfree
     //only, while the forest labels every non-periodic face NEIGH_BC and fills
-    //it through apply_domain_bc_fp/fv, which implement all four.
+    //it through apply_domain_bc_fp/fv, which implement all four. The jet's
+    //prescribed inflow and its outflow faces take the same route (5 Oct 2026):
+    //the fast path would label them periodic and wrap the nozzle round.
     static bool wall_bc(){
         static const bool v = [](){
             for(int d=0; d<3; d++)
-                if(cfg.active[d] && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_)) return true;
+                if(cfg.active[d] && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
+                                     cfg.bc[d]==_inflow_ || cfg.bc[d]==_outflow_)) return true;
             return false;
         }();
         return v;
@@ -3025,6 +3041,8 @@ struct Mesh : public PhysicsModule {
                 this->Dt = std::min(this->Dt, db);
             }
         }
+        //The prescribed inflow, which the reductions above cannot see (inflow_dt).
+        if constexpr (is_hydro) this->Dt = std::min(this->Dt, inflow_dt());
         //ONE reduction for both systems, and for both paths. The per-block MHD
         //loop below still reduces inside each call, so this is a min of minima
         //there; hydro's packed kernel had NO reduction at all, which was a latent

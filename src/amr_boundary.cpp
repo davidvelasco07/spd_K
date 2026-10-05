@@ -248,11 +248,70 @@ static void dmr_face_to_ghost(SD_Solution U, int dim, int side, int ib){
     });
 }
 
+//Conservative state the Ha et al. jet (problem = ha_jet) prescribes at a point of its LOW x face at height y:
+//the nozzle state where |y - cy| < radius and, unless problem/inflow_outside = outflow, the reservoir (jet
+//density) or ambient state at rest elsewhere. Returns false where nothing is prescribed, i.e. the outflow copy.
+//Same arithmetic, in the same order, as ha_jet_nozzle + conservatives() in hydro.cpp, so the block path is
+//bit-identical to the single-block inflow fill; any slot beyond NVAR is zero there too.
+KOKKOS_INLINE_FUNCTION
+bool jet_inflow_cons(int var, double y, ProblemParams pp, int outside, double gm, double& u){
+    const bool nozzle = fabs(y - pp.cy) < pp.radius;
+    if(!nozzle && outside == _jo_outflow_) return false;
+    const double rho = nozzle ? pp.d1 : (outside == _jo_reservoir_ ? pp.d1 : pp.d0);
+    const double vx  = nozzle ? pp.v1 : 0.0;
+    const double mx = rho*vx;
+    const double E_kin = vx*mx;   //conservatives() adds the transverse terms too, which are exactly zero here
+    if(var == _d_)       u = rho;
+    else if(var == _vx_) u = mx;
+    else if(var == _e_)  u = pp.p0/(gm-1.)+0.5*E_kin;
+    else                 u = 0.0;
+    return true;
+}
+
+//Prescribed-inflow boundary (_inflow_) on the flux-point lattice of a block forest: the jet state on the LOW x
+//face where jet_inflow_cons prescribes one, and the outflow copy everywhere else -- the rest of that face and
+//the whole HIGH face (define.hpp: _inflow_ is a prescribed state on the low side and _outflow_ elsewhere, and
+//_outflow_ is gradfree's zeroth-order copy, boundary.cpp). The block-path twin of ha_jet_fill_inflow_sd plus the
+//_inflow_ branch of boundaries(); it is what makes the jets runnable under AMR (5 Oct 2026). Position from the
+//block's own geometry, like dmr_face_to_ghost.
+static void jet_face_to_ghost(SD_Solution U, int dim, int side, int ib){
+    const bool inject = (dim==_x_ && side==0);
+    Matrix yc = (*g_bc_geom[_y_])[ib].sd_centers;
+    const ProblemParams pp = cfg.pp;
+    const int outside = cfg.inflow_outside;
+    const double gm = cfg.gamma;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader=U.n_ader, nvar=U.n_var;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
+    int px=U.nx, py=U.ny, pz=U.nz;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        const double y = yc(j,jj);
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int Nid[3], nid[3];
+        double v;
+        if(side==0){
+            v = U.value(t_id,var,k,j,i,kk,jj,ii,1,0,dim);
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,0,n-1,dim);
+        } else {
+            v = U.value(t_id,var,k,j,i,kk,jj,ii,N-2,n-1,dim);
+            amr_indices(Nid,nid,k,j,i,kk,jj,ii,N-1,0,dim);
+        }
+        double u;
+        if(inject && jet_inflow_cons(var, y, pp, outside, gm, u)) v = u;
+        U.Vector(INDICES) = v;
+        }}
+    });
+}
+
 void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
     const int bc = cfg.bc[dim];
     if(bc == _gradfree_)        mirror_face_to_ghost(U, dim, side, false);
+    else if(bc == _outflow_)    mirror_face_to_ghost(U, dim, side, false);   //the same copy, boundary.cpp
     else if(bc == _reflective_) mirror_face_to_ghost(U, dim, side, true);
     else if(bc == _dmr_)        dmr_face_to_ghost(U, dim, side, ib);
+    else if(bc == _inflow_)     jet_face_to_ghost(U, dim, side, ib);
 }
 
 //FV counterpart: fill a block's ghost slab at a physical domain boundary.
@@ -270,7 +329,7 @@ void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
 //whose physical-boundary blocks end up here.
 void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
     const int bc = cfg.bc[dim];
-    if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_) return;
+    if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_ && bc != _outflow_ && bc != _inflow_) return;
     const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     const int nvar = U.n_var;
     const int Nx = (dim==_x_ ? ngh : U.Nx);
@@ -279,11 +338,18 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
     const bool state = nvar > 1;
     Vector xc; const double yL = g_bc_box[_y_];   //domain height (see dmr_face_to_ghost)
     if(bc == _dmr_) xc = (*g_bc_geom[_x_])[ib].fv_centers;
+    //_inflow_ (the jet): the transverse position of cell j is the midpoint of its faces, as in the single-block
+    //ha_jet_fill_inflow_fv; only the low x face injects, everything else is the outflow copy.
+    Vector fy; const bool inject = (bc == _inflow_ && dim == _x_ && side == 0);
+    if(inject) fy = (*g_bc_geom[_y_])[ib].fv_faces;
+    const ProblemParams pp = cfg.pp;
+    const int outside = cfg.inflow_outside;
     const double t = g_bc_time, gm = cfg.gamma;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
-        //0 copy, 1 mirror, 2 post-shock, 3 undisturbed
+        //0 copy, 1 mirror, 2 post-shock, 3 undisturbed, 4 jet inflow
         int mode = 0;
+        if(inject && state) mode = 4;
         if(bc == _reflective_) mode = 1;
         else if(bc == _dmr_){
             if(dim==_x_) mode = (side==0) ? 2 : 0;
@@ -300,11 +366,13 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
         int Nsrc[3], Ndst[3];
         fv_indices(Nsrc,k,j,i,sl,dim);
         fv_indices(Ndst,k,j,i,dl,dim);
+        const double y = (mode==4) ? 0.5*(fy(j)+fy(j+1)) : 0.0;
         for(int var=0; var<nvar; var++){
             double v = U.Vector(var,Nsrc[_z_],Nsrc[_y_],Nsrc[_x_]);
             if(mode==1 && var == 1+dim) v = -v;
             else if(mode==2) v = dmr_cons(true,  var, gm);
             else if(mode==3) v = dmr_cons(false, var, gm);
+            else if(mode==4){ double u; if(jet_inflow_cons(var, y, pp, outside, gm, u)) v = u; }
             U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) = v;
         }
     }, "apply_domain_bc_fv");

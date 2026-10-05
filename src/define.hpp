@@ -122,7 +122,12 @@ enum {_nad_scale_relative_, _nad_scale_delta_, _nad_scale_grange_, _nad_scale_gc
 //2048^2 -- so `cfl` means different things under the two. SUM is the default
 //because every golden in the tree was generated with it; Athena++/AthenaK use
 //MIN, which is what makes their `cfl_number` directly comparable.
-enum {_cfl_sum_, _cfl_min_};
+//SQUARED (5 Oct 2026, David: the convention of the MHD paper draft) is the SUM form with (p+1)^2 in place of (p+1):
+//dt = cfl*h/((p+1)^2 sum_d(|v_d|+c)). The SD sub-cells are not equally wide (rule 6): the narrowest is 0.45x the mean
+//at p=3 and 0.20x at p=7, so a first-order fallback there runs at 2.2x and 4.9x the nominal CFL under SUM -- past its
+//positivity limit next to a hypersonic beam (the SDFB jets, traced with SPD_POS_TRACE). (p+1)^2 bounds the narrowest
+//point spacing at every p.
+enum {_cfl_sum_, _cfl_min_, _cfl_squared_};
 enum {_ic_sine_wave_, _ic_sedov_, _ic_spherical_blast_, _ic_square_,
       _ic_sod_, _ic_shu_osher_, _ic_kelvin_helmholtz_, _ic_implosion_,
       _ic_rti_, _ic_user_, _ic_orszag_tang_, _ic_field_loop_,

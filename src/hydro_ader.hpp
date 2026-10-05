@@ -829,10 +829,14 @@ struct Hydro_ader : public PhysicsModule{
             apply_fv_boundaries(comm,U_old);
             compute_primitives(U_old,W_old);
             FV_cascade_levels(ader,X_dim,Y_dim,Z_dim);
+            int revs_done = 0, last_demoted = 0;
             for(int rev=0; rev<cfg.max_revs; rev++){
                 FV_cascade_candidate(ader,X_dim,Y_dim,Z_dim);
                 apply_fv_boundaries(comm,U_new);
-                if(FV_cascade_detect(X_dim,Y_dim,Z_dim)==0) break;
+                last_demoted = FV_cascade_detect(X_dim,Y_dim,Z_dim);
+                revs_done = rev+1;
+                pos_trace(ader,rev,last_demoted,X_dim,Y_dim);
+                if(last_demoted==0) break;
                 //A demotion has to be visible from the other side of every
                 //face it touches, or the two sides would assemble different
                 //fluxes and the update would stop conserving.
@@ -840,8 +844,50 @@ struct Hydro_ader : public PhysicsModule{
             }
             FV_cascade_assemble();
             FV_commit(ader,X_dim,Y_dim,Z_dim);
+            if(pos_trace_on() && revs_done == cfg.max_revs && last_demoted > 0)
+                printf("[pos] step %d stage %d: revisions exhausted (%d), %d cells demoted in the last one and committed unchecked\n",
+                       n_step, ader, revs_done, last_demoted);
         }
         FV_end();
+    }
+
+    //SPD_POS_TRACE=1 (diagnostic, default off, so the default path is untouched): after each cascade revision,
+    //report the active cell of lowest density and the one of lowest pressure in the CANDIDATE (W_new, assembled
+    //from the current levels) whenever either falls below SPD_POS_TRACE_RHO (default 1e-3) or below zero -- the
+    //cell's level after this revision (0 SD, 1 MUSCL, 2 first order) and flag, its candidate and stage-input
+    //(rho, p), and the local Courant number dt*sum_d(|v_d|+c)/dx_d on its OWN sub-cell widths from the stage input.
+    //A cell at level 2 with a bad candidate means first order itself failed there; the SD sub-cells are not equally
+    //wide (CLAUDE.md rule 6), so first order on the narrowest of them runs at several times the nominal CFL. The
+    //caller also reports a stage whose revisions ran out while still demoting (those cells are committed unchecked).
+    //Host mirrors: a diagnostic, not production. (5 Oct 2026: the SDFB jet nozzle lips.)
+    static bool pos_trace_on(){ static const bool on = getenv("SPD_POS_TRACE") != nullptr; return on; }
+    void pos_trace(int ader, int rev, int demoted, dimension X_dim, dimension Y_dim){
+        if(!pos_trace_on()) return;
+        static const double rho_thr = getenv("SPD_POS_TRACE_RHO") ? atof(getenv("SPD_POS_TRACE_RHO")) : 1e-3;
+        auto Wn = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), W_new.Vector);
+        auto Wo = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), W_old.Vector);
+        auto C  = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cascade.Vector);
+        auto Fl = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), flagged.Vector);
+        auto fx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), X_dim.fv_faces);
+        auto fy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Y_dim.fv_faces);
+        const double gm = cfg.gamma;
+        int jr=-1, ir=-1, jp=-1, ip=-1; double rmin=1e300, pmin=1e300;
+        for(int j=nGHy; j<W_new.Ny-nGHy; j++) for(int i=nGHx; i<W_new.Nx-nGHx; i++){
+            if(Wn(0,0,j,i) < rmin){ rmin=Wn(0,0,j,i); jr=j; ir=i; }
+            if(Wn(_p_,0,j,i) < pmin){ pmin=Wn(_p_,0,j,i); jp=j; ip=i; }
+        }
+        if(!(rmin < rho_thr || pmin < 0.0)) return;
+        for(int which=0; which<2; which++){
+            const int j = which ? jp : jr, i = which ? ip : ir;
+            const double r0 = Wo(0,0,j,i), p0 = Wo(_p_,0,j,i), vx0 = Wo(_vx_,0,j,i), vy0 = Wo(_vy_,0,j,i);
+            const double dx = fx(i+1)-fx(i), dy = fy(j+1)-fy(j);
+            const double c0 = sqrt(gm*fabs(p0)/fabs(r0));
+            const double cfl = this->dt*((fabs(vx0)+c0)/dx + (fabs(vy0)+c0)/dy);
+            printf("[pos] step %d stage %d rev %d (demoted %d) %s at (x %.4f, y %.4f) level %.0f flag %.0f: "
+                   "candidate rho %.3e p %.3e | stage input rho %.3e p %.3e |v| %.1f c %.1f | dx %.2e dy %.2e local CFL %.3f\n",
+                   n_step, ader, rev, demoted, which ? "p_min  " : "rho_min", 0.5*(fx(i)+fx(i+1)), 0.5*(fy(j)+fy(j+1)),
+                   C(0,0,j,i), Fl(0,0,j,i), Wn(0,0,j,i), Wn(_p_,0,j,i), r0, p0, sqrt(vx0*vx0+vy0*vy0), c0, dx, dy, cfl);
+        }
     }
 
     void FV_Update_solution(CommHelper comm, dimension X_dim,dimension Y_dim,dimension Z_dim){

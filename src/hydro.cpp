@@ -247,6 +247,7 @@ double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
     int nader=W.n_ader;
     double gm=cfg.gamma, cfl=cfg.cfl;
     const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double pdiv = (cfg.cfl_type == _cfl_squared_) ? double(px)*px : double(px);   //SUM or SQUARED (define.hpp)
     bool ax=cfg.active[_x_], ay=cfg.active[_y_], az=cfg.active[_z_];
     double min_value = sd_min_cells_b(nb,Nz,Ny,Nx,pz,py,px,
         KOKKOS_LAMBDA(int b,int k,int j,int i,int kk,int jj,int ii,double& reduce){
@@ -262,7 +263,7 @@ double compute_dt_b(SD_Solution W, Vector hx, Vector hy, Vector hz, double nu){
         if(ax){ double a=abs(W.Vector(boff,_vx_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dx); inv_dt=max(inv_dt,a/dx); }
         if(ay){ double a=abs(W.Vector(boff,_vy_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dy); inv_dt=max(inv_dt,a/dy); }
         if(az){ double a=abs(W.Vector(boff,_vz_,k,j,i,kk,jj,ii))+c_s; c_max+=a; dx_min=min(dx_min,dz); inv_dt=max(inv_dt,a/dz); }
-        double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
+        double dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/pdiv;
         if(nu>0.0){
             double dx_sub = dx_min/px;
             double dt_visc = 0.25*cfl*dx_sub*dx_sub/nu;
@@ -337,6 +338,7 @@ double compute_inflow_dt(double dx, double dy, double dz, int px){
     if(cfg.inflow_rho <= 0.0) return 1e300;
     const double gm = cfg.gamma, cfl = cfg.cfl;
     const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double pdiv = (cfg.cfl_type == _cfl_squared_) ? double(px)*px : double(px);   //SUM or SQUARED (define.hpp)
     const double c_s = sqrt(gm*cfg.inflow_p/cfg.inflow_rho);
     double c_max = 0.0, dx_min = 1.0, inv_dt = 0.0;
     if(cfg.active[_x_]){ double a = fabs(cfg.inflow_vx) + c_s;
@@ -345,7 +347,7 @@ double compute_inflow_dt(double dx, double dy, double dz, int px){
         c_max += a; dx_min = min(dx_min,dy); inv_dt = max(inv_dt,a/dy); }
     if(cfg.active[_z_]){ double a = fabs(cfg.inflow_vz) + c_s;
         c_max += a; dx_min = min(dx_min,dz); inv_dt = max(inv_dt,a/dz); }
-    return cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
+    return cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/pdiv;
 }
 
 double compute_dt(
@@ -364,6 +366,7 @@ double compute_dt(
     double gm = cfg.gamma;
     double cfl = cfg.cfl;
     const bool cfl_min = (cfg.cfl_type == _cfl_min_);
+    const double pdiv = (cfg.cfl_type == _cfl_squared_) ? double(px)*px : double(px);   //SUM or SQUARED (define.hpp)
     bool ax = cfg.active[_x_];
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
@@ -392,7 +395,7 @@ double compute_dt(
             dx_min = min(dx_min,dz);
             inv_dt = max(inv_dt,a/dz);
         }
-        dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/px;
+        dt_min = cfl_min ? cfl/inv_dt/px : cfl*dx_min/c_max/pdiv;
         //Explicit viscous (diffusion-number) limit on the sub-cell grid,
         //matching the spd reference (sd_scheme.compute_dt): with sub-cell
         //spacing h = dx/(p+1) the diffusion limit is 0.25*h^2/nu. Only active
@@ -995,7 +998,8 @@ void level_flux(
     bool muscl,
     bool pred
     ,
-    int lim){
+    int lim,
+    int fo_llf){
     double uL[NVAR];
     double uR[NVAR];
     double f[NVAR];
@@ -1032,7 +1036,11 @@ void level_flux(
         conservatives(wl,uL,gm);
         conservatives(wr,uR,gm);
     }
-    riemann_hllc(f,uL,uR,v1,v2,v3,gm);
+    //hydro/fo_riemann = llf (5 Oct 2026): the first-order tier takes Rusanov, positivity-preserving under CFL 1/2.
+    //This HLLC forms an acoustic star pressure that goes negative in a strong rarefaction (v_L << v_R) and is not
+    //clipped -- the SDFB jet nozzle lips, where a v=800 beam meets gas at rest (SPD_POS_TRACE).
+    if(fo_llf) riemann_llf(f,uL,uR,v1,v2,v3,gm);
+    else       riemann_hllc(f,uL,uR,v1,v2,v3,gm);
     for(int var=0; var<NVAR; var++) F(off+var,k,j,i) = f[var];
 }
 
@@ -1061,6 +1069,7 @@ void level_fluxes(
     bool ay = cfg.active[_y_];
     bool az = cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
+    const int fo_llf = (!muscl && cfg.fo_rsolver == 1) ? 1 : 0;   //hydro/fo_riemann, first-order tier only
     FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cx=x_c.data(), *ffx=x_f.data();
     const double *cy=y_c.data(), *ffy=y_f.data();
@@ -1069,9 +1078,9 @@ void level_fluxes(
     Vector wv = w;
     fv_for_faces(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const double sdt = wv[ader]*dt;
-        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
-        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
-        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        level_flux<_x_>(u,fx,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(ay) level_flux<_y_>(u,fy,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(az) level_flux<_z_>(u,fz,0,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
     });
 }
 
@@ -1098,6 +1107,7 @@ void level_fluxes_b(
     const int lim = cfg.limiter;   //device cannot read cfg; capture then thread
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
     const bool pred = cfg.fv_predictor;
+    const int fo_llf = (!muscl && cfg.fo_rsolver == 1) ? 1 : 0;   //hydro/fo_riemann, first-order tier only
     FV_Vector u=U.Vector, fx=F_x.Vector, fy=F_y.Vector, fz=F_z.Vector;
     const double *cxd=cxm.data(), *fxd=fxm.data();
     const double *cyd=cym.data(), *fyd=fym.data();
@@ -1112,9 +1122,9 @@ void level_fluxes_b(
         const double *cx=cxd+b*ncx, *ffx=fxd+b*nfx;
         const double *cy=cyd+b*ncy, *ffy=fyd+b*nfy;
         const double *cz=czd+b*ncz, *ffz=fzd+b*nfz;
-        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
-        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
-        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim);
+        level_flux<_x_>(u,fx,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(ay) level_flux<_y_>(u,fy,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
+        if(az) level_flux<_z_>(u,fz,off,cx,ffx,cy,ffy,cz,ffz,k,j,i,sdt,ay,az,gm,muscl,pred,lim,fo_llf);
     });
 }
 

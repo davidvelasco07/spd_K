@@ -376,6 +376,20 @@ CONFIGS = {
         "field": "W_cv_N32p3_1_0.dat",
         "t_end": 0.1,
     },
+    "hydro_cfl_squared_sensitive_2d": {
+        # time/cfl_type = squared (dt ~ C h / ((p+1)^2 sum(|v|+c)), the MHD paper's
+        # condition) must change the run against the default sum golden.
+        "input": "inputs/implosion.athinput",
+        "overrides": ["time/tlim=0.1", "output/dt=0.05", "time/cfl_type=squared"],
+        "ndim": 2,
+        "checks": ["mass_strict", "golden_differs"],
+        "golden_name": "hydro_implosion",
+        "differs_floor": 1e-6,
+        "differs_label": "cfl_type=squared vs the sum golden",
+        "differs_why": "else time/cfl_type=squared is not connected",
+        "field": "W_cv_N32p3_1_0.dat",
+        "t_end": 0.1,
+    },
     "hydro_implosion_mb_2d": {
         # Reflecting walls on the block path. The mesh path used to refuse any
         # non-periodic, non-gradfree boundary (its uniform neighbour tables
@@ -774,11 +788,140 @@ CONFIGS = {
         "nvar": 5,
         # No mass check: mass is NOT conserved here by construction -- it enters
         # through the nozzle and leaves through the far boundary.
-        "checks": ["ha_jet"],
+        # The golden is the single-block reference the block-path gate below
+        # (hydro_ha_jet_mb_2d) compares against.
+        "checks": ["ha_jet", "golden"],
+        "golden_name": "hydro_ha_jet",
+        "golden_rtol": 1e-12,
         "pmax_lo": 1.3e5,       # measured 1.605e+05 at this resolution
         "pmax_hi": 2.3e5,       # RR23 report 1.726e+05-2.282e+05 at 4x the DoF
         "sym_tol": 0.5,         # measured 0.000; the MHD jet's SDFB4 lane is 21
         "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
+    "hydro_ha_jet_sd_2d": {
+        # SDFB4 on the Mach-2000 jet, the cascade the paper's jets run
+        # (hydro/mood_pad_first_order=false, a NAD flag may reach first order),
+        # with the default HLLC first-order tier. 30 steps: the first-order tier
+        # fires at the nozzle lips from the first steps. Its golden is the HLLC
+        # reference for the hydro/fo_riemann control below.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32", "fallback/style=cascade",
+                      "time/integrator=rk3", "hydro/mood_pad_first_order=false",
+                      "time/tlim=4e-5", "output/dt=2e-5"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["golden"],
+        "golden_name": "hydro_ha_jet_sd",
+        "golden_rtol": 1e-6,
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 4e-5,
+    },
+    "hydro_fo_riemann_llf_sensitive_2d": {
+        # hydro/fo_riemann = llf (Rusanov in the first-order tier; the jets need
+        # it, HLLC's acoustic star pressure goes negative at the nozzle lips)
+        # must MOVE the run (CLAUDE.md 7a: prove the knob is connected). Same
+        # run as hydro_ha_jet_sd_2d; it must differ from the HLLC golden.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32", "fallback/style=cascade",
+                      "time/integrator=rk3", "hydro/mood_pad_first_order=false",
+                      "hydro/fo_riemann=llf",
+                      "time/tlim=4e-5", "output/dt=2e-5"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["golden_differs"],
+        "golden_name": "hydro_ha_jet_sd",
+        "differs_floor": 1e-6,
+        "differs_label": "fo_riemann=llf vs the HLLC golden",
+        "differs_why": "else the first-order Riemann switch is not connected or the tier never fired",
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 4e-5,
+    },
+    "hydro_ha_jet_mb_2d": {
+        # THE jet gate on the block path (5 Oct 2026). Until then a multiblock
+        # run with x1_bc = inflow was refused, so the jets could not run under
+        # AMR at all. The prescribed nozzle and the outflow faces now go through
+        # the forest/table exchange (Mesh::wall_bc) and are filled by
+        # apply_domain_bc_fp/fv (jet_face_to_ghost, mode 4), from each block's
+        # own geometry. 4x4 blocks must reproduce the single-block golden of
+        # hydro_ha_jet_2d to round-off on the active region.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "meshblock/nx1=8", "meshblock/nx2=8",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["ha_jet", "golden_active"],
+        "golden_name": "hydro_ha_jet",
+        "golden_rtol": 1e-12,
+        "pmax_lo": 1.3e5,
+        "pmax_hi": 2.3e5,
+        "sym_tol": 0.5,
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
+    "hydro_ha_jet_mb_ambient_sensitive_2d": {
+        # Negative control for hydro_ha_jet_mb_2d: the same 4x4 blocks with
+        # problem/inflow_outside = ambient instead of the deck's reservoir, i.e.
+        # the block path's x-min fill changed OFF the nozzle only. It MUST then
+        # differ from the reservoir golden. If it ever matches, the block path is
+        # not reading its own inflow fill (or the run is not multiblock), and the
+        # gate above passes for the wrong reason.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "meshblock/nx1=8", "meshblock/nx2=8",
+                      "problem/inflow_outside=ambient",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["golden_differs"],
+        "golden_name": "hydro_ha_jet",
+        "differs_floor": 1e-3,
+        "differs_label": "inflow_outside=ambient (block path) vs reservoir golden",
+        "differs_why": "else the block path is not applying its own inflow fill",
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
+    "hydro_ha_jet_mb_noinflow_sensitive_2d": {
+        # The nozzle-off control on the block path: x1_bc = outflow on 4x4
+        # blocks. The quiescent gas is exact, so p_max must stay at 0.4127; a
+        # jet here means the block-path fill injects where nothing is prescribed.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32", "mesh/x1_bc=outflow",
+                      "meshblock/nx1=8", "meshblock/nx2=8",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["ha_jet_sensitive"],
+        "pmax_ceiling": 1.0,
+        "field": "W_cv_N32p3_2_0.dat",
+        "t_end": 0.001,
+    },
+    "hydro_ha_jet_amr_2d": {
+        # The jet under dynamic AMR (one level, Lohner (rho,p)): the inflow on
+        # a refined block face, level jumps at the beam edges, and the Mesh's
+        # inflow dt cap (CLAUDE.md 8c) at the finest spacing. Gated on the
+        # robust p_max like the uniform run, and on actually refining.
+        "input": "inputs/rr23/ha_jet.athinput",
+        "overrides": ["mesh/nx1=32", "mesh/nx2=32",
+                      "meshblock/nx1=8", "meshblock/nx2=8",
+                      "job/scheme=plm", "time/integrator=rk2",
+                      "amr/max_level=1", "amr/criterion=lohner",
+                      "amr/lohner_vars=density,pressure",
+                      "amr/refine_threshold=0.3", "amr/derefine_threshold=0.075",
+                      "amr/adapt_interval=10", "amr/initial_refine=true",
+                      "output/dt=0.0005"],
+        "ndim": 2,
+        "nvar": 5,
+        "checks": ["mixed_levels", "ha_jet"],
+        "amr_dump": True,
+        "pmax_lo": 1.3e5,
+        "pmax_hi": 2.3e5,
+        "sym_tol": 0.5,
+        "field": "W_cv_N64p3_2_0.dat",
         "t_end": 0.001,
     },
     "hydro_ha_jet_noinflow_sensitive_2d": {
@@ -1704,6 +1847,12 @@ def check_ha_jet(outdir, cfg, unused=None):
     same measure reads 18-22 for the SDFB4 and AthenaK lanes.
     """
     grid = spdk_io.Grid(outdir)
+    if cfg.get("amr_dump"):
+        # An AMR dump is prolongated to the finest level, so its N is the one in
+        # the field name, not the root's; this deck's mesh is square.
+        Nf = int(re.search(r"_N(\d+)p\d+_", cfg["field"]).group(1))
+        grid.N = {d: (Nf if grid.N[d] > 1 else 1) for d in grid.N}
+        grid.nvar = cfg.get("nvar", grid.nvar)
     idx = spdk_io.output_indices(outdir)
     if len(idx) < 2:
         return False, f"only {len(idx)} outputs; nothing to compare"
@@ -1767,8 +1916,9 @@ def check_golden_differs(outdir, cfg, floor):
         return False, f"size mismatch {a.size} vs {b.size}"
     diff = np.abs(a - b).max() / max(np.abs(a).max(), 1e-300)
     ok = diff > floor
-    return ok, (f"emf=uct vs 2sweep golden: rel diff = {diff:.3e} "
-                f"(must exceed {floor:.1e}, else UCT is not running)")
+    what = cfg.get("differs_label", "emf=uct vs 2sweep golden")
+    why = cfg.get("differs_why", "else UCT is not running")
+    return ok, (f"{what}: rel diff = {diff:.3e} (must exceed {floor:.1e}, {why})")
 
 
 def check_golden(outdir, cfg, regen, active_only=False):
