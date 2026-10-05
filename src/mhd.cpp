@@ -3251,34 +3251,6 @@ void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_
     int problem=cfg.problem;
     bool ay=cfg.active[_y_], az=cfg.active[_z_];
     ProblemParams pp = cfg.pp;
-#ifdef KOKKOS_ENABLE_CUDA
-    Matrix_h fx = setup_mirror(faces_x); setup_pull(faces_x, fx);
-    Matrix_h fy = setup_mirror(faces_y); setup_pull(faces_y, fy);
-    Matrix_h fz = setup_mirror(faces_z); setup_pull(faces_z, fz);
-    Vector_h xs = setup_mirror(x_sp); setup_pull(x_sp, xs);
-    Vector_h ws = setup_mirror(w_sp); setup_pull(w_sp, ws);
-    SD_Vector_h Wh = Kokkos::create_mirror_view(W.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        for(int var=0;var<NMHD;var++){
-            double value=0, x, y=0, z=0;
-            for(int nn=0;nn<pz;nn++){
-                if(az) z = fz(k,kk) + xs(nn)*(fz(k,kk+1)-fz(k,kk));
-                for(int mm=0;mm<py;mm++){
-                    if(ay) y = fy(j,jj) + xs(mm)*(fy(j,jj+1)-fy(j,jj));
-                    for(int ll=0;ll<px;ll++){
-                        x = fx(i,ii) + xs(ll)*(fx(i,ii+1)-fx(i,ii));
-                        double s = mhd_ic_primitive(problem,var,x,y,z,az,pp)*ws(ll);
-                        if(ay) s*=ws(mm);
-                        if(az) s*=ws(nn);
-                        value+=s;
-                    }
-                }
-            }
-            Wh(0,var,k,j,i,kk,jj,ii)=value;
-        }
-    });
-    Kokkos::deep_copy(W.Vector, Wh);
-#else
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         for(int var=0;var<NMHD;var++){
             double value=0, x, y=0, z=0;
@@ -3298,30 +3270,17 @@ void mhd_Initialize(SD_Solution W, Matrix faces_x, Matrix faces_y, Matrix faces_
             W.Vector(0,var,k,j,i,kk,jj,ii)=value;
         }
     });
-#endif
 }
 
 void mhd_Initialize_A(SD_Solution A, Matrix Xs, Matrix Ys, Matrix Zs, int dim){
     int Nx=A.Nx, Ny=A.Ny, Nz=A.Nz, px=A.nx, py=A.ny, pz=A.nz;
     int problem=cfg.problem;
     ProblemParams pp = cfg.pp;
-#ifdef KOKKOS_ENABLE_CUDA
-    Matrix_h Xh = setup_mirror(Xs); setup_pull(Xs, Xh);
-    Matrix_h Yh = setup_mirror(Ys); setup_pull(Ys, Yh);
-    Matrix_h Zh = setup_mirror(Zs); setup_pull(Zs, Zh);
-    SD_Vector_h Ah = Kokkos::create_mirror_view(A.Vector);
-    sd_for_cells_host(Nz,Ny,Nx,pz,py,px, [&](int k,int j,int i,int kk,int jj,int ii){
-        double x=Xh(i,ii), y=Yh(j,jj), z=Zh(k,kk);
-        Ah(0,0,k,j,i,kk,jj,ii)=mhd_ic_vector_potential(problem,dim,x,y,z,pp);
-    });
-    Kokkos::deep_copy(A.Vector, Ah);
-#else
     SD_Vector Va = A.Vector;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         double x=Xs(i,ii), y=Ys(j,jj), z=Zs(k,kk);
         Va(0,0,k,j,i,kk,jj,ii)=mhd_ic_vector_potential(problem,dim,x,y,z,pp);
     });
-#endif
 }
 
 // Fill a boundary's prescribed-inflow state ONCE, at setup. The state is
