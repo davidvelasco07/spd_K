@@ -843,6 +843,18 @@ no width at zero. It is what holds a discontinuous scalar (blob: excursion 1e-4/
 and it is not free on smooth flow, because a flagged scalar demotes the whole cell: density L1 on the smooth sine at
 16^2, p=3, went 7.9e-6 -> 1.3e-5. `fallback/NAD_scalars=false` takes them out.
 
+## 8g. A whole-pack handle that outlives `BlockPack::reset()` doubles the regrid's memory
+
+`build_block_solvers` clears the blocks and then re-sizes the pack; when the mesh has outgrown the capacity, `reset()`
+frees the arrays by dropping its maps -- which frees nothing while `pv` (the PackViews) and `rk_pairs_` still hold
+views of them. The new pack was then allocated beside the old one. Measured on an A100, 3D Sedov growing from 176 to
+1408 blocks of 8^3: peak 13 685 MiB against 8 111 MiB in steady use (1.69x); on the GH200 it killed the 512^3 Sedov at
+2528 leaves with 56 GB of 98 in use and the shock-cloud pilot at 196 leaves with 48 GB. Releasing `pv` and
+`rk_pairs_` before `reset()` brings the peak to the steady state (8 111 MiB on the same lane, same step count, dumps
+bit-identical). `SPD_MEM_TRACE=1` prints the device memory at the stations of a regrid; the 10 s `nvidia-smi` samples
+never saw the transient. **Anything that keeps a view of a pack array across a regrid must be released before the
+pack is re-sized** -- a new whole-pack member belongs in `PackViews`, which is reset as one.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

@@ -221,8 +221,25 @@ struct Mesh : public PhysicsModule {
     //run_ic=false means "a regrid is rebuilding these blocks": the initial
     //conditions are skipped because transfer_from_snapshot is about to overwrite
     //every block's state anyway.
+    //SPD_MEM_TRACE=1: device memory in use at the stations of a regrid (CUDA only; a no-op elsewhere). The 10 s
+    //samples of nvidia-smi never see the transient; this does.
+    void mem_trace(const char* where){
+        static const bool on = getenv("SPD_MEM_TRACE") != nullptr;
+        if(!on || !Master) return;
+        #ifdef KOKKOS_ENABLE_CUDA
+        size_t free_b = 0, total_b = 0;
+        Kokkos::fence();
+        cudaMemGetInfo(&free_b, &total_b);
+        std::cout<<"[mem] "<<where<<": "<<(total_b-free_b)/(1024.0*1024.0)<<" MiB in use, "
+                 <<free_b/(1024.0*1024.0)<<" free, "<<nblocks<<" blocks"<<std::endl;
+        #else
+        (void)where;
+        #endif
+    }
+
     void build_block_solvers(bool run_ic=true){
         if(!ops_.built) build_sd_operators(ops_, p_, x_sp_, x_fp_);
+        mem_trace("before rebuilding the blocks");
         //Salvage the previous geometry, keyed by block, before Xd/Yd/Zd go.
         std::map<BlockForest::BlockKey, std::array<dimension,3>> old_geom;
         for(size_t i=0; i<geom_keys_.size() && i<Xd.size(); i++)
@@ -234,6 +251,16 @@ struct Mesh : public PhysicsModule {
         //Drop the previous pack before the new one is sized: adapt() changes
         //the block count, so every array is reallocated with a new leading
         //extent and the old slices must not keep it alive.
+        //
+        //THE REGRID MEMORY TRANSIENT WAS HERE. The blocks' slices are gone, but the whole-pack handles -- pv and
+        //rk_pairs_ -- still referenced every array, so when the mesh outgrew the capacity reset() could not free
+        //the old pack: the new one was allocated beside it and the regrid needed both. Measured on the GH200
+        //(98 GB): the 512^3 Sedov died at 2528 leaves with 56 GB in steady use, the shock-cloud pilot at 196
+        //leaves with 48 GB -- "failed to allocate" at half the card. Releasing the handles first brings the
+        //peak down to the new pack alone (capacity = 1.125 x the mesh) plus the snapshot.
+        pv = PackViews{};
+        rk_pairs_.clear();
+        mem_trace("after releasing the old pack");
         pack.reset(nblocks);
         //Fenced per step: `amr/build_solvers` measured 826 ms PER REGRID at 600
         //leaves (21.5 s of a 73 s fenced total) and is what makes the AMR lane's
@@ -262,6 +289,7 @@ struct Mesh : public PhysicsModule {
             blocks.push_back(make_block(Xd[ib], Yd[ib], Zd[ib], ib, run_ic));
         }
         }
+        mem_trace("after making the new blocks");
         { STAGE("amr/bs_geom_pack");  build_geometry_pack(); }
         { STAGE("amr/bs_pack_views"); build_pack_views(); }
         { STAGE("amr/bs_rk_pairs");   build_rk_pairs(); }
@@ -3934,6 +3962,7 @@ struct Mesh : public PhysicsModule {
             if constexpr (is_mhd)
                 if(forest.max_level()>0) Exchange_face_B_mhd();
         }
+        mem_trace("regrid start");
         std::vector<BlockSnap> snap(nblocks);
         { STAGE("amr/snapshot");
           snap_pack_.reset(nblocks);   //keeps its allocation; see BlockPack::reset
@@ -3941,6 +3970,7 @@ struct Mesh : public PhysicsModule {
               snap[ib] = make_empty_snap(ib, "snap");
               capture_block_snap(ib, snap[ib]);
           } }
+        mem_trace("after the snapshot");
         auto key_to_ib = snapshot_keys();
 
         int old_M = forest.max_level();
@@ -3964,6 +3994,7 @@ struct Mesh : public PhysicsModule {
 
         { STAGE("amr/build_solvers"); build_block_solvers(false); }
         { STAGE("amr/transfer");       transfer_from_snapshot(key_to_ib, snap); }
+        mem_trace("after the transfer");
         if constexpr (is_mhd) report_divb("after transfer");
         if constexpr (is_mhd){
             if(forest.max_level()==0) Sync_face_B_mhd();
