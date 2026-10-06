@@ -1,4 +1,5 @@
 #include "spd_k.hpp"
+#include "shock_cloud.hpp"
 
 KOKKOS_INLINE_FUNCTION
 int choose(int dim, int i, int j, int k){
@@ -100,21 +101,22 @@ void ha_jet_fill_inflow_sd(Boundaries& BC, Matrix y_centers){
     ProblemParams pp = cfg.pp;
     double gm = cfg.gamma;
     const int outside = cfg.inflow_outside;
+    const bool shock_cloud = (cfg.problem == _ic_shock_cloud_);   //whole face = the post-shock state
     SD_Vector IN = BC.InflowL;
     sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k,int j,int i,int kk,int jj,int ii){
         double y = y_centers(j,jj);
         //In _jo_outflow_ only the nozzle is prescribed and the rest of the face
         //falls back to outflow via the sentinel; in the clamped modes the whole
         //face carries a prescribed state.
-        bool inject = (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
+        bool inject = shock_cloud || (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
         double w[NVAR], u[NVAR];
-        if(inject){
+        if(inject && !shock_cloud){
             for(int var=0;var<NVAR;var++) w[var]=ha_jet_nozzle(var,y,pp,outside);
             conservatives(w,u,gm);
         }
         for(int t=0;t<nader;t++)
         for(int var=0;var<nvar;var++)
-            IN(t,var,k,j,i,kk,jj,ii) = inject ? (var<NVAR ? u[var] : 0.0) : -1.0;
+            IN(t,var,k,j,i,kk,jj,ii) = inject ? (shock_cloud ? shock_cloud_inflow_cons(var,pp,gm) : (var<NVAR ? u[var] : 0.0)) : -1.0;
     });
 }
 
@@ -125,17 +127,18 @@ void ha_jet_fill_inflow_fv(FV_Boundaries& BC, Vector fy){
     ProblemParams pp = cfg.pp;
     double gm = cfg.gamma;
     const int outside = cfg.inflow_outside;
+    const bool shock_cloud = (cfg.problem == _ic_shock_cloud_);
     FV_Vector IN = BC.InflowL;
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k,int j,int i){
         double y = 0.5*(fy(j)+fy(j+1));
-        bool inject = (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
+        bool inject = shock_cloud || (outside != _jo_outflow_) || (fabs(y - pp.cy) < pp.radius);
         double w[NVAR], u[NVAR];
-        if(inject){
+        if(inject && !shock_cloud){
             for(int var=0;var<NVAR;var++) w[var]=ha_jet_nozzle(var,y,pp,outside);
             conservatives(w,u,gm);
         }
         for(int var=0;var<nvar;var++)
-            IN(var,k,j,i) = inject ? (var<NVAR ? u[var] : 0.0) : -1.0;
+            IN(var,k,j,i) = inject ? (shock_cloud ? shock_cloud_inflow_cons(var,pp,gm) : (var<NVAR ? u[var] : 0.0)) : -1.0;
     });
 }
 

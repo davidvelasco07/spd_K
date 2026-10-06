@@ -170,9 +170,9 @@ struct Hydro_ader : public PhysicsModule{
         //Mirrors the MHD jet's y-face fill in mhd.hpp; x1_bc = inflow is only
         //defined for the problem that injects through that face.
         if(cfg.bc[_x_]==_inflow_){
-            if(cfg.problem!=_ic_ha_jet_){
+            if(cfg.problem!=_ic_ha_jet_ && cfg.problem!=_ic_shock_cloud_){
                 if(Master) cout<<"ERROR: x1_bc = inflow is only defined for "
-                                 "problem = ha_jet"<<endl;
+                                 "problem = ha_jet and problem = shock_cloud"<<endl;
                 exit(1);
             }
             ha_jet_fill_inflow_sd(BC_fp_x,Y_dim.sd_centers);

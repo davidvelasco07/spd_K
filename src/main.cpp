@@ -1,4 +1,5 @@
 #include "spd_k.hpp"
+#include "shock_cloud.hpp"
 #include "parameter_input.hpp"
 #include "forest.hpp"
 #include <fstream>
@@ -394,6 +395,9 @@ int main(int argc, char** argv){
             cfg.inflow_p   = cfg.pp.p0;
             cfg.inflow_vx  = cfg.pp.v1;
         }
+        //problem = shock_cloud sets no inflow signal speed: the post-shock state is in the box from t = 0, so the
+        //interior dt already sees it, and a cap taken from a state that is not flowing in (the closed-box suite
+        //lanes) would shrink the step for nothing.
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
@@ -864,7 +868,8 @@ int main(int argc, char** argv){
                 if(cfg.bc[d]==_periodic_ || cfg.bc[d]==_gradfree_) continue;
                 if(system_name=="hydro" && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
                                             cfg.bc[d]==_outflow_)) continue;
-                if(system_name=="hydro" && cfg.bc[d]==_inflow_ && d==_x_ && cfg.problem==_ic_ha_jet_) continue;
+                if(system_name=="hydro" && cfg.bc[d]==_inflow_ && d==_x_
+                   && (cfg.problem==_ic_ha_jet_ || cfg.problem==_ic_shock_cloud_)) continue;
                 if(Master)
                     cout<<"ERROR: meshblocks/AMR support periodic and gradfree boundaries, "
                         <<"plus reflective, doublemach and outflow for hydro, and inflow on x1 for "

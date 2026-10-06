@@ -33,7 +33,7 @@ Defaults are set per problem in `problem_defaults()` (`src/main.cpp`).
 | `rti` | `inputs/rti.athinput` | 2D | **reflective** in y, periodic in x; needs `hydro/g2` |
 | `orszag_tang` | `inputs/orszag_tang.athinput` | quasi-2D (`system=mhd`) | periodic; γ = 5/3; see {doc}`mhd` |
 | `field_loop` | `inputs/field_loop.athinput` | quasi-2D (`system=mhd`) | periodic; weak-field loop advection |
-| `shock_cloud` | `inputs/shock_cloud.athinput` | 2D–3D | **gradfree** on every face; γ = 5/3; `hydro/nscalars=1` |
+| `shock_cloud` | `inputs/shock_cloud.athinput` | 2D–3D | **inflow** on the low x face (the post-shock state), **gradfree** elsewhere; γ = 5/3; `hydro/nscalars=1` |
 | `user` | `inputs/user.athinput` | any | see {doc}`user_ic` |
 
 ### Sod shock tube
@@ -88,7 +88,11 @@ along +x through gas at rest (`d0`, `p0`) into a cloud of central density `d1`
 `cx, cy, cz`, in pressure equilibrium with its surroundings. The cloud has the
 soft edge of Pittard et al. (2009, eq. 18–19) with steepness `p1` (default 10).
 The shock starts `amp` radii upstream of the cloud centre (default 3) with the
-Rankine–Hugoniot state behind it. In 2D the cloud is a cylinder.
+Rankine–Hugoniot state behind it. In 2D the cloud is a cylinder. The low x
+face prescribes that post-shock state (`mesh/x1_bc=inflow`, `shock_cloud.hpp`):
+with the zero-gradient face of the paper the upstream flow drifted by 25% in
+three crushing times in 2D and ran away in 3D (ρ 28, p 13 000 against 3.9
+and 125 by nine), taking the time step with it.
 
 Cloud material is carried by passive scalar 0 (`hydro/nscalars=1`):
 κ = ρ/(χ ρ_amb) within two radii of the centre and zero beyond, the marker the

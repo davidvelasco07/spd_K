@@ -1618,6 +1618,28 @@ CONFIGS = {
         "t_end": 0.26,
         "hist_axis": (4.0, 4.0),
     },
+    # ---- The prescribed post-shock inflow of the shock-cloud deck (mesh/x1_bc=inflow, shock_cloud.hpp) ----------
+    # Open box, 16 points per radius, three crushing times: the first column of cells must still be the post-shock
+    # state (measured 1e-4), where the zero-gradient copy has drifted by 25 per cent (rho 2.8-4.3 against 3.88).
+    "hydro_shock_cloud_inflow_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=20", "mesh/x1len=20", "mesh/nx2=10", "mesh/x2len=10", "mesh/nx3=1", "meshblock/nx3=1",
+                      "problem/cy=5", "time/tlim=0.967", "output/dt=0.4835", "output/format=leaves"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "inflow_state"],
+        "t_end": 0.967,
+        "inflow_tol": 1e-3,
+    },
+    "hydro_shock_cloud_gradfree_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=20", "mesh/x1len=20", "mesh/nx2=10", "mesh/x2len=10", "mesh/nx3=1", "meshblock/nx3=1",
+                      "problem/cy=5", "time/tlim=0.967", "output/dt=0.4835", "output/format=leaves",
+                      "mesh/x1_bc=gradfree"],
+        "ndim": 2,
+        "checks": ["inflow_state_sensitive"],
+        "t_end": 0.967,
+        "inflow_floor": 1e-2,
+    },
 }
 
 
@@ -2083,6 +2105,36 @@ def check_cloud_history_sensitive(outdir, cfg, floor):
     if err is None:
         return False, msg
     return err > floor, f"{msg}: differs from the default-threshold moments by {err:.2e} (must exceed {floor:.0e})"
+
+
+def _inflow_drift(outdir, cfg):
+    """Largest relative departure of the first column of cells (the low x face) from the post-shock state of
+    the shock-cloud deck (Mach 10, gamma 5/3, ambient rho = p = 1), in the last leaf dump."""
+    gm, M = 5.0 / 3.0, 10.0
+    r2 = (gm + 1) * M * M / ((gm - 1) * M * M + 2); p2 = (2 * gm * M * M - (gm - 1)) / (gm + 1); v2 = M * np.sqrt(gm) * (1 - 1 / r2)
+    idx = spdk_io.leaf_dump_indices(outdir)
+    if not idx:
+        return None, "no leaf dump"
+    head, blocks, A, faces = spdk_io.load_leaves(outdir, idx[-1])
+    m = blocks[:, 5] < blocks[:, 5].min() + 1e-9
+    col = A[m][:, :, :, :, 0]
+    d = max(np.abs(col[:, 0] / r2 - 1).max(), np.abs(col[:, 1] / v2 - 1).max(), np.abs(col[:, 4] / p2 - 1).max())
+    return float(d), f"first column at the last dump: rho {col[:, 0].min():.4f}-{col[:, 0].max():.4f} (post-shock {r2:.4f}), p {col[:, 4].min():.2f}-{col[:, 4].max():.2f} ({p2:.2f})"
+
+
+def check_inflow_state(outdir, cfg, tol):
+    d, msg = _inflow_drift(outdir, cfg)
+    if d is None:
+        return False, msg
+    return d < tol, f"{msg}: departure {d:.2e} (limit {tol:.0e})"
+
+
+def check_inflow_state_sensitive(outdir, cfg, floor):
+    """Negative control: the zero-gradient face must have drifted."""
+    d, msg = _inflow_drift(outdir, cfg)
+    if d is None:
+        return False, msg
+    return d > floor, f"{msg}: departure {d:.2e} (must exceed {floor:.0e})"
 
 
 def check_divb(stdout, limit=1e-11):
@@ -2576,6 +2628,10 @@ def main():
             elif chk == "golden_differs":
                 ok, msg = check_golden_differs(outdir, cfg,
                                                cfg.get("differs_floor", 1e-8))
+            elif chk == "inflow_state":
+                ok, msg = check_inflow_state(outdir, cfg, cfg.get("inflow_tol", 1e-3))
+            elif chk == "inflow_state_sensitive":
+                ok, msg = check_inflow_state_sensitive(outdir, cfg, cfg.get("inflow_floor", 1e-2))
             elif chk == "leaves_consistent":
                 ok, msg = check_leaves_consistent(outdir, cfg, cfg.get("leaf_tol", 1e-12))
             elif chk == "leaves_consistent_sensitive":
@@ -2613,6 +2669,7 @@ def main():
                 ok, msg = False, (f"unknown check '{chk}' (known: "
                                   f"analytic, mass_strict, mixed_levels, divb, "
                                   f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
+                                  f"inflow_state, inflow_state_sensitive, "
                                   f"leaves_consistent, leaves_consistent_sensitive, no_composite, "
                                   f"cloud_history, cloud_history_sensitive, "
                                   f"leaves_at_most, leaves_more_than, "

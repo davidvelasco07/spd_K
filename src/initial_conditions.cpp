@@ -1,6 +1,7 @@
 #include "spd_k.hpp"
 #include "user_ic.hpp"
 #include "dmr.hpp"
+#include "shock_cloud.hpp"
 
 //All initial conditions return PRIMITIVE variables: var 0 = density,
 //_vx_/_vy_/_vz_ = velocities, _p_ = pressure. Runtime parameters come from
@@ -289,12 +290,13 @@ double shock_cloud_density(double x, double y, double z, bool ay, bool az, Probl
 KOKKOS_INLINE_FUNCTION
 double shock_cloud(int var, double x, double y, double z, double gm, bool ay, bool az, ProblemParams pp){
     if(x < pp.cx - pp.amp*pp.radius){
-        //behind the shock: Rankine-Hugoniot for Mach M into (d0, p0) at rest
-        const double M2 = pp.v1*pp.v1;
-        const double rho2 = pp.d0*(gm+1.0)*M2/((gm-1.0)*M2 + 2.0);
+        //behind the shock: Rankine-Hugoniot for Mach M into (d0, p0) at rest (shock_cloud.hpp, shared with the
+        //prescribed-inflow face)
+        double rho2, vx2, p2;
+        shock_cloud_postshock(pp, gm, rho2, vx2, p2);
         if(var==_d_)  return rho2;
-        if(var==_vx_) return pp.v1*sqrt(gm*pp.p0/pp.d0)*(1.0 - pp.d0/rho2);
-        if(var==_p_)  return pp.p0*(2.0*gm*M2 - (gm-1.0))/(gm+1.0);
+        if(var==_vx_) return vx2;
+        if(var==_p_)  return p2;
         return 0.0;
     }
     if(var==_d_) return shock_cloud_density(x,y,z,ay,az,pp);

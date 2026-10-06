@@ -1,6 +1,7 @@
 #include <map>
 #include <string>
 #include "spd_k.hpp"
+#include "shock_cloud.hpp"
 #include "dmr.hpp"
 
 double g_bc_time = 0.0;
@@ -280,6 +281,7 @@ static void jet_face_to_ghost(SD_Solution U, int dim, int side, int ib){
     const ProblemParams pp = cfg.pp;
     const int outside = cfg.inflow_outside;
     const double gm = cfg.gamma;
+    const bool shock_cloud = (cfg.problem == _ic_shock_cloud_);   //whole face = the post-shock state
     int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
     int nader=U.n_ader, nvar=U.n_var;
@@ -299,7 +301,10 @@ static void jet_face_to_ghost(SD_Solution U, int dim, int side, int ib){
             amr_indices(Nid,nid,k,j,i,kk,jj,ii,N-1,0,dim);
         }
         double u;
-        if(inject && jet_inflow_cons(var, y, pp, outside, gm, u)) v = u;
+        if(inject){
+            if(shock_cloud) v = shock_cloud_inflow_cons(var, pp, gm);
+            else if(jet_inflow_cons(var, y, pp, outside, gm, u)) v = u;
+        }
         U.Vector(INDICES) = v;
         }}
     });
@@ -345,6 +350,7 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
     const ProblemParams pp = cfg.pp;
     const int outside = cfg.inflow_outside;
     const double t = g_bc_time, gm = cfg.gamma;
+    const bool shock_cloud = (cfg.problem == _ic_shock_cloud_);
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
         //0 copy, 1 mirror, 2 post-shock, 3 undisturbed, 4 jet inflow
@@ -372,7 +378,8 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
             if(mode==1 && var == 1+dim) v = -v;
             else if(mode==2) v = dmr_cons(true,  var, gm);
             else if(mode==3) v = dmr_cons(false, var, gm);
-            else if(mode==4){ double u; if(jet_inflow_cons(var, y, pp, outside, gm, u)) v = u; }
+            else if(mode==4){ double u; if(shock_cloud) v = shock_cloud_inflow_cons(var, pp, gm);
+                              else if(jet_inflow_cons(var, y, pp, outside, gm, u)) v = u; }
             U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) = v;
         }
     }, "apply_domain_bc_fv");
