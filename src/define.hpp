@@ -99,7 +99,14 @@ enum {_E_,_b1_,_b2_,_v1_,_v2_,_Ed_,_b1d_,_b2d_};
 //the nozzle. Prescribed values live in Boundaries::InflowL; a NEGATIVE density
 //marks "not an inflow point here", and the array is initialised to that
 //sentinel so an inflow boundary nobody fills degrades to outflow.
-enum {_periodic_, _gradfree_, _reflective_, _inflow_, _outflow_, _dmr_};
+//_farfield_ (6 Oct 2026): the ghost takes the problem's EXTERIOR state at that point and time, and the face flux is
+//the Riemann flux between the interior and it: outgoing characteristics leave, incoming ones carry the exterior.
+//Measured on a 3D box of gas at rest seeded with a 1e-6 density bump: with gradfree/outflow faces the SD scheme
+//(p = 3) grows it to 2e-7 by t = 4, 6e-5 by t = 8 and 2e-3 by t = 12 (p = 2 to 4e-8, p = 1 stays at round-off;
+//1D, 2D and 3D alike, LLF or HLLC, single block or forest, fallback or not), while periodic, reflective and this
+//condition hold it at 1e-13. The copy feeds the interior polynomial's own extrapolation back in as the incoming
+//characteristic. Defined for problem = shock_cloud (shock_cloud.hpp: the exact planar shock), mesh runs only.
+enum {_periodic_, _gradfree_, _reflective_, _inflow_, _outflow_, _dmr_, _farfield_};
 //What an _inflow_ face does outside the nozzle; see Config::inflow_outside.
 enum {_jo_outflow_, _jo_ambient_, _jo_reservoir_};
 enum {_integrator_ader_, _integrator_rk_};

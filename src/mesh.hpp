@@ -828,7 +828,8 @@ struct Mesh : public PhysicsModule {
         static const bool v = [](){
             for(int d=0; d<3; d++)
                 if(cfg.active[d] && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
-                                     cfg.bc[d]==_inflow_ || cfg.bc[d]==_outflow_)) return true;
+                                     cfg.bc[d]==_inflow_ || cfg.bc[d]==_outflow_ ||
+                                     cfg.bc[d]==_farfield_)) return true;
             return false;
         }();
         return v;

@@ -50,7 +50,7 @@ problem = sine_wave
 | `p` | `3` | Polynomial order within each element |
 | `nx1`, `nx2`, `nx3` | `8` | Global element counts (set to `1` to deactivate a direction) |
 | `x1len`, `x2len`, `x3len` | `1.0` | Box lengths in each direction |
-| `x1_bc`, `x2_bc`, `x3_bc` | `periodic` | `periodic`, `gradfree`, or `reflective` |
+| `x1_bc`, `x2_bc`, `x3_bc` | `periodic` | `periodic`, `gradfree`, `reflective`, `outflow`, `inflow` (prescribed on the low x face of `ha_jet` / `shock_cloud`), `doublemach` and `farfield` (blocks only, see below) |
 
 ### `<time>`
 
@@ -139,7 +139,19 @@ for hydro also `reflective` (walls, the mirror rule of the single-block path, ve
 to 1e-15 against a single block on the implosion) and `doublemach` (the Woodward &
 Colella double Mach reflection: post-shock inflow on the left and on the bottom for
 x < 1/6, a reflecting wall beyond, the exact moving shock on the top, outflow on the
-right; `src/dmr.hpp`; needs a `<meshblock>` block). MHD walls under blocks are still
+right; `src/dmr.hpp`; needs a `<meshblock>` block), `outflow` (the zero-gradient copy of
+`gradfree` without re-entry), `inflow` on the low x face of `problem = ha_jet` or
+`shock_cloud` (the prescribed state), and `farfield` for `problem = shock_cloud`
+(`src/shock_cloud.hpp`): the ghost takes the problem's exterior state -- the exact planar
+shock, post-shock behind x_s(t), the undisturbed ambient ahead -- and the face flux is the
+Riemann flux between the interior and it, so outgoing waves leave and incoming
+characteristics carry the exterior. **The zero-gradient copy is linearly unstable for the
+SD scheme**: a box of gas at rest seeded with a 1e-6 density bump departs from rest by
+2e-7 at t = 4, 6e-5 at t = 8 and 2e-3 at t = 12 with `gradfree` or `outflow` faces at p = 3
+(p = 2 reaches 4e-8, p = 1 stays at round-off; 1D, 2D and 3D alike, with or without the
+fallback, LLF or HLLC), while `periodic`, `reflective` and `farfield` hold it at 1e-13
+(`tests/run_tests.py` `hydro_shock_cloud_farfield_quiet_2d` and its gradfree control).
+The shock-cloud deck uses `farfield` on every face. MHD walls under blocks are still
 refused.
 
 New problems: `woodward_colella` (1D interacting blasts, `inputs/woodward_colella.athinput`;

@@ -855,6 +855,22 @@ bit-identical). `SPD_MEM_TRACE=1` prints the device memory at the stations of a 
 never saw the transient. **Anything that keeps a view of a pack array across a regrid must be released before the
 pack is re-sized** -- a new whole-pack member belongs in `PackViews`, which is reset as one.
 
+## 8h. The zero-gradient boundary is linearly unstable for the SD scheme; prescribe the exterior and let the Riemann solver sort the characteristics
+
+Measured 6 Oct 2026 while the 3D shock-cloud pilots blew up in the gas AT REST ahead of the shock (deviations at the
+box edges from 9.5 crushing times, p = 1e3 by 13.5, 8.5e5 by 17; the earlier upstream runaway was the same thing on
+the inflow face). A box of gas at rest with `gradfree` or `outflow` faces, seeded with a 1e-6 density bump and
+nothing else, departs from rest by 2e-7 at t = 4, 6e-5 at t = 8 and 2e-3 at t = 12 at p = 3 (p = 2: 4e-8 at t = 12;
+p = 1 and the MUSCL fallback: round-off; 1D, 2D and 3D alike, single block or forest, LLF or HLLC, with or without
+the cascade). The copy hands the interior polynomial's own extrapolation back as the incoming characteristic, and
+the SD face flux amplifies it. `periodic`, `reflective` and the `farfield` condition (define.hpp `_farfield_`:
+ghost = the problem's exterior state at that point and time, flux = the Riemann flux against it; for the shock-cloud
+problem the exact planar shock, `shock_cloud.hpp`) hold the same box at 1e-13 for as long as it runs, and the planar
+Mach-10 shock through far-field side faces is indistinguishable from periodic ones. **An open boundary of an SD run
+needs an exterior state, not a copy**; a problem that has none should at least cap the degree there. Lanes
+`hydro_shock_cloud_farfield_quiet_2d` / `hydro_shock_cloud_gradfree_quiet_sensitive_2d` (2 s each) are the test and
+its control.
+
 ## 9. Remote runs (apollo)
 
 - `rsync` **`inputs/` and `tests/` as well as `src/`** — a stale `inputs/` once

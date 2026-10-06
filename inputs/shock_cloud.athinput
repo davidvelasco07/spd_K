@@ -10,8 +10,10 @@
 #
 # Cloud material is passive scalar 0 (kappa = rho/(chi rho_amb) within 2 r_c, zero
 # beyond), and the mesh follows it (amr/lohner_vars = scalar), not the planar shock.
-# The upstream face PRESCRIBES the post-shock state: with the zero-gradient face of
-# Pittard & Parkin the 3D pilot's upstream flow ran away by 9 crushing times.
+# Every face is a far-field boundary (the exact planar shock as the exterior state):
+# the zero-gradient faces of Pittard & Parkin are unstable for the SD scheme, which
+# ran the 3D pilot's upstream flow away by 9 crushing times and seeded a blow-up in
+# the gas at rest ahead of the shock by 13.
 # The root mesh has one element (4 degrees of freedom) per cloud radius; each level
 # doubles that: max_level = 2 is 16 per radius, 3 is 32, 4 is 64.
 #
@@ -29,9 +31,9 @@ nx3   = 20
 x1len = 70.0
 x2len = 20.0
 x3len = 20.0
-x1_bc = inflow      # low face: the post-shock state prescribed (shock_cloud.hpp); high face: outflow
-x2_bc = gradfree
-x3_bc = gradfree
+x1_bc = farfield    # every face: the exact planar shock as the exterior state, Riemann flux against it
+x2_bc = farfield    # (shock_cloud.hpp). The zero-gradient copy is unstable for SD, see define.hpp _farfield_.
+x3_bc = farfield
 
 <meshblock>
 nx1 = 10

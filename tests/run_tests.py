@@ -1624,17 +1624,58 @@ CONFIGS = {
     "hydro_shock_cloud_inflow_2d": {
         "input": "inputs/shock_cloud.athinput",
         "overrides": ["mesh/nx1=20", "mesh/x1len=20", "mesh/nx2=10", "mesh/x2len=10", "mesh/nx3=1", "meshblock/nx3=1",
+                      "problem/cy=5", "time/tlim=0.967", "output/dt=0.4835", "output/format=leaves",
+                      "mesh/x1_bc=inflow", "mesh/x2_bc=gradfree"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "inflow_state"],
+        "t_end": 0.967,
+        "inflow_tol": 1e-3,
+    },
+    # The deck's own faces (mesh/x*_bc=farfield, define.hpp _farfield_): the exterior state is the exact planar
+    # shock, so the first column is the post-shock state here too (measured 1e-4, as the prescribed inflow).
+    "hydro_shock_cloud_farfield_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=20", "mesh/x1len=20", "mesh/nx2=10", "mesh/x2len=10", "mesh/nx3=1", "meshblock/nx3=1",
                       "problem/cy=5", "time/tlim=0.967", "output/dt=0.4835", "output/format=leaves"],
         "ndim": 2,
         "checks": ["mixed_levels", "inflow_state"],
         "t_end": 0.967,
         "inflow_tol": 1e-3,
     },
+    # ---- The zero-gradient boundary is unstable for the SD scheme; the far-field one is not --------------------
+    # A box of gas at rest (the shock parked 1000 radii upstream) seeded with a 1e-6 density bump at the centre and
+    # nothing else, p = 3, to t = 12 (sound crossings: 12). Measured 6 Oct 2026 in 2D: with gradfree faces the
+    # pressure departs from 1 by 4e-9 at t = 4, 3e-4 at t = 8 and 7e-4 at t = 12 (9e-4 under the default cascade);
+    # with farfield faces it stays at 1e-14 throughout. The growth is the SD interior polynomial's extrapolation
+    # fed back in as the incoming characteristic; see define.hpp _farfield_.
+    "hydro_shock_cloud_farfield_quiet_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/x1len=8", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=4", "problem/cy=4", "problem/amp=1000", "problem/d1=1.000001",
+                      "amr/max_level=0", "time/tlim=12", "output/dt=4", "output/format=leaves", "output/hist_dt=-1"],
+        "ndim": 2,
+        "checks": ["quiet_box"],
+        "t_end": 12.0,
+        "quiet_tol": 1e-11,
+    },
+    "hydro_shock_cloud_gradfree_quiet_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=8", "mesh/x1len=8", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=4", "problem/cy=4", "problem/amp=1000", "problem/d1=1.000001",
+                      "amr/max_level=0", "time/tlim=12", "output/dt=4", "output/format=leaves", "output/hist_dt=-1",
+                      "mesh/x1_bc=gradfree", "mesh/x2_bc=gradfree"],
+        "ndim": 2,
+        "checks": ["quiet_box_sensitive"],
+        "t_end": 12.0,
+        "quiet_floor": 1e-6,
+    },
     "hydro_shock_cloud_gradfree_sensitive_2d": {
         "input": "inputs/shock_cloud.athinput",
         "overrides": ["mesh/nx1=20", "mesh/x1len=20", "mesh/nx2=10", "mesh/x2len=10", "mesh/nx3=1", "meshblock/nx3=1",
                       "problem/cy=5", "time/tlim=0.967", "output/dt=0.4835", "output/format=leaves",
-                      "mesh/x1_bc=gradfree"],
+                      "mesh/x1_bc=gradfree", "mesh/x2_bc=gradfree"],
         "ndim": 2,
         "checks": ["inflow_state_sensitive"],
         "t_end": 0.967,
@@ -2137,6 +2178,32 @@ def check_inflow_state_sensitive(outdir, cfg, floor):
     return d > floor, f"{msg}: departure {d:.2e} (must exceed {floor:.0e})"
 
 
+def _quiet_box_departure(outdir, cfg):
+    """Largest departure of the pressure from 1 and of the velocity from 0 over every leaf of the LAST leaf dump
+    (the box holds gas at rest at unit pressure; only the 1e-6 density bump is seeded)."""
+    idx = spdk_io.leaf_dump_indices(outdir)
+    if not idx:
+        return None, "no leaf dump written"
+    head, blocks, A, faces = spdk_io.load_leaves(outdir, idx[-1])
+    d = max(float(np.abs(A[:, 4] - 1.0).max()), float(np.abs(A[:, 1:4]).max()))
+    return d, f"leaf dump {idx[-1]} ({len(blocks)} leaves)"
+
+
+def check_quiet_box(outdir, cfg, tol):
+    d, msg = _quiet_box_departure(outdir, cfg)
+    if d is None:
+        return False, msg
+    return d < tol, f"{msg}: max |p-1|, |v| = {d:.2e} (limit {tol:.0e})"
+
+
+def check_quiet_box_sensitive(outdir, cfg, floor):
+    """Negative control: the zero-gradient faces must have amplified the seed."""
+    d, msg = _quiet_box_departure(outdir, cfg)
+    if d is None:
+        return False, msg
+    return d > floor, f"{msg}: max |p-1|, |v| = {d:.2e} (must exceed {floor:.0e})"
+
+
 def check_divb(stdout, limit=1e-11):
     """max|divB| diagnostics printed by the MHD module at every output."""
     vals = [float(v) for v in re.findall(r"max\|divB\| = ([-\d.e+]+(?:inf)?)",
@@ -2632,6 +2699,10 @@ def main():
                 ok, msg = check_inflow_state(outdir, cfg, cfg.get("inflow_tol", 1e-3))
             elif chk == "inflow_state_sensitive":
                 ok, msg = check_inflow_state_sensitive(outdir, cfg, cfg.get("inflow_floor", 1e-2))
+            elif chk == "quiet_box":
+                ok, msg = check_quiet_box(outdir, cfg, cfg.get("quiet_tol", 1e-11))
+            elif chk == "quiet_box_sensitive":
+                ok, msg = check_quiet_box_sensitive(outdir, cfg, cfg.get("quiet_floor", 1e-6))
             elif chk == "leaves_consistent":
                 ok, msg = check_leaves_consistent(outdir, cfg, cfg.get("leaf_tol", 1e-12))
             elif chk == "leaves_consistent_sensitive":
