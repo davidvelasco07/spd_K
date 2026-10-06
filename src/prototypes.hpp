@@ -226,6 +226,26 @@ extern int  update_cascade(FV_Solution flagged, FV_Solution cascade, int n_casca
 extern void assign_face_flux(FV_Solution F0, FV_Solution F1, FV_Solution F2,
                              FV_Solution cascade, int dim);
 
+//Moments of the material marked by a passive scalar, summed over a whole pack in one launch (output/hist_dt,
+//hydro.cpp scalar_moments_b). Two groups of eight -- concentration >= beta0, then >= beta1 -- each holding
+//  m = sum kappa rho V,  V,  sum w x,  sum w x^2,  sum w v_x,  sum w v_x^2,  sum w r^2,  sum w v_r^2   (w = kappa rho V)
+//and then the totals over every cell: v[16] = sum kappa rho V, v[17] = sum rho V.
+struct ScalarMoments {
+    double v[18];
+    KOKKOS_INLINE_FUNCTION ScalarMoments(){ for(int q=0;q<18;q++) v[q]=0.0; }
+    KOKKOS_INLINE_FUNCTION ScalarMoments& operator+=(const ScalarMoments& o){
+        for(int q=0;q<18;q++) v[q]+=o.v[q];
+        return *this;
+    }
+};
+namespace Kokkos {
+template<> struct reduction_identity<ScalarMoments> {
+    KOKKOS_FORCEINLINE_FUNCTION static ScalarMoments sum(){ return ScalarMoments(); }
+};
+}
+ScalarMoments scalar_moments_b(SD_Solution W, Matrix fxm, Matrix fym, Matrix fzm, int row,
+                               double cy, double cz, double beta0, double beta1);
+
 //SPD_FV_ONLY_SD: 0 unset (pure MUSCL skips the SD path), 1 the pre-skip
 //reference, 2 run the path but take the fallback flux (see hydro.cpp).
 int fv_only_sd_mode();

@@ -51,6 +51,8 @@ class PhysicsModule {
   virtual double ComputeDt() = 0;
   // Write outputs for the current state.
   virtual void WriteOutputs() = 0;
+  // One row of light integrated diagnostics (output/hist_dt). Optional: a module without a history writes none.
+  virtual void WriteHistory() {}
 };
 
 //----------------------------------------------------------------------------------------
@@ -122,6 +124,13 @@ class Driver {
     Kokkos::Timer timer;
     double t_io = 0;
     int step0 = pmod->n_step;
+    //History (output/hist_dt): a row at the start, at the first step past every multiple of hist_dt, and with every
+    //dump. Unlike a dump it never truncates a step -- the cadence must not drive the timestep (see below) -- so a
+    //row carries the time the run actually reached.
+    const bool hist = cfg.hist_dt > 0.0;
+    double t_hist = cfg.hist_dt;
+    int hist_step = -1;
+    if (hist) { pmod->WriteHistory(); hist_step = pmod->n_step; }
 
     while (pmod->t < t_end) {
       ExecuteTaskList("before_timeintegrator", 0);
@@ -167,6 +176,7 @@ class Driver {
           Kokkos::fence();
           Kokkos::Timer io_timer;
           pmod->WriteOutputs();
+          if (hist && hist_step != pmod->n_step) { pmod->WriteHistory(); hist_step = pmod->n_step; }
           t_io += io_timer.seconds();
         }
         //Land exactly on the next output time -- but ONLY as a truncation of a
@@ -179,6 +189,10 @@ class Driver {
         //temporary). The cadence must never drive the timestep.
         if (!sub_cycle && pmod->t + pmod->dt > t_output)
           pmod->dt = t_output - pmod->t;
+      }
+      if (hist && pmod->t >= t_hist) {
+        do { t_hist += cfg.hist_dt; } while (t_hist <= pmod->t);
+        if (hist_step != pmod->n_step) { pmod->WriteHistory(); hist_step = pmod->n_step; }
       }
     }
     Kokkos::fence();

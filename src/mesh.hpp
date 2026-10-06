@@ -180,7 +180,7 @@ struct Mesh : public PhysicsModule {
         for(int b=1;b<nblocks;b++)
             this->Dt = std::min(this->Dt, blocks[b].Dt);
 
-        init_W_glob(X_dim, Y_dim, Z_dim, x_fp);
+        if(cfg.out_format != 1) init_W_glob(X_dim, Y_dim, Z_dim, x_fp);   //no composite under output/format=leaves
         if(Master)
             std::cout<<"forest blocks = "<<nblocks<<" max_level = "<<forest.max_level()
                 <<" NB = ("<<NBx<<","<<NBy<<","<<NBz<<") dt = "<<this->Dt<<std::endl;
@@ -3425,6 +3425,12 @@ struct Mesh : public PhysicsModule {
             for(int n=0; n<cfg.nscal; n++) f<<" "<<total_scalar(n);
             f<<std::endl;
         }
+        if(cfg.out_format != 0) write_leaves();
+        if(cfg.out_format == 1){   //leaves only: no composite array exists (it is the size of the finest uniform grid)
+            Write_amr_blocks(forest, this->n_output, NBx, NBy, NBz);
+            this->n_output++;
+            return;
+        }
         int M = forest.max_level();
         if(M>0){
             Kokkos::deep_copy(W_glob.Vector, 0.0);
@@ -3448,6 +3454,109 @@ struct Mesh : public PhysicsModule {
         Write_amr_blocks(forest, this->n_output, NBx, NBy, NBz);
         this->n_output++;
     }
+
+    //Leaf-wise dump (output/format = leaves | both): the ACTIVE control volumes of every leaf, block after block in
+    //the order of amr_blocks_<n>.txt, as one C-order array
+    //    (nblocks, nvar, NBz, NBy, NBx, nz, ny, nx)      float64, or float32 under output/precision=single (.f32)
+    //in leaves_cv_N<NBx>p<p>_<n>_<rank>.dat. It costs the degrees of freedom the run carries, where the composite
+    //costs the finest uniform grid (44 GB for the shock-cloud box at 32 points per radius, and as a device array).
+    //A leaf's cells are not equally wide (CLAUDE.md rule 6): leaf_faces_p<p>_<rank>.dat holds the n+1 sub-cell faces
+    //of the unit element, and a leaf's extent is in the block table. System-neutral: it reads W_cv's own row count.
+    //The per-block loop is an output-time one (rule 1): one device->host copy per leaf.
+    void write_leaves(){
+        Kokkos::fence();
+        const int p = Xd[0].p;
+        if(!leaf_faces_written_ && Master){
+            Vector_h fh = setup_mirror(Xd[0].fv_faces);
+            setup_pull(Xd[0].fv_faces, fh);
+            const int n = Xd[0].n_sp, g = nGHx;
+            std::vector<double> f(n+1);
+            for(int q=0;q<=n;q++) f[q] = (fh(g+q)-fh(g))/(fh(g+n)-fh(g));
+            Write_arrays(f.data(), f.size(), output_folder()+"leaf_faces_p"+std::to_string(p)+"_"
+                                             +std::to_string(cpu_rank)+".dat");
+            leaf_faces_written_ = true;
+        }
+        const std::string path = output_folder()+"leaves_cv_N"+std::to_string(NBx)+"p"+std::to_string(p)+"_"
+                                 +std::to_string(this->n_output)+"_"+std::to_string(cpu_rank)
+                                 +(cfg.out_single ? ".f32" : ".dat");
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        std::vector<double> buf;
+        std::vector<float> fbuf;
+        for(int ib=0; ib<nblocks; ib++){
+            SD_Solution& W = blocks[ib].W_cv;
+            auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), W.Vector);
+            const int nvar=W.n_var, Nz=W.Nz, Ny=W.Ny, Nx=W.Nx, nz=W.nz, ny=W.ny, nx=W.nx;
+            buf.resize((size_t)nvar*(Nz-2*NGHz)*(Ny-2*NGHy)*(Nx-2*NGHx)*nz*ny*nx);
+            size_t q = 0;
+            for(int var=0; var<nvar; var++)
+            for(int k=NGHz; k<Nz-NGHz; k++)
+            for(int j=NGHy; j<Ny-NGHy; j++)
+            for(int i=NGHx; i<Nx-NGHx; i++)
+            for(int kk=0; kk<nz; kk++)
+            for(int jj=0; jj<ny; jj++)
+            for(int ii=0; ii<nx; ii++)
+                buf[q++] = h(0,var,k,j,i,kk,jj,ii);
+            if(cfg.out_single){
+                fbuf.assign(buf.begin(), buf.end());
+                out.write(reinterpret_cast<const char*>(fbuf.data()), fbuf.size()*sizeof(float));
+            } else
+                out.write(reinterpret_cast<const char*>(buf.data()), buf.size()*sizeof(double));
+        }
+        if(!out){
+            if(Master) std::cout<<"ERROR: could not write "<<path<<std::endl;
+            exit(1);
+        }
+    }
+    bool leaf_faces_written_ = false;
+
+    //One row of cloud_history.txt (output/hist_dt): the moments of the material marked by passive scalar 0 in the
+    //definitions of Pittard et al. (2009, MNRAS 394, 1351, eq. 20-24), for the two thresholds cfg.hist_beta --
+    //    m = int_{kappa>=beta} kappa rho dV,   <f> = (1/m) int_{kappa>=beta} kappa rho f dV,   <rho> = m/V_beta,
+    //    a = [5/2 <r^2>]^(1/2) about the axis (y,z) = (problem/cy, cz),   c = [5(<x^2> - <x>^2)]^(1/2),
+    //    dv_r = <v_r^2>^(1/2),   dv_x = (<v_x^2> - <v_x>^2)^(1/2)
+    //-- with the total mass and scalar. One pack-wide launch per row (scalar_moments_b), from the W_cv that the
+    //step's own cons-to-prim left current. is_hydro: the MHD state has no scalar rows, and main.cpp refuses
+    //output/hist_dt there, so there is no MHD side to keep in step.
+    void WriteHistory() override {
+        if constexpr (is_hydro){
+            Kokkos::fence();
+            const ScalarMoments s = scalar_moments_b(pv.W_cv, fvx_p, fvy_p, fvz_p, NVAR,
+                                                     cfg.pp.cy, cfg.pp.cz, cfg.hist_beta[0], cfg.hist_beta[1]);
+            if(!Master) return;
+            const std::string path = output_folder()+"cloud_history.txt";
+            std::ofstream f(path, hist_started_ ? std::ios::app : std::ios::trunc);
+            f<<std::setprecision(13);
+            if(!hist_started_){
+                f<<"# Moments of the material marked by passive scalar 0 (kappa), Pittard et al. (2009) eq. 20-24:\n"
+                 <<"#   m = int_{kappa>=beta} kappa rho dV, <f> = (1/m) int kappa rho f dV, rho = m/V_beta,\n"
+                 <<"#   a = [5/2 <r^2>]^(1/2) about the axis y = "<<cfg.pp.cy<<", z = "<<cfg.pp.cz
+                 <<", c = [5(<x^2>-<x>^2)]^(1/2), dv_r = <v_r^2>^(1/2), dv_x = (<v_x^2>-<v_x>^2)^(1/2)\n"
+                 <<"# beta_core = "<<cfg.hist_beta[0]<<"  beta_cloud = "<<cfg.hist_beta[1]<<"\n";
+                if(cfg.problem == _ic_shock_cloud_){
+                    const double vb = cfg.pp.v1*sqrt(cfg.gamma*cfg.pp.p0/cfg.pp.d0);
+                    f<<"# shock_cloud: chi = "<<cfg.pp.d1/cfg.pp.d0<<"  r_c = "<<cfg.pp.radius<<"  v_b = "<<vb
+                     <<"  t_cc = "<<sqrt(cfg.pp.d1/cfg.pp.d0)*cfg.pp.radius/vb
+                     <<"  t_0 = "<<cfg.pp.amp*cfg.pp.radius/vb<<" (shock level with the cloud centre)\n";
+                }
+                f<<"# columns: step t leaves mass scalar | core: m rho x vx a c dv_r dv_x | cloud: m rho x vx a c dv_r dv_x\n";
+                hist_started_ = true;
+            }
+            f<<this->n_step<<" "<<this->t<<" "<<nblocks<<" "<<s.v[17]<<" "<<s.v[16];
+            for(int g=0; g<2; g++){
+                const double* q = s.v + 8*g;
+                const double m = q[0];
+                if(m > 0.0){
+                    const double x = q[2]/m, vx = q[4]/m;
+                    f<<" "<<m<<" "<<m/q[1]<<" "<<x<<" "<<vx<<" "<<sqrt(2.5*q[6]/m)
+                     <<" "<<sqrt(std::max(5.0*(q[3]/m - x*x),0.0))<<" "<<sqrt(q[7]/m)
+                     <<" "<<sqrt(std::max(q[5]/m - vx*vx,0.0));
+                } else
+                    f<<" 0 0 0 0 0 0 0 0";
+            }
+            f<<std::endl;
+        }
+    }
+    bool hist_started_ = false;
 
     std::map<BlockForest::BlockKey,int> snapshot_keys(){
         std::map<BlockForest::BlockKey,int> m;
@@ -3908,7 +4017,7 @@ struct Mesh : public PhysicsModule {
             std::cout<<std::endl;
         }
         { STAGE("amr/recompute_dt"); recompute_dt(); }
-        if(forest.max_level() != old_M)
+        if(forest.max_level() != old_M && cfg.out_format != 1)
             init_W_glob(Xg, Yg, Zg, x_fp_);
     }
 };

@@ -465,6 +465,24 @@ int main(int argc, char** argv){
         cfg.outputs = pin.DoesParameterExist("output","dt")
                       && pin.GetReal("output","dt") > 0.0;
         double dt_output = cfg.outputs ? pin.GetReal("output","dt") : tlim;
+        //output/format: what a mesh run dumps. `composite` is W_cv prolonged onto the finest uniform grid, one array
+        //for the whole box -- 44 GB, on the device too, for the shock-cloud box at 32 points per radius -- and
+        //`leaves` is every leaf's own control volumes in the order of amr_blocks_<n>.txt, which costs the degrees of
+        //freedom the run actually carries. `both` writes the two (small runs, and the test that they agree).
+        {   const string of = pin.GetOrAddString("output","format","composite");
+            if(of=="composite")   cfg.out_format = 0;
+            else if(of=="leaves") cfg.out_format = 1;
+            else if(of=="both")   cfg.out_format = 2;
+            else { if(Master) cout<<"ERROR: output/format = '"<<of<<"' (expected composite, leaves or both)"<<endl; exit(1); }
+            const string op = pin.GetOrAddString("output","precision","double");
+            if(op=="single")      cfg.out_single = true;
+            else if(op!="double"){ if(Master) cout<<"ERROR: output/precision = '"<<op<<"' (expected double or single)"<<endl; exit(1); } }
+        //output/hist_dt: the history of the material marked by passive scalar 0 (cloud_history.txt). The thresholds
+        //default to the "core" and "cloud" of Pittard et al. (2009): 0.5 and, for problem = shock_cloud, 2/chi.
+        cfg.hist_dt = pin.GetOrAddReal("output","hist_dt",0.0);
+        cfg.hist_beta[0] = pin.GetOrAddReal("output","hist_beta_core",0.5);
+        cfg.hist_beta[1] = pin.GetOrAddReal("output","hist_beta_cloud",
+                               cfg.problem==_ic_shock_cloud_ ? 2.0*cfg.pp.d0/cfg.pp.d1 : 0.1);
         select_integrator(pin.GetOrAddString("time","integrator","ader"));
 
         //The FV fallback has to match the temporal treatment of the scheme it
@@ -777,6 +795,16 @@ int main(int argc, char** argv){
             r.zmin = pin.GetOrAddReal(bname,"x3min",0.0);
             r.zmax = pin.GetOrAddReal(bname,"x3max",1.0);
             refinements.push_back(r);
+        }
+
+        if(cfg.out_format != 0 && !use_mesh){
+            if(Master) cout<<"ERROR: output/format = leaves|both is a mesh dump: it needs <meshblock> or amr/max_level > 0"<<endl;
+            exit(1);
+        }
+        if(cfg.hist_dt > 0.0 && (!use_mesh || system_name != "hydro" || cfg.nscal < 1)){
+            if(Master) cout<<"ERROR: output/hist_dt > 0 writes the history of passive scalar 0: it needs job/system = hydro, "
+                             "hydro/nscalars >= 1 and a mesh run (<meshblock> or amr/max_level > 0)"<<endl;
+            exit(1);
         }
 
         if(use_mesh){

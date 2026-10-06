@@ -1323,3 +1323,52 @@ void fallback_fluxes(FV_Solution U, FV_Solution theta, Vector x_c, Vector x_f, F
                      double dt){
     NSCAL_DISPATCH(fallback_fluxes_ns, U, theta, x_c, x_f, F_x, y_c, y_f, F_y, z_c, z_f, F_z, ader, w, dt);
 }
+
+//Moments of the material marked by passive scalar `row` over a whole pack (output/hist_dt; the struct is in
+//prototypes.hpp). W is the PRIMITIVE cell-average pack (W_cv), so kappa*rho is the conserved average rho*s and the
+//weight w = kappa rho V is the scalar's mass in the control volume. x is along the first direction; r and v_r are
+//measured from the axis y = cy, z = cz (in 2D, from the line y = cy). One launch for every block: the block index is
+//a kernel axis (CLAUDE.md rule 1), and the geometry comes from the packed face coordinates, a row per block.
+ScalarMoments scalar_moments_b(SD_Solution W, Matrix fxm, Matrix fym, Matrix fzm, int row,
+                               double cy, double cz, double beta0, double beta1){
+    const int Nx=W.Nx, Ny=W.Ny, Nz=W.Nz, nx=W.nx, ny=W.ny, nz=W.nz, nb=W.nb, nader=W.n_ader;
+    const int Mz=Nz-2*NGHz, My=Ny-2*NGHy, Mx=Nx-2*NGHx;
+    const int64_t total = (int64_t)nb*Mz*My*Mx*nz*ny*nx;
+    ScalarMoments out;
+    if(total <= 0) return out;
+    const bool ay=cfg.active[_y_], az=cfg.active[_z_];
+    const int qx=nx, qy=ny, qz=nz;
+    GHOST_LOCALS;
+    SD_Vector A = W.Vector;
+    Kokkos::parallel_reduce("scalar_moments_b", flat_range(0,flat_total(total)),
+        KOKKOS_LAMBDA(const unsigned idx, ScalarMoments& s){
+            int b,k,j,i,kk,jj,ii;
+            flat_index7(idx,Mz,My,Mx,nz,ny,nx,ghz,ghy,ghx,b,k,j,i,kk,jj,ii);
+            const int boff = b*nader;
+            const double x = 0.5*(fxm(b,I)+fxm(b,I+1));
+            double V = fxm(b,I+1)-fxm(b,I);
+            double dy = 0.0, dz = 0.0;
+            if(ay){ V *= fym(b,J+1)-fym(b,J); dy = 0.5*(fym(b,J)+fym(b,J+1)) - cy; }
+            if(az){ V *= fzm(b,K+1)-fzm(b,K); dz = 0.5*(fzm(b,K)+fzm(b,K+1)) - cz; }
+            const double rho = A(boff,_d_,k,j,i,kk,jj,ii);
+            const double vx  = A(boff,_vx_,k,j,i,kk,jj,ii);
+            const double vy  = A(boff,_vy_,k,j,i,kk,jj,ii);
+            const double vz  = A(boff,_vz_,k,j,i,kk,jj,ii);
+            const double kap = A(boff,row,k,j,i,kk,jj,ii);
+            const double r2  = dy*dy + dz*dz;
+            const double vr  = r2 > 0.0 ? (vy*dy + vz*dz)/sqrt(r2) : 0.0;
+            const double w   = kap*rho*V;
+            for(int g=0; g<2; g++){
+                if(kap >= (g==0 ? beta0 : beta1)){
+                    double* q = s.v + 8*g;
+                    q[0] += w;     q[1] += V;
+                    q[2] += w*x;   q[3] += w*x*x;
+                    q[4] += w*vx;  q[5] += w*vx*vx;
+                    q[6] += w*r2;  q[7] += w*vr*vr;
+                }
+            }
+            s.v[16] += w;
+            s.v[17] += rho*V;
+        }, Kokkos::Sum<ScalarMoments>(out));
+    return out;
+}

@@ -146,3 +146,60 @@ def total_mass(grid, i, prefix="W_cv"):
     if grid.active(2):
         V = V * w(2)[:, None, None]
     return float((rho * V).sum())
+
+
+def leaf_dump_indices(outdir):
+    """Sorted output indices of the leaf-wise dumps (output/format = leaves | both)."""
+    idx = []
+    for f in glob.glob(os.path.join(outdir, "leaves_cv_N*p*_*_0.*")):
+        m = re.match(r"leaves_cv_N\d+p\d+_(\d+)_0\.(dat|f32)$", os.path.basename(f))
+        if m:
+            idx.append(int(m.group(1)))
+    return sorted(set(idx))
+
+
+def load_leaves(outdir, i):
+    """Leaf-wise dump i: the active control volumes of every leaf of the forest.
+
+    Returns (head, blocks, A, faces):
+      head    dict of the amr_blocks_<i>.txt header: nblocks, max_level, ndim, NB (x,y,z), Nf (x,y,z)
+      blocks  float array, one row per leaf: ib level lx ly lz x0 x1 y0 y1 z0 z1
+      A       cells of every leaf, shape (nblocks, nvar, NBz*nz, NBy*ny, NBx*nx) (1 along an inactive direction)
+      faces   the n+1 sub-cell faces of the unit element (a leaf's cells are not equally wide)
+    A leaf's cell edges along x are x0 + (x1-x0)/NBx * (e + faces[q]) for element e and point q; see leaf_edges.
+    """
+    fs = [f for f in glob.glob(os.path.join(outdir, f"leaves_cv_N*p*_{i}_0.*"))
+          if re.search(rf"_{i}_0\.(dat|f32)$", f)]
+    if not fs:
+        raise FileNotFoundError(f"no leaf dump {i} in {outdir}")
+    f = fs[0]
+    n = int(re.search(r"p(\d+)_", os.path.basename(f)).group(1)) + 1
+    rows = [l.split() for l in open(os.path.join(outdir, f"amr_blocks_{i}.txt"))
+            if l.strip() and not l.startswith("#")]
+    h = [int(v) for v in rows[0]]
+    head = {"nblocks": h[0], "max_level": h[1], "ndim": h[2], "NB": tuple(h[3:6]), "Nf": tuple(h[6:9])}
+    blocks = np.array(rows[1:], dtype=float)
+    act = [True, head["ndim"] >= 2, head["ndim"] >= 3]                      # x, y, z
+    NB = [head["NB"][d] if act[d] else 1 for d in range(3)]
+    nn = [n if act[d] else 1 for d in range(3)]
+    raw = np.fromfile(f, dtype=np.float32 if f.endswith(".f32") else np.float64)
+    per = head["nblocks"] * NB[0] * NB[1] * NB[2] * nn[0] * nn[1] * nn[2]
+    if raw.size % per:
+        raise ValueError(f"{os.path.basename(f)}: {raw.size} values is not a multiple of {per}")
+    A = raw.reshape(head["nblocks"], raw.size // per, NB[2], NB[1], NB[0], nn[2], nn[1], nn[0])
+    A = A.transpose(0, 1, 2, 5, 3, 6, 4, 7).reshape(head["nblocks"], -1, NB[2] * nn[2], NB[1] * nn[1], NB[0] * nn[0])
+    ff = glob.glob(os.path.join(outdir, f"leaf_faces_p{n-1}_0.dat"))
+    faces = np.fromfile(ff[0]) if ff else np.linspace(0.0, 1.0, n + 1)
+    return head, blocks, A, faces
+
+
+def leaf_edges(head, block, faces, d):
+    """Cell edges of one leaf along direction d (0 x, 1 y, 2 z); [lo, hi] for an inactive direction."""
+    lo, hi = block[5 + 2 * d], block[6 + 2 * d]
+    if d >= head["ndim"]:
+        return np.array([lo, hi])
+    NB = head["NB"][d]
+    h = (hi - lo) / NB
+    e = (np.arange(NB)[:, None] + faces[None, :-1]).ravel()
+    return lo + h * np.append(e, NB)
+

@@ -170,6 +170,14 @@ struct RunConfig {
                                          //scale); keep off unless needed — relative NAD on
                                          //near-zero velocity components over-triggers.
     bool outputs = false;                //file outputs (opt-in via <output> block)
+    int  out_format = 0;                 //output/format: 0 composite (W_cv on the finest uniform grid, the
+                                         //historical dump), 1 leaves (every leaf's own cells, no composite array
+                                         //is ever allocated), 2 both. Mesh runs only.
+    bool out_single = false;             //output/precision = single: the leaf dump in float32
+    double hist_dt = 0.0;                //output/hist_dt > 0: moments of the material marked by passive scalar 0,
+                                         //written to cloud_history.txt every hist_dt of simulated time and at
+                                         //every dump, without ever truncating a step (CLAUDE.md rule 7e)
+    double hist_beta[2] = {0.5, 0.1};    //output/hist_beta_core, hist_beta_cloud: the two concentration thresholds
     ProblemParams pp;                    //initial-condition parameters
     //Prescribed-inflow signal speed, for the TIMESTEP.
     //

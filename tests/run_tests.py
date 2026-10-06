@@ -1533,6 +1533,91 @@ CONFIGS = {
         "t_end": 0.3,
         "leaf_limit": 55,
     },
+    # ---- Leaf-wise dump (output/format) and the cloud history (output/hist_dt) -----------------------------------
+    # The closed-box shock-cloud lane writing BOTH dumps: the leaf dump must give the mass and scalar totals the code
+    # wrote, equal the composite value for value on the finest leaves, and the history row at the last dump must be
+    # the sixteen moments recomputed from that leaf dump (measured 5 Oct 2026: 1e-15, 0.0 exactly, 1e-13).
+    "hydro_leaf_dump_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "output/hist_dt=0.02", "output/format=both"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "leaves_consistent", "cloud_history"],
+        "field": "W_cv_N64p3_3_0.dat",
+        "t_end": 0.3,
+        "hist_axis": (4.0, 10.0),
+    },
+    # Leaves only, the production mode: no composite is written (nor allocated), the totals still close.
+    "hydro_leaf_dump_only_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "output/hist_dt=0.02", "output/format=leaves"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mass_strict", "no_composite", "leaves_consistent", "cloud_history"],
+        "t_end": 0.3,
+        "hist_axis": (4.0, 10.0),
+    },
+    # ... and in single precision (output/precision=single), where the totals close to float32.
+    "hydro_leaf_dump_single_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "output/hist_dt=0.02", "output/format=leaves", "output/precision=single"],
+        "ndim": 2,
+        "checks": ["no_composite", "leaves_consistent"],
+        "t_end": 0.3,
+        "leaf_tol": 1e-6,
+    },
+    # Controls (rule 7): an earlier leaf dump against the later composite must disagree, and a history written with
+    # another core threshold must not match the moments of the default one.
+    "hydro_leaf_dump_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "output/hist_dt=0.02", "output/format=both"],
+        "ndim": 2,
+        "checks": ["leaves_consistent_sensitive"],
+        "field": "W_cv_N64p3_3_0.dat",
+        "t_end": 0.3,
+        "leaf_index": 2,
+    },
+    "hydro_cloud_history_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=16", "mesh/x1len=16", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=1",
+                      "problem/cx=5", "problem/cy=4", "mesh/x1_bc=reflective", "mesh/x2_bc=periodic",
+                      "amr/max_level=2", "amr/adapt_interval=5", "time/tlim=0.3", "output/dt=0.1",
+                      "output/hist_dt=0.02", "output/format=leaves", "output/hist_beta_core=0.9"],
+        "ndim": 2,
+        "checks": ["cloud_history_sensitive"],
+        "t_end": 0.3,
+        "hist_axis": (4.0, 10.0),
+    },
+    # Three dimensions: the z geometry of the leaf dump and the radial moments about an axis.
+    "hydro_leaf_dump_3d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=12", "mesh/x1len=12", "mesh/nx2=8", "mesh/x2len=8", "mesh/nx3=8", "mesh/x3len=8",
+                      "meshblock/nx1=4", "meshblock/nx2=4", "meshblock/nx3=4",
+                      "problem/cx=5", "problem/cy=4", "problem/cz=4",
+                      "mesh/x1_bc=reflective", "mesh/x2_bc=periodic", "mesh/x3_bc=periodic",
+                      "amr/max_level=1", "amr/adapt_interval=5", "time/tlim=0.26", "output/dt=0.13",
+                      "output/hist_dt=0.05", "output/format=both"],
+        "ndim": 3,
+        "checks": ["mixed_levels", "mass_strict", "scalar_mass", "leaves_consistent", "cloud_history"],
+        "field": "W_cv_N24p3_2_0.dat",
+        "t_end": 0.26,
+        "hist_axis": (4.0, 4.0),
+    },
 }
 
 
@@ -1658,7 +1743,8 @@ def sorted_outputs(outdir):
 
 def field_dumps(outdir):
     """Every cell-average field dump, whichever variable a config writes."""
-    return sorted(glob.glob(os.path.join(outdir, "*_cv_N*p*_*.dat")),
+    return sorted(glob.glob(os.path.join(outdir, "*_cv_N*p*_*.dat"))
+                  + glob.glob(os.path.join(outdir, "leaves_cv_N*p*_*.f32")),
                   key=lambda f: (os.path.basename(f).split("_cv_")[0],
                                  output_index(f)))
 
@@ -1673,7 +1759,7 @@ def check_finite(outdir, cfg):
         return False, "no field output files found"
     bad = []
     for f in outs:
-        A = np.fromfile(f)
+        A = np.fromfile(f, dtype=np.float32 if f.endswith(".f32") else np.float64)
         n_bad = int((~np.isfinite(A)).sum())
         if n_bad:
             bad.append(f"{os.path.basename(f)} {100.0 * n_bad / A.size:.1f}%")
@@ -1838,6 +1924,165 @@ def check_leaves_more_than(outdir, cfg):
     if n is None:
         return False, "no amr_blocks_*.txt written"
     return n > cfg["leaf_limit"], f"at most {n} leaves over the outputs (must exceed {cfg['leaf_limit']})"
+
+
+def _leaf_volumes(head, blk, faces):
+    """Cell volumes (areas, lengths) of one leaf, shape (nz_c, ny_c, nx_c), and its cell centres per direction."""
+    e = [spdk_io.leaf_edges(head, blk, faces, d) for d in range(3)]
+    V = np.diff(e[2])[:, None, None] * np.diff(e[1])[None, :, None] * np.diff(e[0])[None, None, :]
+    for d in range(head["ndim"], 3):                    # an inactive direction contributes no length
+        V = V / (e[d][1] - e[d][0])
+    return V, [0.5 * (q[1:] + q[:-1]) for q in e]
+
+
+def _leaf_vs_composite(outdir, cfg, i_leaf):
+    """Leaf dump i_leaf against the run's own totals and, when cfg['field'] exists, against the composite dump:
+    returns (mass error, scalar error or None, finest leaves compared, max pointwise difference on them,
+    max block-mean difference on coarser leaves relative to the field's scale)."""
+    head, blocks, A, faces = spdk_io.load_leaves(outdir, i_leaf)
+    M = _columns(outdir, "mass.txt"); S = _columns(outdir, "scalar.txt")
+    mass = scal = 0.0
+    for b, blk in enumerate(blocks):
+        V, _ = _leaf_volumes(head, blk, faces)
+        mass += float((A[b, 0] * V).sum())
+        if A.shape[1] > NVAR:
+            scal += float((A[b, 0] * A[b, NVAR] * V).sum())
+    i_tot = cfg.get("total_index", i_leaf)
+    e_m = abs(mass - M[i_tot, 1]) / abs(M[i_tot, 1])
+    e_s = abs(scal - S[i_tot, 1]) / abs(S[i_tot, 1]) if (S is not None and A.shape[1] > NVAR) else None
+    comp = os.path.join(outdir, cfg.get("field", ""))
+    if not cfg.get("field") or not os.path.isfile(comp):
+        return e_m, e_s, 0, None, None
+    n = len(faces) - 1
+    act = [True, head["ndim"] >= 2, head["ndim"] >= 3]
+    Nf = [head["Nf"][d] if act[d] else 1 for d in range(3)]
+    nn = [n if act[d] else 1 for d in range(3)]
+    Ne = [Nf[d] + 2 * NGH if act[d] else 1 for d in range(3)]
+    C = np.fromfile(comp).reshape(-1, Ne[2], Ne[1], Ne[0], nn[2], nn[1], nn[0])
+    C = C[(slice(None),) + tuple(slice(NGH, -NGH) if act[d] else slice(None) for d in (2, 1, 0))]
+    C = C.transpose(0, 1, 4, 2, 5, 3, 6).reshape(C.shape[0], Nf[2] * nn[2], Nf[1] * nn[1], Nf[0] * nn[0])
+    scale = np.abs(C).reshape(C.shape[0], -1).max(1)
+    scale[scale == 0.0] = 1.0
+    n_fine, pt, mean = 0, 0.0, 0.0
+    for b, blk in enumerate(blocks):
+        s = 2 ** (head["max_level"] - int(blk[1]))
+        sl = []
+        for d in (2, 1, 0):
+            if act[d]:
+                w = head["NB"][d] * s * n
+                sl.append(slice(int(blk[2 + d]) * w, (int(blk[2 + d]) + 1) * w))
+            else:
+                sl.append(slice(None))
+        sub = C[(slice(None),) + tuple(sl)]
+        if s == 1:
+            n_fine += 1
+            pt = max(pt, float(np.abs(sub - A[b]).max()))
+        else:
+            V, _ = _leaf_volumes(head, blk, faces)
+            lm = (A[b] * V).sum((1, 2, 3)) / V.sum()
+            cm = sub.mean((1, 2, 3))              # unweighted: a plausibility bound only, the composite is a display
+            mean = max(mean, float((np.abs(lm - cm) / scale).max()))
+    return e_m, e_s, n_fine, pt, mean
+
+
+def check_leaves_consistent(outdir, cfg, tol):
+    """The leaf-wise dump holds the run's state: summed over the leaves it gives the mass and the scalar total the
+    code wrote itself, and where a composite dump exists the finest-level leaves equal it value for value (the
+    composite copies them) and the coarser ones agree with it in the mean (it interpolates them, for display)."""
+    idx = spdk_io.leaf_dump_indices(outdir)
+    if not idx:
+        return False, "no leaf dump written"
+    e_m, e_s, n_fine, pt, mean = _leaf_vs_composite(outdir, cfg, idx[-1])
+    ok = e_m < tol and (e_s is None or e_s < tol)
+    msg = f"leaf dump {idx[-1]}: mass off by {e_m:.2e}" + ("" if e_s is None else f", scalar by {e_s:.2e}")
+    if pt is not None:
+        ok = ok and n_fine > 0 and pt == 0.0 and mean < 5e-2
+        msg += f"; {n_fine} finest leaves differ from the composite by {pt:.1e}, coarser means by {mean:.1e} of the scale"
+    return ok, msg + f" (limit {tol:.0e})"
+
+
+def check_leaves_consistent_sensitive(outdir, cfg):
+    """Negative control: an EARLIER leaf dump (cfg['leaf_index']) against the composite named by cfg['field'] must
+    disagree on the finest leaves, or the comparison reads nothing."""
+    try:
+        e_m, e_s, n_fine, pt, mean = _leaf_vs_composite(outdir, cfg, cfg["leaf_index"])
+    except Exception as e:                          # a different block table is a disagreement too
+        return True, f"leaf dump {cfg['leaf_index']} does not even fit the later composite ({type(e).__name__})"
+    return (pt is not None and pt > 1e-6), f"earlier leaf dump against the later composite: pointwise difference {pt}"
+
+
+def check_no_composite(outdir, cfg):
+    """output/format=leaves writes no composite dump."""
+    n = len(glob.glob(os.path.join(outdir, "W_cv_N*")))
+    return n == 0, f"{n} composite W_cv dumps written (none expected under output/format=leaves)"
+
+
+def _cloud_moments(outdir, i, betas, cy, cz):
+    """The sixteen cloud_history quantities recomputed from leaf dump i (Pittard et al. 2009 eq. 20-24)."""
+    head, blocks, A, faces = spdk_io.load_leaves(outdir, i)
+    acc = np.zeros((2, 8))
+    for b, blk in enumerate(blocks):
+        V, c = _leaf_volumes(head, blk, faces)
+        X = c[0][None, None, :]
+        dy = (c[1][None, :, None] - cy) if head["ndim"] >= 2 else 0.0 * X
+        dz = (c[2][:, None, None] - cz) if head["ndim"] >= 3 else 0.0 * X
+        rho, vx, vy, vz, kap = A[b, 0], A[b, 1], A[b, 2], A[b, 3], A[b, NVAR]
+        r2 = dy * dy + dz * dz + 0.0 * rho
+        vr = np.where(r2 > 0.0, (vy * dy + vz * dz) / np.sqrt(np.where(r2 > 0.0, r2, 1.0)), 0.0)
+        w = kap * rho * V
+        Xb = X + 0.0 * rho
+        for g, beta in enumerate(betas):
+            m = kap >= beta
+            acc[g] += [w[m].sum(), np.broadcast_to(V, rho.shape)[m].sum(), (w * Xb)[m].sum(), (w * Xb * Xb)[m].sum(),
+                       (w * vx)[m].sum(), (w * vx * vx)[m].sum(), (w * r2)[m].sum(), (w * vr * vr)[m].sum()]
+    out = []
+    for q in acc:
+        m = q[0]
+        if m <= 0.0:
+            out += [0.0] * 8
+            continue
+        x, v = q[2] / m, q[4] / m
+        out += [m, m / q[1], x, v, np.sqrt(2.5 * q[6] / m), np.sqrt(max(5.0 * (q[3] / m - x * x), 0.0)),
+                np.sqrt(q[7] / m), np.sqrt(max(q[5] / m - v * v, 0.0))]
+    return np.array(out)
+
+
+def _cloud_history_error(outdir, cfg):
+    H = _columns_nocomment(os.path.join(outdir, "cloud_history.txt"))
+    idx = spdk_io.leaf_dump_indices(outdir)
+    if H is None or not idx:
+        return None, "cloud_history.txt or the leaf dumps are missing"
+    T = _columns(outdir, "mass.txt")[:, 0]
+    i = idx[-1]
+    row = H[np.argmin(np.abs(H[:, 1] - T[i]))]
+    if abs(row[1] - T[i]) > 1e-12 * max(abs(T[i]), 1.0):
+        return None, f"no history row at the dump time {T[i]}"
+    ref = _cloud_moments(outdir, i, cfg.get("hist_beta", (0.5, 0.2)), *cfg.get("hist_axis", (0.0, 0.0)))
+    got = row[5:21]
+    scale = np.maximum(np.abs(ref), 1e-3 * np.abs(ref).max())
+    return float((np.abs(got - ref) / scale).max()), f"{len(H)} rows; row at t = {row[1]:.4g}"
+
+
+def _columns_nocomment(path):
+    if not os.path.exists(path):
+        return None
+    return np.array([[float(x) for x in l.split()] for l in open(path) if l.strip() and not l.startswith("#")])
+
+
+def check_cloud_history(outdir, cfg, tol):
+    """The history row written at the last dump equals the same moments recomputed from that leaf dump."""
+    err, msg = _cloud_history_error(outdir, cfg)
+    if err is None:
+        return False, msg
+    return err < tol, f"{msg}: sixteen moments agree with the leaf dump to {err:.2e} (limit {tol:.0e})"
+
+
+def check_cloud_history_sensitive(outdir, cfg, floor):
+    """Negative control: the run used another threshold than the check assumes, so the two must DISAGREE."""
+    err, msg = _cloud_history_error(outdir, cfg)
+    if err is None:
+        return False, msg
+    return err > floor, f"{msg}: differs from the default-threshold moments by {err:.2e} (must exceed {floor:.0e})"
 
 
 def check_divb(stdout, limit=1e-11):
@@ -2331,6 +2576,16 @@ def main():
             elif chk == "golden_differs":
                 ok, msg = check_golden_differs(outdir, cfg,
                                                cfg.get("differs_floor", 1e-8))
+            elif chk == "leaves_consistent":
+                ok, msg = check_leaves_consistent(outdir, cfg, cfg.get("leaf_tol", 1e-12))
+            elif chk == "leaves_consistent_sensitive":
+                ok, msg = check_leaves_consistent_sensitive(outdir, cfg)
+            elif chk == "no_composite":
+                ok, msg = check_no_composite(outdir, cfg)
+            elif chk == "cloud_history":
+                ok, msg = check_cloud_history(outdir, cfg, cfg.get("hist_tol", 1e-10))
+            elif chk == "cloud_history_sensitive":
+                ok, msg = check_cloud_history_sensitive(outdir, cfg, cfg.get("hist_floor", 1e-3))
             elif chk == "leaves_at_most":
                 ok, msg = check_leaves_at_most(outdir, cfg)
             elif chk == "leaves_more_than":
@@ -2358,6 +2613,8 @@ def main():
                 ok, msg = False, (f"unknown check '{chk}' (known: "
                                   f"analytic, mass_strict, mixed_levels, divb, "
                                   f"cf_flux, cf_flux_sensitive, sl_flux_sensitive, "
+                                  f"leaves_consistent, leaves_consistent_sensitive, no_composite, "
+                                  f"cloud_history, cloud_history_sensitive, "
                                   f"leaves_at_most, leaves_more_than, "
                                   f"scalar_uniform, scalar_uniform_sensitive, scalar_mass, "
                                   f"scalar_bounds, scalar_bounds_sensitive, scalar_analytic, "

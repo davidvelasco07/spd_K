@@ -65,6 +65,10 @@ problem = sine_wave
 | Parameter | Default | Description |
 |---|---|---|
 | `dt` | (none) | Output interval; **must be present and positive** to enable file I/O |
+| `format` | `composite` | What a mesh run dumps (`<meshblock>` or AMR). `composite`: `W_cv` prolonged onto the finest uniform grid, one array for the whole box, which is also held as a device array (44 GB for the shock-cloud box at 32 points per radius). `leaves`: every leaf's own active cells in the order of `amr_blocks_<n>.txt` (`leaves_cv_N<NB>p<p>_<n>_0.dat`, shape `(nblocks, nvar, NBz, NBy, NBx, nz, ny, nx)`, plus `leaf_faces_p<p>_0.dat` with the sub-cell faces of the unit element), no composite array at all. `both` writes the two |
+| `precision` | `double` | `single` writes the leaf dump in float32 (`.f32`) |
+| `hist_dt` | `0` | `> 0`: a row of `cloud_history.txt` every `hist_dt` of simulated time and at every dump, never truncating a step: the moments of the material marked by passive scalar 0 in the definitions of Pittard et al. (2009, eq. 20–24): for each threshold, `m = ∫ κρ dV` over `κ ≥ β`, `⟨ρ⟩ = m/V`, `⟨x⟩`, `⟨v_x⟩`, `a = [5/2 ⟨r²⟩]^½` about the axis `(cy, cz)`, `c = [5(⟨x²⟩−⟨x⟩²)]^½`, `δv_r`, `δv_x`; with the step, time, leaf count, mass and scalar total. Needs `system=hydro`, `nscalars ≥ 1` and a mesh run |
+| `hist_beta_core`, `hist_beta_cloud` | `0.5`, `2/χ` for `shock_cloud` (else `0.1`) | The two concentration thresholds of the history |
 
 ### `<hydro>`
 
@@ -184,6 +188,8 @@ When outputs are enabled, the run directory (default `output/`, or
 
 - `W_cv_N{N}p{p}_{n}_0.dat` — CV-averaged primitives (hydro: `rho, vx, vy, vz, p`, then one concentration per passive scalar; mhd: 8 vars)
 - `mass.txt` — time and total mass at every output; `scalar.txt` — time and the total `∫ rho s_n dV` of each passive scalar (only with `hydro/nscalars > 0`)
+- `leaves_cv_N{NB}p{p}_{n}_0.dat` (`.f32`), `leaf_faces_p{p}_0.dat` — the leaf-wise dump (`output/format=leaves|both`); `tests/spdk_io.py: load_leaves, leaf_edges` read it
+- `cloud_history.txt` — the scalar-marked material's moments (`output/hist_dt > 0`); lines starting with `#` give the definitions and, for `shock_cloud`, `χ`, `v_b`, `t_cc` and `t_0`
 - `B2_cv_N{N}p{p}_{n}_0.dat` — CV-averaged magnetic field (induction, mhd)
 - `troubles_N*_{n}_0.dat` — FV trouble flags (when fallback is on)
 - `cascade_N*_{n}_0.dat` — per-cell MOOD cascade level (mhd with fallback)
