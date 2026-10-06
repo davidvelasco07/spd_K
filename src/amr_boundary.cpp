@@ -203,6 +203,31 @@ static void mirror_face_to_ghost(SD_Solution U, int dim, int side, bool reflect=
     });
 }
 
+//Far-field boundary on the flux-point lattice (define.hpp _farfield_): the ghost interface point takes the
+//problem's exterior state at its x and the current time, so the Riemann solve at the face is interior against
+//exterior. For a face normal to x the point sits on the face itself (x = 0 or the box length); on the other faces
+//its x is the block's own coordinate, ghost elements included, which is what makes the edges consistent.
+static void farfield_face_to_ghost(SD_Solution U, int dim, int side, int ib){
+    Matrix xc = (*g_bc_geom[_x_])[ib].sd_centers;
+    const double xL = g_bc_box[_x_], t = g_bc_time, gm = cfg.gamma;
+    const ProblemParams pp = cfg.pp;
+    int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
+    int n = (dim==_x_ ? U.nx : (dim==_y_ ? U.ny : U.nz));
+    int nader=U.n_ader, nvar=U.n_var;
+    int Nx=U.Nx, Ny=U.Ny, Nz=U.Nz;
+    int px=U.nx, py=U.ny, pz=U.nz;
+    sd_for_cells(Nz,Ny,Nx,pz,py,px, KOKKOS_LAMBDA(int k, int j, int i, int kk, int jj, int ii){
+        const double x = (dim==_x_) ? (side==0 ? 0.0 : xL) : xc(i,ii);
+        for(int t_id=0; t_id<nader; t_id++){
+        for(int var=0; var<nvar; var++){
+        int Nid[3], nid[3];
+        if(side==0) amr_indices(Nid,nid,k,j,i,kk,jj,ii,0,n-1,dim);
+        else        amr_indices(Nid,nid,k,j,i,kk,jj,ii,N-1,0,dim);
+        U.Vector(INDICES) = shock_cloud_exterior_cons(var, x, t, pp, gm);
+        }}
+    });
+}
+
 //Double-Mach boundary on the flux-point lattice (dmr.hpp): left = post-shock
 //inflow, right = outflow copy, bottom = post-shock for x < 1/6 and reflecting
 //wall beyond, top = post-shock behind the exact moving shock and undisturbed
@@ -317,6 +342,7 @@ void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
     else if(bc == _reflective_) mirror_face_to_ghost(U, dim, side, true);
     else if(bc == _dmr_)        dmr_face_to_ghost(U, dim, side, ib);
     else if(bc == _inflow_)     jet_face_to_ghost(U, dim, side, ib);
+    else if(bc == _farfield_)   farfield_face_to_ghost(U, dim, side, ib);
 }
 
 //FV counterpart: fill a block's ghost slab at a physical domain boundary.
@@ -334,15 +360,15 @@ void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
 //whose physical-boundary blocks end up here.
 void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
     const int bc = cfg.bc[dim];
-    if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_ && bc != _outflow_ && bc != _inflow_) return;
+    if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_ && bc != _outflow_ && bc != _inflow_ && bc != _farfield_) return;
     const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     const int nvar = U.n_var;
     const int Nx = (dim==_x_ ? ngh : U.Nx);
     const int Ny = (dim==_y_ ? ngh : U.Ny);
     const int Nz = (dim==_z_ ? ngh : U.Nz);
     const bool state = nvar > 1;
-    Vector xc; const double yL = g_bc_box[_y_];   //domain height (see dmr_face_to_ghost)
-    if(bc == _dmr_) xc = (*g_bc_geom[_x_])[ib].fv_centers;
+    Vector xc; const double yL = g_bc_box[_y_], xL = g_bc_box[_x_];   //domain height (see dmr_face_to_ghost)
+    if(bc == _dmr_ || bc == _farfield_) xc = (*g_bc_geom[_x_])[ib].fv_centers;
     //_inflow_ (the jet): the transverse position of cell j is the midpoint of its faces, as in the single-block
     //ha_jet_fill_inflow_fv; only the low x face injects, everything else is the outflow copy.
     Vector fy; const bool inject = (bc == _inflow_ && dim == _x_ && side == 0);
@@ -353,9 +379,10 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
     const bool shock_cloud = (cfg.problem == _ic_shock_cloud_);
     fv_for_cells(Nz,Ny,Nx, KOKKOS_LAMBDA(int k, int j, int i){
         const int l  = (dim==_x_ ? i : (dim==_y_ ? j : k));
-        //0 copy, 1 mirror, 2 post-shock, 3 undisturbed, 4 jet inflow
+        //0 copy, 1 mirror, 2 post-shock, 3 undisturbed, 4 jet inflow, 5 far field (shock_cloud.hpp)
         int mode = 0;
         if(inject && state) mode = 4;
+        if(bc == _farfield_ && state) mode = 5;
         if(bc == _reflective_) mode = 1;
         else if(bc == _dmr_){
             if(dim==_x_) mode = (side==0) ? 2 : 0;
@@ -380,6 +407,7 @@ void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
             else if(mode==3) v = dmr_cons(false, var, gm);
             else if(mode==4){ double u; if(shock_cloud) v = shock_cloud_inflow_cons(var, pp, gm);
                               else if(jet_inflow_cons(var, y, pp, outside, gm, u)) v = u; }
+            else if(mode==5) v = shock_cloud_exterior_cons(var, (dim==_x_) ? (side==0 ? 0.0 : xL) : xc(i), t, pp, gm);
             U.Vector(var,Ndst[_z_],Ndst[_y_],Ndst[_x_]) = v;
         }
     }, "apply_domain_bc_fv");

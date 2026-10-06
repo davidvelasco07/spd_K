@@ -13,6 +13,7 @@ int bc_id(const string &name){
     if(name == "outflow")    return _outflow_;    //gradfree + no re-entry
     if(name == "inflow")     return _inflow_;
     if(name == "doublemach") return _dmr_;      //Woodward & Colella DMR, blocks only
+    if(name == "farfield")   return _farfield_; //exterior state + Riemann flux; problem = shock_cloud, blocks only
     cout<<"ERROR: unknown boundary type '"<<name<<"'"<<endl;
     exit(1);
 }
@@ -870,10 +871,11 @@ int main(int argc, char** argv){
                                             cfg.bc[d]==_outflow_)) continue;
                 if(system_name=="hydro" && cfg.bc[d]==_inflow_ && d==_x_
                    && (cfg.problem==_ic_ha_jet_ || cfg.problem==_ic_shock_cloud_)) continue;
+                if(system_name=="hydro" && cfg.bc[d]==_farfield_ && cfg.problem==_ic_shock_cloud_) continue;
                 if(Master)
                     cout<<"ERROR: meshblocks/AMR support periodic and gradfree boundaries, "
-                        <<"plus reflective, doublemach and outflow for hydro, and inflow on x1 for "
-                        <<"problem = ha_jet, but x"<<(d+1)
+                        <<"plus reflective, doublemach and outflow for hydro, inflow on x1 for "
+                        <<"problem = ha_jet|shock_cloud and farfield for problem = shock_cloud, but x"<<(d+1)
                         <<"_bc is none of those for system "<<system_name<<"."<<endl;
                 exit(1);
             }
@@ -906,11 +908,16 @@ int main(int argc, char** argv){
 
         if(!use_mesh)
             for(int d=0; d<3; d++)
-                if(cfg.active[d] && cfg.bc[d]==_dmr_){
-                    if(Master) cout<<"ERROR: x"<<(d+1)<<"_bc=doublemach is implemented on the "
-                                   <<"block path only: add a <meshblock> block."<<endl;
+                if(cfg.active[d] && (cfg.bc[d]==_dmr_ || cfg.bc[d]==_farfield_)){
+                    if(Master) cout<<"ERROR: x"<<(d+1)<<"_bc="<<(cfg.bc[d]==_dmr_ ? "doublemach" : "farfield")
+                                   <<" is implemented on the block path only: add a <meshblock> block."<<endl;
                     exit(1);
                 }
+        for(int d=0; d<3; d++)
+            if(cfg.active[d] && cfg.bc[d]==_farfield_ && cfg.problem!=_ic_shock_cloud_){
+                if(Master) cout<<"ERROR: x"<<(d+1)<<"_bc=farfield is defined for problem = shock_cloud only"<<endl;
+                exit(1);
+            }
 
         if(Master){
             cout<<"system = "<<system_name<<", ndim = "<<cfg.ndim
