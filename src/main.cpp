@@ -402,6 +402,21 @@ int main(int argc, char** argv){
         cfg.bc[_x_]  = bc_id(pin.GetOrAddString("mesh","x1_bc","periodic"));
         cfg.bc[_y_]  = bc_id(pin.GetOrAddString("mesh","x2_bc","periodic"));
         cfg.bc[_z_]  = bc_id(pin.GetOrAddString("mesh","x3_bc","periodic"));
+        //per-face overrides, read only when present so that a deck without them records nothing new
+        bool face_override = false;
+        for(int d=0; d<3; d++){
+            const std::string in = "ix" + std::to_string(d+1) + "_bc", out = "ox" + std::to_string(d+1) + "_bc";
+            cfg.bc_face[d][0] = cfg.bc_face[d][1] = cfg.bc[d];
+            if(pin.DoesParameterExist("mesh", in))  { cfg.bc_face[d][0] = bc_id(pin.GetString("mesh", in));  face_override = true; }
+            if(pin.DoesParameterExist("mesh", out)) { cfg.bc_face[d][1] = bc_id(pin.GetString("mesh", out)); face_override = true; }
+            if((cfg.bc_face[d][0]==_periodic_) != (cfg.bc_face[d][1]==_periodic_)){
+                if(Master) cout<<"ERROR: x"<<(d+1)<<": a periodic face needs a periodic partner (ix"<<(d+1)
+                               <<"_bc / ox"<<(d+1)<<"_bc)"<<endl;
+                exit(1);
+            }
+            //the forest reads periodicity from bc[d]: periodic only when both faces are
+            if(cfg.bc_face[d][0]!=_periodic_ && cfg.bc[d]==_periodic_) cfg.bc[d] = cfg.bc_face[d][0];
+        }
 
         cfg.adapt_interval = pin.GetOrAddInteger("amr","adapt_interval",0);
         cfg.amr_max_level  = pin.GetOrAddInteger("amr","max_level",0);
@@ -864,14 +879,14 @@ int main(int argc, char** argv){
             //which the forest path does not have; keep refusing them.
             //Hydro also has the jet's boundaries there (5 Oct 2026): outflow on any face, and the
             //prescribed inflow of problem = ha_jet on x1 (jet_face_to_ghost / apply_domain_bc_fv).
-            for(int d=0; d<3; d++){
+            for(int d=0; d<3; d++) for(int side=0; side<2; side++){
                 if(!cfg.active[d]) continue;
-                if(cfg.bc[d]==_periodic_ || cfg.bc[d]==_gradfree_) continue;
-                if(system_name=="hydro" && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
-                                            cfg.bc[d]==_outflow_)) continue;
-                if(system_name=="hydro" && cfg.bc[d]==_inflow_ && d==_x_
+                const int bcf = cfg.bc_face[d][side];
+                if(bcf==_periodic_ || bcf==_gradfree_) continue;
+                if(system_name=="hydro" && (bcf==_reflective_ || bcf==_dmr_ || bcf==_outflow_)) continue;
+                if(system_name=="hydro" && bcf==_inflow_ && d==_x_
                    && (cfg.problem==_ic_ha_jet_ || cfg.problem==_ic_shock_cloud_)) continue;
-                if(system_name=="hydro" && cfg.bc[d]==_farfield_ && cfg.problem==_ic_shock_cloud_) continue;
+                if(system_name=="hydro" && bcf==_farfield_ && cfg.problem==_ic_shock_cloud_) continue;
                 if(Master)
                     cout<<"ERROR: meshblocks/AMR support periodic and gradfree boundaries, "
                         <<"plus reflective, doublemach and outflow for hydro, inflow on x1 for "
@@ -906,6 +921,14 @@ int main(int argc, char** argv){
             }
         }
 
+        if(!use_mesh && face_override){
+            if(Master) cout<<"ERROR: mesh/ix*_bc and ox*_bc are implemented on the block path only: add a <meshblock> block."<<endl;
+            exit(1);
+        }
+        if(face_override && system_name!="hydro"){
+            if(Master) cout<<"ERROR: mesh/ix*_bc and ox*_bc are implemented for hydro only."<<endl;
+            exit(1);
+        }
         if(!use_mesh)
             for(int d=0; d<3; d++)
                 if(cfg.active[d] && (cfg.bc[d]==_dmr_ || cfg.bc[d]==_farfield_)){
@@ -914,7 +937,7 @@ int main(int argc, char** argv){
                     exit(1);
                 }
         for(int d=0; d<3; d++)
-            if(cfg.active[d] && cfg.bc[d]==_farfield_ && cfg.problem!=_ic_shock_cloud_){
+            if(cfg.active[d] && (cfg.bc_face[d][0]==_farfield_ || cfg.bc_face[d][1]==_farfield_) && cfg.problem!=_ic_shock_cloud_){
                 if(Master) cout<<"ERROR: x"<<(d+1)<<"_bc=farfield is defined for problem = shock_cloud only"<<endl;
                 exit(1);
             }

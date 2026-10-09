@@ -51,6 +51,7 @@ problem = sine_wave
 | `nx1`, `nx2`, `nx3` | `8` | Global element counts (set to `1` to deactivate a direction) |
 | `x1len`, `x2len`, `x3len` | `1.0` | Box lengths in each direction |
 | `x1_bc`, `x2_bc`, `x3_bc` | `periodic` | `periodic`, `gradfree`, `reflective`, `outflow`, `inflow` (prescribed on the low x face of `ha_jet` / `shock_cloud`), `doublemach` and `farfield` (blocks only, see below) |
+| `ix1_bc`, `ox1_bc`, ... `ox3_bc` | the direction's `x?_bc` | the type of ONE face, inner (low) or outer (high), overriding `x?_bc` there; hydro on the block path only; a periodic face needs a periodic partner. A symmetry plane is `ix2_bc = reflective` with the problem's centre on that face |
 
 ### `<time>`
 
@@ -151,8 +152,13 @@ SD scheme**: a box of gas at rest seeded with a 1e-6 density bump departs from r
 (p = 2 reaches 4e-8, p = 1 stays at round-off; 1D, 2D and 3D alike, with or without the
 fallback, LLF or HLLC), while `periodic`, `reflective` and `farfield` hold it at 1e-13
 (`tests/run_tests.py` `hydro_shock_cloud_farfield_quiet_2d` and its gradfree control).
-The shock-cloud deck uses `farfield` on every face. MHD walls under blocks are still
-refused.
+The shock-cloud deck uses `farfield` on every face. A quarter domain of the same problem puts
+the cloud on the edge where two symmetry planes meet: `problem/cy=0 problem/cz=0` with `mesh/ix2_bc=reflective
+mesh/ix3_bc=reflective`, the other faces far field, at a quarter of the cost; with MUSCL--Hancock and no detector it
+reproduces its quadrant of the full box to round-off in 2D and 3D, with refinement (suite lanes
+`hydro_shock_cloud_mirror_*`). With the cascade live the two differ by threshold flips (rule 7b), and a symmetry
+plane suppresses every mode that crosses it, so a quarter-domain result needs a full-domain check of the quantity
+measured. MHD walls under blocks are still refused.
 
 New problems: `woodward_colella` (1D interacting blasts, `inputs/woodward_colella.athinput`;
 refine on `pressure`, the density is uniform at t=0) and `double_mach`

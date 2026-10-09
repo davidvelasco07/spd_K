@@ -97,6 +97,10 @@ struct RunConfig {
     double pfloor = -1.0;                //ctoprim pressure floor; <0 derives the
                                          //RAMSES smallp from dfloor
     int bc[3] = {0, 0, 0};               //boundary type per direction
+    //Per FACE (low, high) of each direction: mesh/ix1_bc and mesh/ox1_bc (Athena++'s names) override x1_bc on one face,
+    //block path only, e.g. a symmetry plane: ix2_bc = reflective with ox2_bc = farfield (8 Oct 2026, the quarter-domain
+    //shock-cloud runs). Equal to bc[d] on both faces unless set; a periodic face needs a periodic partner.
+    int bc_face[3][2] = {{0, 0}, {0, 0}, {0, 0}};
     int integrator = _integrator_ader_;  //time integrator (ADER or SSP-RK)
     int rk_order = 3;                    //SSP-RK order (1, 2 or 3)
     int nlim = -1;                       //step cap (-1 = unlimited). Bounds a

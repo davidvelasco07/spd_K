@@ -336,7 +336,7 @@ static void jet_face_to_ghost(SD_Solution U, int dim, int side, int ib){
 }
 
 void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
-    const int bc = cfg.bc[dim];
+    const int bc = cfg.bc_face[dim][side];   //per face (mesh/ix*_bc, ox*_bc); = bc[dim] unless overridden
     if(bc == _gradfree_)        mirror_face_to_ghost(U, dim, side, false);
     else if(bc == _outflow_)    mirror_face_to_ghost(U, dim, side, false);   //the same copy, boundary.cpp
     else if(bc == _reflective_) mirror_face_to_ghost(U, dim, side, true);
@@ -359,7 +359,7 @@ void apply_domain_bc_fp(SD_Solution U, int dim, int side, int ib){
 //sees a wall: Mesh routes any run with one through the forest/table exchange,
 //whose physical-boundary blocks end up here.
 void apply_domain_bc_fv(FV_Solution U, int dim, int side, int ngh, int ib){
-    const int bc = cfg.bc[dim];
+    const int bc = cfg.bc_face[dim][side];   //per face (mesh/ix*_bc, ox*_bc); = bc[dim] unless overridden
     if(bc != _gradfree_ && bc != _reflective_ && bc != _dmr_ && bc != _outflow_ && bc != _inflow_ && bc != _farfield_) return;
     const int N = (dim==_x_ ? U.Nx : (dim==_y_ ? U.Ny : U.Nz));
     const int nvar = U.n_var;
