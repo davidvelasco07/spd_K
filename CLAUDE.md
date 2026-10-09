@@ -344,7 +344,11 @@ double-Mach problem, neither by the periodic suite:
 **Walls on the block path exist now (hydro only):** `reflective` and `doublemach`
 are filled by `apply_domain_bc_fp/fv`, and any run with one is routed through
 the forest/table exchange (`Mesh::forest_route()`), whose physical-boundary
-blocks are the only place walls are implemented. The gate is
+blocks are the only place walls are implemented. Each FACE can take its own type
+(`mesh/ix1_bc`, `ox1_bc`, ...; `cfg.bc_face[d][side]`, read by `apply_domain_bc_fp/fv` and `wall_bc()`; `cfg.bc[d]`
+stays the direction's default and the forest's periodicity flag). A symmetry plane is `ix2_bc = reflective`: the
+quarter-domain shock cloud reproduces its quadrant of the full box to 2e-12 in 3D with MUSCL-Hancock and no detector
+(`hydro_shock_cloud_mirror_*` in 2D, with a control). The gate is
 `hydro_implosion_muscl_mb_2d`: 4x4 blocks against the single block at 1e-12
 (measured 9.9e-16). The p=3 version carries no golden ON PURPOSE: with the
 cascade live, single-block and multiblock differ by threshold flips on this
