@@ -1642,6 +1642,45 @@ CONFIGS = {
         "t_end": 0.967,
         "inflow_tol": 1e-3,
     },
+    # ---- Per-face boundaries: a symmetry plane (mesh/ix2_bc=reflective) through the cloud centre ----------------
+    # The half box y in [0, 4] with the cloud on its reflecting low face must reproduce the upper half of the full box
+    # y in [0, 8] (cloud at y = 4, far field on every face) to round-off: MUSCL-Hancock without a detector (rule 6b, a
+    # wall gate needs a lane without one), one level of refinement. Measured 8 Oct 2026: 6e-13 in pressure (~125 there)
+    # with and without the level, against O(100) for the control, the same half box with far field on both y faces.
+    # The full lane must run first (the check reads its output).
+    "hydro_shock_cloud_mirror_full_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=64", "mesh/x1len=16", "mesh/nx2=32", "mesh/x2len=8", "mesh/nx3=1",
+                      "meshblock/nx1=8", "meshblock/nx2=8", "meshblock/nx3=1", "problem/cx=5", "problem/cy=4",
+                      "mesh/p=0", "job/scheme=vl2", "time/integrator=rk1", "time/cfl=0.4", "job/fallback=false",
+                      "amr/max_level=1", "time/tlim=0.4", "output/dt=0.2", "output/format=leaves", "output/hist_dt=-1"],
+        "ndim": 2,
+        "checks": ["mixed_levels"],
+        "t_end": 0.4,
+    },
+    "hydro_shock_cloud_mirror_half_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=64", "mesh/x1len=16", "mesh/nx2=16", "mesh/x2len=4", "mesh/nx3=1",
+                      "meshblock/nx1=8", "meshblock/nx2=8", "meshblock/nx3=1", "problem/cx=5", "problem/cy=0",
+                      "mesh/p=0", "job/scheme=vl2", "time/integrator=rk1", "time/cfl=0.4", "job/fallback=false",
+                      "amr/max_level=1", "time/tlim=0.4", "output/dt=0.2", "output/format=leaves", "output/hist_dt=-1",
+                      "mesh/ix2_bc=reflective"],
+        "ndim": 2,
+        "checks": ["mixed_levels", "mirror_match"],
+        "t_end": 0.4,
+        "mirror_of": "hydro_shock_cloud_mirror_full_2d", "mirror_shift_y": 4.0, "mirror_tol": 1e-10,
+    },
+    "hydro_shock_cloud_mirror_ctl_sensitive_2d": {
+        "input": "inputs/shock_cloud.athinput",
+        "overrides": ["mesh/nx1=64", "mesh/x1len=16", "mesh/nx2=16", "mesh/x2len=4", "mesh/nx3=1",
+                      "meshblock/nx1=8", "meshblock/nx2=8", "meshblock/nx3=1", "problem/cx=5", "problem/cy=0",
+                      "mesh/p=0", "job/scheme=vl2", "time/integrator=rk1", "time/cfl=0.4", "job/fallback=false",
+                      "amr/max_level=1", "time/tlim=0.4", "output/dt=0.2", "output/format=leaves", "output/hist_dt=-1"],
+        "ndim": 2,
+        "checks": ["mirror_match_sensitive"],
+        "t_end": 0.4,
+        "mirror_of": "hydro_shock_cloud_mirror_full_2d", "mirror_shift_y": 4.0, "mirror_floor": 1.0,
+    },
     # ---- The zero-gradient boundary is unstable for the SD scheme; the far-field one is not --------------------
     # A box of gas at rest (the shock parked 1000 radii upstream) seeded with a 1e-6 density bump at the centre and
     # nothing else, p = 3, to t = 12 (sound crossings: 12). Measured 6 Oct 2026 in 2D: with gradfree faces the
@@ -2178,6 +2217,41 @@ def check_inflow_state_sensitive(outdir, cfg, floor):
     return d > floor, f"{msg}: departure {d:.2e} (must exceed {floor:.0e})"
 
 
+def _mirror_difference(outdir, cfg):
+    """Largest difference, over every variable and cell, between the last leaf dump of this run and the leaves of the
+    run cfg['mirror_of'] (same suite invocation) shifted by cfg['mirror_shift_y'] in y; None if a leaf of this run has
+    no partner of the same level and position there (the meshes differ)."""
+    ref = os.path.join(os.path.dirname(outdir), cfg["mirror_of"])
+    if not spdk_io.leaf_dump_indices(ref):
+        return None, f"no leaf dump in {cfg['mirror_of']} (run it in the same invocation, first)"
+    def last(d):
+        i = spdk_io.leaf_dump_indices(d)[-1]; head, blocks, A, faces = spdk_io.load_leaves(d, i); return i, blocks, A
+    i, bf, Af = last(ref); j, bh, Ah = last(outdir)
+    key = {(round(b[5], 9), round(b[7], 9), int(b[1])): k for k, b in enumerate(bf)}
+    dy = cfg["mirror_shift_y"]; d = 0.0
+    for k, b in enumerate(bh):
+        kk = key.get((round(b[5], 9), round(b[7] + dy, 9), int(b[1])))
+        if kk is None:
+            return None, f"leaf {k} (level {int(b[1])}, x0 {b[5]:g}, y0 {b[7]:g}) has no partner in {cfg['mirror_of']}"
+        d = max(d, float(np.abs(Ah[k] - Af[kk]).max()))
+    return d, f"dump {j} against {cfg['mirror_of']} dump {i}, {len(bh)} leaves"
+
+
+def check_mirror_match(outdir, cfg, tol):
+    d, msg = _mirror_difference(outdir, cfg)
+    if d is None:
+        return False, msg
+    return d < tol, f"{msg}: max |difference| {d:.2e} (limit {tol:.0e})"
+
+
+def check_mirror_match_sensitive(outdir, cfg, floor):
+    """Negative control: without the symmetry plane the half box must NOT reproduce the full box."""
+    d, msg = _mirror_difference(outdir, cfg)
+    if d is None:
+        return True, f"{msg} (the meshes differ: the control differs)"
+    return d > floor, f"{msg}: max |difference| {d:.2e} (must exceed {floor:.0e})"
+
+
 def _quiet_box_departure(outdir, cfg):
     """Largest departure of the pressure from 1 and of the velocity from 0 over every leaf of the LAST leaf dump
     (the box holds gas at rest at unit pressure; only the 1e-6 density bump is seeded)."""
@@ -2699,6 +2773,10 @@ def main():
                 ok, msg = check_inflow_state(outdir, cfg, cfg.get("inflow_tol", 1e-3))
             elif chk == "inflow_state_sensitive":
                 ok, msg = check_inflow_state_sensitive(outdir, cfg, cfg.get("inflow_floor", 1e-2))
+            elif chk == "mirror_match":
+                ok, msg = check_mirror_match(outdir, cfg, cfg.get("mirror_tol", 1e-10))
+            elif chk == "mirror_match_sensitive":
+                ok, msg = check_mirror_match_sensitive(outdir, cfg, cfg.get("mirror_floor", 1.0))
             elif chk == "quiet_box":
                 ok, msg = check_quiet_box(outdir, cfg, cfg.get("quiet_tol", 1e-11))
             elif chk == "quiet_box_sensitive":

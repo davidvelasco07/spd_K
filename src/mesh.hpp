@@ -826,10 +826,9 @@ struct Mesh : public PhysicsModule {
     //the fast path would label them periodic and wrap the nozzle round.
     static bool wall_bc(){
         static const bool v = [](){
+            auto wall = [](int b){ return b==_reflective_ || b==_dmr_ || b==_inflow_ || b==_outflow_ || b==_farfield_; };
             for(int d=0; d<3; d++)
-                if(cfg.active[d] && (cfg.bc[d]==_reflective_ || cfg.bc[d]==_dmr_ ||
-                                     cfg.bc[d]==_inflow_ || cfg.bc[d]==_outflow_ ||
-                                     cfg.bc[d]==_farfield_)) return true;
+                if(cfg.active[d] && (wall(cfg.bc_face[d][0]) || wall(cfg.bc_face[d][1]))) return true;
             return false;
         }();
         return v;
